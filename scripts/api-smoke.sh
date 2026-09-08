@@ -229,7 +229,63 @@ check "re-enable 200" "$(tail -n1 <<<"$body_code")" "200"
 check "enabled state returned" "$(head -n1 <<<"$body_code" | jq -r .enabled)" "true"
 
 # ---------------------------------------------------------------------------
-# 7. Delete + logout
+# 7. Site configuration (GitLab-only repos)
+# ---------------------------------------------------------------------------
+echo "== site configuration =="
+
+body_code=$(req GET /api/site-config)
+check "get site config 200" "$(tail -n1 <<<"$body_code")" "200"
+
+body_code=$(req PUT /api/site-config '{"codeRepo":"","testInputRepo":"","testRepoRef":""}')
+check "config empty fields 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(req PUT /api/site-config \
+  '{"codeRepo":"https://github.com/g/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":"main"}')
+check "config rejects github repo 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(req PUT /api/site-config \
+  '{"codeRepo":"https://gitlab.com/g/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":""}')
+check "config empty ref 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(req PUT /api/site-config \
+  '{"codeRepo":"https://gitlab.com/group/code","testInputRepo":"https://gitlab.com/group/test-inputs","testRepoRef":"main"}')
+check "config update 200" "$(tail -n1 <<<"$body_code")" "200"
+check "config update persisted ref" \
+  "$(head -n1 <<<"$body_code" | jq -r .testRepoRef)" "main"
+
+body_code=$(req GET /api/site-config)
+check "config re-read persists" \
+  "$(head -n1 <<<"$body_code" | jq -r .codeRepo)" "https://gitlab.com/group/code"
+
+# ---------------------------------------------------------------------------
+# 8. GitLab webhook
+# ---------------------------------------------------------------------------
+echo "== gitlab webhook =="
+
+body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -H 'X-Gitlab-Event: Push Hook' \
+  -d '{"object_kind":"push","project":{"path_with_namespace":"group/md-code"},"ref":"refs/heads/main","after":"abc123","user_name":"smoke"}' \
+  "$BASE_URL/api/webhooks/gitlab")
+check "webhook push 200" "$(tail -n1 <<<"$body_code")" "200"
+check "webhook push status received" \
+  "$(head -n1 <<<"$body_code" | jq -r .status)" "received"
+check "webhook push ref extracted" \
+  "$(head -n1 <<<"$body_code" | jq -r .ref)" "main"
+
+body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -d '{"object_kind":"pipeline"}' "$BASE_URL/api/webhooks/gitlab")
+check "webhook other event ignored" \
+  "$(head -n1 <<<"$body_code" | jq -r .status)" "ignored"
+
+body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -d '{not-json' "$BASE_URL/api/webhooks/gitlab")
+check "webhook bad json 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(curl -s -w '\n%{http_code}' "$BASE_URL/api/webhooks/gitlab")
+check "webhook GET 405" "$(tail -n1 <<<"$body_code")" "405"
+
+# ---------------------------------------------------------------------------
+# 9. Delete + logout
 # ---------------------------------------------------------------------------
 echo "== delete and logout =="
 

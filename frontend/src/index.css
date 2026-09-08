@@ -443,11 +443,23 @@ pre.output {
   border-color: #f5c6cb;
 }
 
+.alert-warning {
+  color: #7a5d00;
+  background-color: #fff3cd;
+  border-color: #ffeeba;
+}
+
 @media (prefers-color-scheme: dark) {
   .alert-danger {
     color: #000;
     background-color: #efa3aa;
     border-color: #ed9ba3;
+  }
+
+  .alert-warning {
+    color: #000;
+    background-color: #ffdf7e;
+    border-color: #ffd970;
   }
 }
 

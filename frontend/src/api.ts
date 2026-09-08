@@ -118,3 +118,23 @@ export async function execScript(
     body: JSON.stringify({ language, script }),
   })
 }
+
+export interface SiteConfig {
+  codeRepo: string
+  testInputRepo: string
+  testRepoRef: string
+  updatedAt: string
+}
+
+export async function getSiteConfig(): Promise<SiteConfig> {
+  return api<SiteConfig>('/api/site-config')
+}
+
+export async function updateSiteConfig(
+  input: Omit<SiteConfig, 'updatedAt'>,
+): Promise<SiteConfig> {
+  return api<SiteConfig>('/api/site-config', {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+}

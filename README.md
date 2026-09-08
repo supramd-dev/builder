@@ -19,7 +19,7 @@ md-builder/
 │   ├── main.go            # entrypoint; subcommand dispatch + HTTP server
 │   ├── adduser.go         # CLI: create a user
 │   ├── terminal.go         # read password from TTY without echo
-│   ├── store/             # GORM models + queries (users, sessions, environments)
+│   ├── store/             # GORM models + queries (users, sessions, environments, site config)
 │   ├── auth/               # bcrypt hashing + session tokens
 │   ├── api/                # HTTP handlers (auth + environments)
 │   ├── sshcheck/           # SSH connectivity test package
@@ -29,6 +29,7 @@ md-builder/
     ├── src/LoginPage.tsx  # static login page
     ├── src/UserCenter.tsx # environment management dashboard
     ├── src/RunPage.tsx    # remote command/script execution (Monaco editor)
+    ├── src/SettingsPage.tsx # site config: repos, branch/commit, GitLab notice
     ├── src/EnvironmentForm.tsx # create/edit environment form
     ├── src/api.ts         # typed API client
     ├── src/index.css      # hand-written sourcehut-style CSS
@@ -102,6 +103,32 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
+| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `testInputRepo`, `testRepoRef`) |
+| PUT    | `/api/site-config`              | Update site configuration                     |
+| POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (push events)         |
+
+### Site configuration
+
+Logged-in users configure the two repositories the platform tests against:
+
+- **Code repository** — the code under test (not tied to a specific domain)
+- **Test input repository** — the inputs used to exercise the code, tested
+  at the configured **branch or commit id**
+
+Both repository locations are expected to be **GitLab** repositories
+(gitlab.com or a self-hosted instance) — no other platform is supported yet.
+The settings page in the UI states this prominently. Locations are not
+host-validated at the API level, since self-hosted GitLab instances live on
+arbitrary hosts.
+
+### GitLab webhooks
+
+Point a GitLab project webhook at `POST /api/webhooks/gitlab` with the
+*Push events* trigger. Push events are received, logged server-side and
+acknowledged with the extracted project/ref; other event types are
+acknowledged with `status: ignored`. Automatic test runs from webhooks are
+future work. The endpoint is unauthenticated (called by the GitLab server);
+verify the `X-Gitlab-Token` header once a secret is configured.
 
 Sessions are stored in the database as random 64-char hex tokens and expire
 after 7 days. Passwords are hashed with bcrypt (cost 12).

@@ -4,8 +4,9 @@ import { api, type Me } from './api'
 import LoginPage from './LoginPage'
 import UserCenter from './UserCenter'
 import RunPage from './RunPage'
+import SettingsPage from './SettingsPage'
 
-type View = 'environments' | 'run'
+type View = 'environments' | 'run' | 'settings'
 
 function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -59,6 +60,16 @@ function App() {
             >
               Run command
             </a>
+            <a
+              href="#"
+              className={view === 'settings' ? 'active' : ''}
+              onClick={(e) => {
+                e.preventDefault()
+                setView('settings')
+              }}
+            >
+              Settings
+            </a>
           </nav>
         )}
         <div className="navbar-text">
@@ -87,6 +98,8 @@ function App() {
         ) : me ? (
           view === 'run' ? (
             <RunPage onError={console.warn} />
+          ) : view === 'settings' ? (
+            <SettingsPage onError={console.warn} />
           ) : (
             <UserCenter me={me} />
           )

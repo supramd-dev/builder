@@ -36,6 +36,12 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/me", s.handleMe)
 	mux.HandleFunc("/api/health", s.handleHealth)
 
+	// Site configuration (requires an authenticated user).
+	mux.HandleFunc("/api/site-config", s.requireAuth(s.handleSiteConfig))
+
+	// GitLab webhook receiver (unauthenticated: called by the GitLab server).
+	mux.HandleFunc("/api/webhooks/gitlab", s.handleGitLabWebhook)
+
 	// Environment management (requires an authenticated user).
 	mux.HandleFunc("/api/environments", s.requireAuth(s.handleEnvironments))
 	mux.HandleFunc("/api/environments/", s.requireAuth(s.handleEnvironmentItem))
