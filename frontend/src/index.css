@@ -1,0 +1,40 @@
+@import 'tailwindcss';
+
+/*
+ * sourcehut 风格极简主题：近单色、细边框、无圆角、无阴影。
+ * 通过 Tailwind v4 的 @theme 定义设计令牌，供工具类引用。
+ */
+@theme {
+  --color-ink: #1b1b1f;
+  --color-ink-muted: #5d5d68;
+  --color-surface: #ffffff;
+  --color-surface-alt: #f7f7f9;
+  --color-border: #d9d9e0;
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Consolas, monospace;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  background: var(--color-surface);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    color: #d4d4d8;
+    background: #0e0e12;
+  }
+}
