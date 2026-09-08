@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -80,6 +81,24 @@ func (s *Server) handleEnvironmentItem(w http.ResponseWriter, r *http.Request, u
 			return
 		}
 		s.toggleEnvironment(w, r, user, id)
+		return
+	}
+	// /api/environments/{id}/exec — run a command on the remote host.
+	if len(parts) == 2 && parts[1] == "exec" {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		s.execEnvironment(w, r, user, id)
+		return
+	}
+	// /api/environments/{id}/script — upload and run a script.
+	if len(parts) == 2 && parts[1] == "script" {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		s.scriptEnvironment(w, r, user, id)
 		return
 	}
 	if len(parts) != 1 {
@@ -236,6 +255,125 @@ func (s *Server) testEnvironment(w http.ResponseWriter, r *http.Request, user *s
 	}
 	res := sshcheck.Check(env.Host, env.Username, env.PrivateKey)
 	writeJSON(w, http.StatusOK, res)
+}
+
+// --- /api/environments/{id}/exec ---
+
+// execEnvironment runs a shell command on the remote host of the environment.
+// Only enabled environments accept commands.
+func (s *Server) execEnvironment(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
+	env, err := s.Store.GetEnvironment(user.ID, id)
+	if err != nil {
+		respondEnvironmentError(w, err)
+		return
+	}
+	if !env.Enabled {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "environment is disabled; enable it before running commands",
+		})
+		return
+	}
+
+	var req struct {
+		Command string `json:"command"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if strings.TrimSpace(req.Command) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
+		return
+	}
+
+	res := sshcheck.Exec(env.Host, env.Username, env.PrivateKey, req.Command)
+	writeJSON(w, http.StatusOK, res)
+}
+
+// --- /api/environments/{id}/script ---
+
+// scriptEnvironment uploads and runs a script on the remote host of the
+// environment. The script body is streamed over stdin; the remote command
+// is derived from the first-line comment, which names the interpreter:
+//
+//	#!/usr/bin/env bash    (or "# bash", default for language "bash")
+//	#!/usr/bin/env python3 (or "# python3", default for language "python")
+//
+// Only enabled environments accept scripts.
+func (s *Server) scriptEnvironment(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
+	env, err := s.Store.GetEnvironment(user.ID, id)
+	if err != nil {
+		respondEnvironmentError(w, err)
+		return
+	}
+	if !env.Enabled {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "environment is disabled; enable it before running commands",
+		})
+		return
+	}
+
+	var req struct {
+		Language string `json:"language"` // "bash" or "python"
+		Script   string `json:"script"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if strings.TrimSpace(req.Script) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "script is required"})
+		return
+	}
+
+	cmd, err := scriptCommand(req.Language, req.Script)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	res := sshcheck.Script(env.Host, env.Username, env.PrivateKey, cmd, req.Script)
+	writeJSON(w, http.StatusOK, res)
+}
+
+// scriptCommand derives the remote command that consumes the script from
+// stdin, based on the declared language and the first-line interpreter
+// comment in the script itself.
+func scriptCommand(language, script string) (string, error) {
+	first := script
+	if i := strings.IndexByte(script, '\n'); i >= 0 {
+		first = script[:i]
+	}
+	first = strings.TrimSpace(first)
+
+	// Explicit interpreter comment: "#!anything" or "# <name>".
+	if strings.HasPrefix(first, "#") {
+		name := strings.TrimPrefix(first, "#!")
+		name = strings.TrimSpace(strings.TrimPrefix(name, "#"))
+		name = strings.TrimSpace(name)
+		// Keep the basename of a shebang path (e.g. /usr/bin/env bash).
+		if i := strings.LastIndexAny(name, "/ "); i >= 0 {
+			name = name[i+1:]
+		}
+		switch name {
+		case "bash", "sh", "python", "python3":
+			return name + " -", nil
+		case "":
+			// fall through to language default
+		default:
+			return "", fmt.Errorf("unsupported interpreter %q on first line; use bash, sh, python or python3", name)
+		}
+	}
+
+	// Language default. The interpreter reads the program from stdin.
+	switch language {
+	case "bash":
+		return "bash -", nil
+	case "python":
+		return "python3 -", nil
+	default:
+		return "", fmt.Errorf("unsupported language %q; use bash or python", language)
+	}
 }
 
 // --- helpers ---

@@ -85,12 +85,33 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 
 ### API endpoints
 
-| Method | Path          | Description                          |
-|--------|---------------|--------------------------------------|
-| GET    | `/api/health` | Health check                         |
-| POST   | `/api/login`  | Authenticate, sets session cookie     |
-| POST   | `/api/logout` | Destroy the current session          |
-| GET    | `/api/me`     | Current user (requires session)      |
+| Method | Path                            | Description                                   |
+|--------|---------------------------------|-----------------------------------------------|
+| GET    | `/api/health`                   | Health check                                  |
+| POST   | `/api/login`                    | Authenticate, sets session cookie              |
+| POST   | `/api/logout`                   | Destroy the current session                   |
+| GET    | `/api/me`                       | Current user (requires session)               |
+| GET    | `/api/environments`             | List the user's test environments             |
+| POST   | `/api/environments`             | Create a test environment                     |
+| GET    | `/api/environments/{id}`        | Get one environment                           |
+| PUT    | `/api/environments/{id}`        | Update one environment                        |
+| DELETE | `/api/environments/{id}`        | Delete one environment                        |
+| POST   | `/api/environments/{id}/test`   | SSH connectivity check                        |
+| PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
+| POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
+| POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
 
 Sessions are stored in the database as random 64-char hex tokens and expire
 after 7 days. Passwords are hashed with bcrypt (cost 12).
+
+### Script execution
+
+`/exec` runs a raw shell command. `/script` accepts a bash or Python script
+(`"language": "bash"` or `"python"`) and streams it to the remote interpreter
+over stdin. The interpreter is taken from the script's first-line comment:
+
+- `#!/usr/bin/env bash`, `#!/bin/bash`, or `# bash` → `bash -`
+- `#!/usr/bin/env python3`, or `# python3` → `python3 -`
+
+The comment overrides the declared language; only bash, sh, python and
+python3 are accepted. Commands time out after 60s, scripts after 10 minutes.

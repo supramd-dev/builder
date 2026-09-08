@@ -87,3 +87,34 @@ export async function testEnvironment(id: number): Promise<ConnectivityResult> {
     method: 'POST',
   })
 }
+
+export interface ExecResult {
+  success: boolean
+  stdout: string
+  stderr: string
+  exitCode: number
+  durationMilliSeconds: number
+}
+
+export async function execEnvironment(
+  id: number,
+  command: string,
+): Promise<ExecResult> {
+  return api<ExecResult>(`/api/environments/${id}/exec`, {
+    method: 'POST',
+    body: JSON.stringify({ command }),
+  })
+}
+
+export type ScriptLanguage = 'bash' | 'python'
+
+export async function execScript(
+  id: number,
+  language: ScriptLanguage,
+  script: string,
+): Promise<ExecResult> {
+  return api<ExecResult>(`/api/environments/${id}/script`, {
+    method: 'POST',
+    body: JSON.stringify({ language, script }),
+  })
+}

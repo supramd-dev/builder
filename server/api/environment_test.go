@@ -7,8 +7,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"md-builder/server/auth"
 )
 
 const testKey = `-----BEGIN OPENSSH PRIVATE KEY-----
@@ -284,4 +282,237 @@ func TestEnvironmentInvalidKeyRejected(t *testing.T) {
 	}
 }
 
-var _ = auth.HashPassword
+// TestEnvironmentExec covers the remote command execution endpoint.
+func TestEnvironmentExec(t *testing.T) {
+	apiServer, s := newTestServer(t)
+	seedUser(t, s, "dave", "dave@example.com", "pw")
+	seedUser(t, s, "eve", "eve@example.com", "pw2")
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+
+	daveCookie := loginAndGetCookie(t, mux, "dave", "pw")
+	eveCookie := loginAndGetCookie(t, mux, "eve", "pw2")
+
+	authed := func(cookie, method, target, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Create an environment (enabled by default).
+	rec := authed(daveCookie, http.MethodPost, "/api/environments", fmt.Sprintf(
+		`{"name":"exec-node","host":"203.0.113.1","username":"runner","privateKey":%q}`, testKey))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID      int64 `json:"id"`
+		Enabled bool  `json:"enabled"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+	if !created.Enabled {
+		t.Fatal("expected new environment to be enabled by default")
+	}
+
+	// Unauthenticated exec is rejected.
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/environments/%d/exec", created.ID),
+		strings.NewReader(`{"command":"uname -a"}`))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth exec: expected 401, got %d", rec.Code)
+	}
+
+	// Foreign user cannot exec on someone else's environment.
+	rec = authed(eveCookie, http.MethodPost, fmt.Sprintf("/api/environments/%d/exec", created.ID),
+		`{"command":"uname -a"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign exec: expected 404, got %d", rec.Code)
+	}
+
+	// Empty command is rejected with 400.
+	rec = authed(daveCookie, http.MethodPost, fmt.Sprintf("/api/environments/%d/exec", created.ID),
+		`{"command":"   "}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty command: expected 400, got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// Exec against an enabled environment with an unreachable host still
+	// returns 200, but with a failure result (connection error path).
+	rec = authed(daveCookie, http.MethodPost, fmt.Sprintf("/api/environments/%d/exec", created.ID),
+		`{"command":"uname -a"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exec: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Success  bool   `json:"success"`
+		Stdout   string `json:"stdout"`
+		Stderr   string `json:"stderr"`
+		ExitCode int    `json:"exitCode"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode exec result: %v", err)
+	}
+	if res.Success {
+		t.Fatal("expected exec to fail against a fake host")
+	}
+	if res.Stderr == "" {
+		t.Fatal("expected an error message in stderr for the connection failure")
+	}
+
+	// Disable the environment, then exec must be rejected with 409.
+	rec = authed(daveCookie, http.MethodPut, fmt.Sprintf("/api/environments/%d/enabled", created.ID),
+		`{"enabled":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("toggle: expected 200, got %d", rec.Code)
+	}
+	rec = authed(daveCookie, http.MethodPost, fmt.Sprintf("/api/environments/%d/exec", created.ID),
+		`{"command":"uname -a"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("exec on disabled: expected 409, got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// The state is persisted.
+	env, err := s.GetEnvironment(1, created.ID) // dave has user ID 1 (first seed)
+	if err != nil {
+		t.Fatalf("get from store: %v", err)
+	}
+	if env.Enabled {
+		t.Fatal("expected environment to be disabled in store")
+	}
+}
+
+// TestScriptCommandDerivation covers interpreter selection from the first
+// line comment and the language fallback.
+func TestScriptCommandDerivation(t *testing.T) {
+	cases := []struct {
+		language string
+		script   string
+		want     string
+		wantErr  bool
+	}{
+		{"bash", "echo hi\n", "bash -", false},
+		{"python", "print('hi')\n", "python3 -", false},
+		{"bash", "#!/bin/bash\necho hi\n", "bash -", false},
+		{"bash", "#!/usr/bin/env bash\necho hi\n", "bash -", false},
+		{"python", "#!/usr/bin/env python3\nprint('hi')\n", "python3 -", false},
+		{"python", "# python3\nprint('hi')\n", "python3 -", false},
+		{"bash", "# sh\necho hi\n", "sh -", false},
+		{"bash", "#!/usr/bin/env perl\nprint 1;\n", "", true},
+		{"ruby", "puts 1\n", "", true},
+		{"bash", "#!/usr/bin/env ruby\n", "", true},
+		{"", "echo hi\n", "", true},
+	}
+	for _, tc := range cases {
+		got, err := scriptCommand(tc.language, tc.script)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("scriptCommand(%q, %q): expected error, got %q", tc.language, tc.script, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("scriptCommand(%q, %q): unexpected error %v", tc.language, tc.script, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("scriptCommand(%q, %q) = %q, want %q", tc.language, tc.script, got, tc.want)
+		}
+	}
+}
+
+// TestEnvironmentScript covers the script execution endpoint. Like the exec
+// tests it exercises the failure path (unreachable host / bad key), since a
+// real remote host is unavailable in unit tests.
+func TestEnvironmentScript(t *testing.T) {
+	apiServer, s := newTestServer(t)
+	seedUser(t, s, "frank", "frank@example.com", "pw")
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "frank", "pw")
+
+	authed := func(method, target, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Create an enabled environment.
+	rec := authed(http.MethodPost, "/api/environments", fmt.Sprintf(
+		`{"name":"script-node","host":"203.0.113.7","username":"runner","privateKey":%q}`, testKey))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+
+	// Empty script is rejected.
+	rec = authed(http.MethodPost, fmt.Sprintf("/api/environments/%d/script", created.ID),
+		`{"language":"bash","script":"  "}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty script: expected 400, got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// Unsupported language is rejected.
+	rec = authed(http.MethodPost, fmt.Sprintf("/api/environments/%d/script", created.ID),
+		`{"language":"perl","script":"print 1;"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported language: expected 400, got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// Unsupported interpreter comment is rejected.
+	rec = authed(http.MethodPost, fmt.Sprintf("/api/environments/%d/script", created.ID),
+		`{"language":"bash","script":"#!/usr/bin/env ruby\nputs 1\n"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unsupported interpreter: expected 400, got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// Valid script against an unreachable host: 200 with a failure result.
+	rec = authed(http.MethodPost, fmt.Sprintf("/api/environments/%d/script", created.ID),
+		`{"language":"bash","script":"#!/usr/bin/env bash\necho hello\n"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("script: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Success  bool   `json:"success"`
+		Stderr   string `json:"stderr"`
+		ExitCode int    `json:"exitCode"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode script result: %v", err)
+	}
+	if res.Success || res.Stderr == "" {
+		t.Fatalf("expected connection failure, got %+v", res)
+	}
+
+	// Disabled environment is rejected with 409.
+	rec = authed(http.MethodPut, fmt.Sprintf("/api/environments/%d/enabled", created.ID), `{"enabled":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("toggle: expected 200, got %d", rec.Code)
+	}
+	rec = authed(http.MethodPost, fmt.Sprintf("/api/environments/%d/script", created.ID),
+		`{"language":"bash","script":"echo hi\n"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("script on disabled: expected 409, got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// The environment is still owned by frank (ID 1).
+	if _, err := s.GetEnvironment(1, created.ID); err != nil {
+		t.Fatalf("get from store: %v", err)
+	}
+}

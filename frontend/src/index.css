@@ -145,6 +145,25 @@ body {
   text-decoration: none;
 }
 
+.navbar-nav {
+  display: inline-block;
+}
+
+.navbar-nav a {
+  margin-right: 1rem;
+  color: var(--text);
+}
+
+.navbar-nav a:hover {
+  text-decoration: none;
+  color: var(--link);
+}
+
+.navbar-nav a.active {
+  color: var(--link);
+  font-weight: 600;
+}
+
 /* --- Typography --- */
 
 h1, h2 {
@@ -244,6 +263,7 @@ input[type="text"],
 input[type="email"],
 input[type="password"],
 input[type="tel"],
+select,
 textarea.form-control {
   display: block;
   width: 100%;
@@ -256,6 +276,10 @@ textarea.form-control {
   border-radius: 0;
 }
 
+textarea {
+  font-family: inherit;
+}
+
 input[type="checkbox"] {
   position: relative;
   top: 2px;
@@ -265,6 +289,7 @@ input[type="text"]:focus,
 input[type="email"]:focus,
 input[type="password"]:focus,
 input[type="tel"]:focus,
+select:focus,
 textarea.form-control:focus {
   color: var(--text);
   outline: none;
@@ -346,6 +371,63 @@ textarea.form-control:focus {
 }
 
 /* --- Alerts --- */
+
+/* Run page: environment select + language radio side by side */
+.run-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.5rem;
+}
+
+.run-controls .form-group {
+  flex: 1 1 16rem;
+  min-width: 12rem;
+}
+
+.run-language-buttons {
+  display: flex;
+  gap: 1rem;
+  padding-top: 0.25rem;
+}
+
+.run-lang-option input[type="radio"] {
+  position: relative;
+  top: 2px;
+  margin: 0 0.25rem 0 0;
+}
+
+/* Monaco editor frame matching the sourcehut input style */
+.editor-shell {
+  width: 100%;
+  border: 1px solid #888;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.editor-shell:focus-within {
+  border-color: var(--link);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 0.9em;
+  background: var(--bg-alt);
+  padding: 0.1em 0.3em;
+  border: 1px solid var(--border-light);
+  border-radius: 0;
+}
+
+pre.output {
+  padding: 0.5rem;
+  margin: 0 0 1rem;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  overflow-x: auto;
+  font-size: 0.875rem;
+  line-height: 1.4;
+}
 
 .alert {
   position: relative;

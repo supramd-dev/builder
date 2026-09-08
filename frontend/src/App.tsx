@@ -3,10 +3,14 @@ import './App.css'
 import { api, type Me } from './api'
 import LoginPage from './LoginPage'
 import UserCenter from './UserCenter'
+import RunPage from './RunPage'
+
+type View = 'environments' | 'run'
 
 function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [loadingMe, setLoadingMe] = useState(true)
+  const [view, setView] = useState<View>('environments')
 
   // Check for an existing session on mount.
   useEffect(() => {
@@ -23,6 +27,7 @@ function App() {
       // Ignore logout errors; clear local state regardless.
     }
     setMe(null)
+    setView('environments')
   }
 
   return (
@@ -32,6 +37,30 @@ function App() {
         <a href="/" className="brand">
           md-builder
         </a>
+        {me && (
+          <nav className="navbar-nav">
+            <a
+              href="#"
+              className={view === 'environments' ? 'active' : ''}
+              onClick={(e) => {
+                e.preventDefault()
+                setView('environments')
+              }}
+            >
+              User center
+            </a>
+            <a
+              href="#"
+              className={view === 'run' ? 'active' : ''}
+              onClick={(e) => {
+                e.preventDefault()
+                setView('run')
+              }}
+            >
+              Run command
+            </a>
+          </nav>
+        )}
         <div className="navbar-text">
           {me ? (
             <>
@@ -56,7 +85,11 @@ function App() {
         {loadingMe ? (
           <p className="text-muted">Loading…</p>
         ) : me ? (
-          <UserCenter me={me} />
+          view === 'run' ? (
+            <RunPage onError={console.warn} />
+          ) : (
+            <UserCenter me={me} />
+          )
         ) : (
           <LoginPage onLogin={setMe} />
         )}
