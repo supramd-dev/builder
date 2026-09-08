@@ -26,48 +26,47 @@ function App() {
   }
 
   return (
-    <div className="flex min-h-svh flex-col">
+    <div className="page">
       {/* Top navigation bar */}
-      <header className="border-b border-border">
-        <div className="mx-auto flex h-12 w-full max-w-4xl items-center justify-between px-4">
-          <a href="/" className="font-mono text-sm font-semibold tracking-tight">
-            md-builder
-          </a>
-          <nav className="flex items-center gap-4 text-sm text-ink-muted">
-            {me ? (
-              <>
-                <span className="text-ink">{me.username}</span>
-                <button type="button" onClick={handleLogout} className="hover:text-accent">
-                  Log out
-                </button>
-              </>
-            ) : (
-              <a href="#" className="text-accent">
-                Log in
+      <nav className="container navbar">
+        <a href="/" className="brand">
+          md-builder
+        </a>
+        <div className="navbar-text">
+          {me ? (
+            <>
+              <span className="text-muted">{me.username}</span>
+              {' — '}
+              <a href="#" onClick={(e) => { e.preventDefault(); handleLogout() }}>
+                Log out
               </a>
-            )}
-          </nav>
+            </>
+          ) : (
+            <>
+              <a href="#">Log in</a>
+              {' — '}
+              <a href="#">Register</a>
+            </>
+          )}
         </div>
-      </header>
+      </nav>
 
       {/* Main content */}
-      <main className="flex flex-1 items-center justify-center px-4 py-12">
+      <div className="container content" style={{ flexGrow: 1 }}>
         {loadingMe ? (
-          <p className="text-sm text-ink-muted">Loading…</p>
+          <p className="text-muted">Loading…</p>
         ) : me ? (
-          <div className="w-full">
-            <UserCenter me={me} />
-          </div>
+          <UserCenter me={me} />
         ) : (
           <LoginPage onLogin={setMe} />
         )}
-      </main>
+      </div>
 
       {/* Footer */}
-      <footer className="border-t border-border">
-        <div className="mx-auto flex h-10 w-full max-w-4xl items-center justify-center px-4 text-xs text-ink-muted">
+      <footer className="container">
+        <span className="text-muted">
           md-builder · Scientific computing test platform
-        </div>
+        </span>
       </footer>
     </div>
   )

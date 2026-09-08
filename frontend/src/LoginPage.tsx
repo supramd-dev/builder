@@ -29,50 +29,42 @@ export default function LoginPage({ onLogin }: Props) {
   }
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="w-full max-w-sm space-y-5 border border-border bg-surface p-6"
-      noValidate
-    >
-      <h1 className="text-lg font-semibold">Log in</h1>
+    <form onSubmit={handleSubmit} style={{ maxWidth: '28rem' }} noValidate>
+      <h3>Log in</h3>
 
-      <label className="block space-y-1">
-        <span className="text-sm text-ink-muted">Username</span>
+      <div className="form-group">
+        <label htmlFor="login-username">Username</label>
         <input
+          id="login-username"
           type="text"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
           autoComplete="username"
-          className="w-full border border-border bg-surface px-2 py-1.5 text-sm outline-none focus:border-accent"
         />
-      </label>
+      </div>
 
-      <label className="block space-y-1">
-        <span className="text-sm text-ink-muted">Password</span>
+      <div className="form-group">
+        <label htmlFor="login-password">Password</label>
         <input
+          id="login-password"
           type="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           autoComplete="current-password"
-          className="w-full border border-border bg-surface px-2 py-1.5 text-sm outline-none focus:border-accent"
         />
-      </label>
+      </div>
 
       {error && (
-        <p role="alert" className="text-sm text-danger">
+        <div className="alert alert-danger" role="alert">
           {error}
-        </p>
+        </div>
       )}
 
-      <button
-        type="submit"
-        disabled={submitting}
-        className="w-full border border-accent bg-accent py-1.5 text-sm text-white hover:bg-accent-hover disabled:opacity-50"
-      >
+      <button type="submit" className="btn btn-primary" disabled={submitting}>
         {submitting ? 'Logging in…' : 'Log in'}
       </button>
 
-      <p className="text-xs text-ink-muted">
+      <p className="text-muted" style={{ marginTop: '1rem' }}>
         A test execution and results platform for scientific computing software
         such as molecular dynamics.
       </p>

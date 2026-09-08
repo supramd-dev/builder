@@ -1,1 +1,10 @@
-/* App 组件样式：主题令牌见 index.css，此处仅放少量补充样式 */
+/* App-specific styles. The sourcehut design tokens and common classes
+   live in index.css; this file holds only small page-level tweaks. */
+
+.page {
+  gap: 0;
+}
+
+.content {
+  padding-top: 1rem;
+}
