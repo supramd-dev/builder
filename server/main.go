@@ -1,3 +1,6 @@
+// md-builder is the backend server for the md-builder scientific computing
+// test platform. It hosts the frontend assets, serves the JSON API, and
+// provides CLI subcommands (adduser) for user management.
 package main
 
 import (
@@ -5,14 +8,24 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"md-builder/server/api"
+	"md-builder/server/store"
 )
 
 const listenAddr = ":8080"
 
+// defaultDSN determines the database DSN: MD_BUILDER_DSN env var first, then
+// a sensible SQLite file location.
+func defaultDSN() string {
+	if d := os.Getenv("MD_BUILDER_DSN"); d != "" {
+		return d
+	}
+	return "md-builder.db" // SQLite file in the working directory
+}
+
 // distDir is resolved from the working directory so the binary can run from
 // either the project root or the server/ directory.
-var distDir = resolveDistDir()
-
 func resolveDistDir() string {
 	// Prefer environment variable (for deployments).
 	if d := os.Getenv("MD_BUILDER_DIST"); d != "" {
@@ -33,15 +46,25 @@ func resolveDistDir() string {
 }
 
 func main() {
+	// Subcommand dispatch: md-builder adduser ...
+	if len(os.Args) > 1 && os.Args[1] == "adduser" {
+		os.Exit(adduserSubcommand())
+	}
+
+	s, err := store.Open(defaultDSN())
+	if err != nil {
+		log.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+
 	mux := http.NewServeMux()
 
-	// --- API placeholder ---
-	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
+	// --- JSON API (auth) ---
+	apiServer := api.New(s)
+	apiServer.Register(mux)
 
 	// --- Static frontend assets (with SPA fallback) ---
+	distDir := resolveDistDir()
 	fs := http.FileServer(http.Dir(distDir))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Serve existing static files directly.
@@ -58,7 +81,8 @@ func main() {
 		http.ServeFile(w, r, distDir+"/index.html")
 	})
 
-	log.Printf("md-builder listening on http://localhost%s (dist: %s)", listenAddr, distDir)
+	log.Printf("md-builder listening on http://localhost%s (dist: %s, db: %s)",
+		listenAddr, distDir, defaultDSN())
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
 	}

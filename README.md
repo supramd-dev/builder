@@ -1,45 +1,91 @@
 # md-builder
 
-一个用于科学计算软件（如分子动力学）测试运行与结果展示的平台，风格参考 [build.golang.org](https://build.golang.org)。
+A platform for running and displaying tests of scientific computing software
+(e.g. molecular dynamics), inspired by [build.golang.org](https://build.golang.org).
 
-## 技术栈
+## Tech stack
 
-- **后端**：Go（`net/http` 原生，零外部依赖）
-- **前端**：Vite + React 19 + TypeScript
-- **样式**：Tailwind CSS v4，自定义 sourcehut 风格极简主题（近单色、细边框、无阴影、无圆角）
+- **Backend**: Go, `net/http`, [GORM](https://gorm.io) ORM
+- **Database**: SQLite (default, pure-Go driver, no CGO) or PostgreSQL
+- **Frontend**: Vite + React 19 + TypeScript
+- **Styling**: Tailwind CSS v4 with a custom sourcehut-style minimal theme
+  (near-monochrome, thin borders, no shadows, no rounded corners)
 
-## 目录结构
+## Project structure
 
 ```
 md-builder/
-├── server/            # Go 后端
-│   ├── main.go
+├── server/                 # Go backend (single binary: server + CLI)
+│   ├── main.go            # entrypoint; subcommand dispatch + HTTP server
+│   ├── adduser.go         # CLI: create a user
+│   ├── terminal.go         # read password from TTY without echo
+│   ├── store/             # GORM models + queries (users, sessions)
+│   ├── auth/               # bcrypt hashing + session tokens
+│   ├── api/                # HTTP handlers (login/logout/me/health)
 │   └── go.mod
-└── frontend/          # 前端
-    ├── src/
-    ├── index.html
-    ├── package.json
-    └── vite.config.ts
+└── frontend/              # Vite + React + TS frontend
+    ├── src/App.tsx        # login page + auth state
+    ├── src/index.css      # Tailwind theme tokens
+    └── vite.config.ts     # dev proxy /api -> :8080
 ```
 
-## 开发
+## Development
 
-前端开发服务器（热更新）：
+Frontend dev server (hot reload, on :5173, proxies `/api` to :8080):
 
 ```sh
 make dev-frontend
 ```
 
-后端开发服务器（单独运行，端口 8080）：
+Backend dev server (builds nothing, uses Go source directly, on :8080):
 
 ```sh
 make dev-backend
 ```
 
-## 构建与运行
+## Build & run
 
 ```sh
-make serve   # 构建前端并由 Go 托管
+make serve   # builds the frontend, then serves via Go on :8080
 ```
 
-访问 http://localhost:8080
+Visit http://localhost:8080
+
+## Authentication
+
+There is **no registration UI**. Users are created via the `adduser` CLI
+subcommand; the web UI only handles login.
+
+### Create a user
+
+```sh
+# Interactive password (hidden, read from the terminal):
+go run ./server adduser -username alice -email alice@example.com
+
+# Or pass the password directly:
+go run ./server adduser -username alice -email alice@example.com -password 's3cret!'
+
+# Select a different database:
+go run ./server adduser -username alice -email alice@example.com -dsn 'postgres://...'
+```
+
+### Database selection
+
+The DSN is taken from the `MD_BUILDER_DSN` environment variable if set, otherwise
+it defaults to a local SQLite file `md-builder.db`.
+
+```sh
+export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=disable'
+```
+
+### API endpoints
+
+| Method | Path          | Description                          |
+|--------|---------------|--------------------------------------|
+| GET    | `/api/health` | Health check                         |
+| POST   | `/api/login`  | Authenticate, sets session cookie     |
+| POST   | `/api/logout` | Destroy the current session          |
+| GET    | `/api/me`     | Current user (requires session)      |
+
+Sessions are stored in the database as random 64-char hex tokens and expire
+after 7 days. Passwords are hashed with bcrypt (cost 12).
