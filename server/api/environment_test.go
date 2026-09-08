@@ -177,6 +177,57 @@ func TestEnvironmentAPIFlow(t *testing.T) {
 		t.Fatal("expected connectivity test to fail against a fake host")
 	}
 
+	// --- toggle enabled ---
+	rec = authed(aliceCookie, http.MethodPut, fmt.Sprintf("/api/environments/%d/enabled", created.ID),
+		`{"enabled":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("toggle: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var toggled struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &toggled); err != nil {
+		t.Fatalf("decode toggled: %v", err)
+	}
+	if toggled.Enabled {
+		t.Fatal("expected enabled=false after toggle")
+	}
+
+	// The state is persisted.
+	env, err2 := s.GetEnvironment(1, created.ID) // alice has user ID 1 (first seed)
+	if err2 != nil {
+		t.Fatalf("get from store: %v", err2)
+	}
+	if env.Enabled {
+		t.Fatal("expected disabled state persisted in store")
+	}
+
+	// Missing enabled field is rejected.
+	rec = authed(aliceCookie, http.MethodPut, fmt.Sprintf("/api/environments/%d/enabled", created.ID), `{}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("toggle missing field: expected 400, got %d", rec.Code)
+	}
+
+	// Foreign user cannot toggle.
+	rec = authed(bobCookie, http.MethodPut, fmt.Sprintf("/api/environments/%d/enabled", created.ID),
+		`{"enabled":true}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("foreign toggle: expected 404, got %d", rec.Code)
+	}
+
+	// Re-enable.
+	rec = authed(aliceCookie, http.MethodPut, fmt.Sprintf("/api/environments/%d/enabled", created.ID),
+		`{"enabled":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-enable: expected 200, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &toggled); err != nil {
+		t.Fatalf("decode re-enabled: %v", err)
+	}
+	if !toggled.Enabled {
+		t.Fatal("expected enabled=true after re-enable")
+	}
+
 	// --- delete ---
 	rec = authed(aliceCookie, http.MethodDelete, fmt.Sprintf("/api/environments/%d", created.ID), "")
 	if rec.Code != http.StatusOK {

@@ -22,6 +22,7 @@ type environmentJSON struct {
 	Username    string `json:"username"`
 	PrivateKey  string `json:"privateKey,omitempty"` // write-only; masked on read
 	Description string `json:"description"`
+	Enabled     bool   `json:"enabled"`
 	CreatedAt   string `json:"createdAt"`
 	UpdatedAt   string `json:"updatedAt"`
 }
@@ -33,6 +34,7 @@ type environmentInput struct {
 	Username    string `json:"username"`
 	PrivateKey  string `json:"privateKey"`
 	Description string `json:"description"`
+	Enabled     *bool  `json:"enabled"` // pointer so omitted means "keep current" on update
 }
 
 // handleEnvironments routes /api/environments (list, create).
@@ -69,6 +71,15 @@ func (s *Server) handleEnvironmentItem(w http.ResponseWriter, r *http.Request, u
 			return
 		}
 		s.testEnvironment(w, r, user, id)
+		return
+	}
+	// /api/environments/{id}/enabled — toggle enable/disable.
+	if len(parts) == 2 && parts[1] == "enabled" {
+		if r.Method != http.MethodPut && r.Method != http.MethodPatch {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		s.toggleEnvironment(w, r, user, id)
 		return
 	}
 	if len(parts) != 1 {
@@ -122,6 +133,10 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request, user 
 		Username:    in.Username,
 		PrivateKey:  in.PrivateKey,
 		Description: in.Description,
+		Enabled:     true, // new environments start enabled unless overridden below
+	}
+	if in.Enabled != nil {
+		env.Enabled = *in.Enabled
 	}
 	if err := s.Store.CreateEnvironment(env); err != nil {
 		log.Printf("create environment: %v", err)
@@ -169,9 +184,34 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request, user 
 	env.Username = in.Username
 	env.PrivateKey = in.PrivateKey
 	env.Description = in.Description
+	if in.Enabled != nil {
+		env.Enabled = *in.Enabled
+	}
 	if err := s.Store.UpdateEnvironment(env); err != nil {
 		log.Printf("update environment %d: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, toEnvironmentJSON(env))
+}
+
+// toggleEnvironment handles PUT/PATCH /api/environments/{id}/enabled with
+// body {"enabled": true|false}.
+func (s *Server) toggleEnvironment(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if req.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled field is required"})
+		return
+	}
+	env, err := s.Store.SetEnvironmentEnabled(user.ID, id, *req.Enabled)
+	if err != nil {
+		respondEnvironmentError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toEnvironmentJSON(env))
@@ -235,6 +275,7 @@ func toEnvironmentJSON(env *store.TestEnvironment) environmentJSON {
 		Host:        env.Host,
 		Username:    env.Username,
 		Description: env.Description,
+		Enabled:     env.Enabled,
 		CreatedAt:   env.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:   env.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import {
   deleteEnvironment,
   listEnvironments,
+  setEnvironmentEnabled,
   testEnvironment,
   type ConnectivityResult,
   type Me,
@@ -24,6 +25,7 @@ export default function UserCenter({ me }: Props) {
   const [editing, setEditing] = useState<Editing>({ mode: 'none' })
   const [testResults, setTestResults] = useState<Record<number, ConnectivityResult>>({})
   const [testing, setTesting] = useState<Set<number>>(new Set())
+  const [toggling, setToggling] = useState<Set<number>>(new Set())
 
   const refresh = useCallback(async () => {
     try {
@@ -67,6 +69,29 @@ export default function UserCenter({ me }: Props) {
         const next = new Set(s)
         next.delete(env.id)
         return next
+      })
+    }
+  }
+
+  async function handleToggleEnabled(env: TestEnvironment) {
+    const next = !env.enabled
+    setToggling((s) => new Set(s).add(env.id))
+    // Optimistically update; revert on failure.
+    setEnvs((list) =>
+      list ? list.map((e) => (e.id === env.id ? { ...e, enabled: next } : e)) : list,
+    )
+    try {
+      await setEnvironmentEnabled(env.id, next)
+    } catch (err) {
+      setEnvs((list) =>
+        list ? list.map((e) => (e.id === env.id ? { ...e, enabled: !next } : e)) : list,
+      )
+      setLoadError(err instanceof Error ? err.message : 'Toggle failed')
+    } finally {
+      setToggling((s) => {
+        const copy = new Set(s)
+        copy.delete(env.id)
+        return copy
       })
     }
   }
@@ -132,6 +157,7 @@ export default function UserCenter({ me }: Props) {
               <th>Host</th>
               <th>User</th>
               <th>Description</th>
+              <th>Enabled</th>
               <th>Updated</th>
               <th>Status</th>
               <th className="text-right">Actions</th>
@@ -149,6 +175,22 @@ export default function UserCenter({ me }: Props) {
                   </td>
                   <td>{env.username}</td>
                   <td className="text-muted">{env.description}</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      disabled={toggling.has(env.id)}
+                      onClick={() => handleToggleEnabled(env)}
+                      style={{
+                        background: env.enabled ? 'var(--success)' : 'var(--btn-default-bg)',
+                        color: env.enabled ? '#fff' : 'var(--muted)',
+                        borderColor: env.enabled ? 'var(--success)' : 'var(--border)',
+                      }}
+                      title={env.enabled ? 'Disable this environment' : 'Enable this environment'}
+                    >
+                      {toggling.has(env.id) ? '…' : env.enabled ? 'Enabled' : 'Disabled'}
+                    </button>
+                  </td>
                   <td className="text-muted">
                     {new Date(env.updatedAt).toLocaleString()}
                   </td>

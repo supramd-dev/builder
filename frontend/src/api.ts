@@ -23,6 +23,7 @@ export interface TestEnvironment {
   host: string
   username: string
   description: string
+  enabled: boolean
   createdAt: string
   updatedAt: string
 }
@@ -33,6 +34,7 @@ export interface EnvironmentInput {
   username: string
   privateKey: string
   description: string
+  enabled?: boolean
 }
 
 export interface ConnectivityResult {
@@ -68,6 +70,16 @@ export async function updateEnvironment(
 
 export async function deleteEnvironment(id: number): Promise<void> {
   await api<{ status: string }>(`/api/environments/${id}`, { method: 'DELETE' })
+}
+
+export async function setEnvironmentEnabled(
+  id: number,
+  enabled: boolean,
+): Promise<TestEnvironment> {
+  return api<TestEnvironment>(`/api/environments/${id}/enabled`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  })
 }
 
 export async function testEnvironment(id: number): Promise<ConnectivityResult> {

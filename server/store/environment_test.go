@@ -94,3 +94,55 @@ func TestEnvironmentBeforeSaveRequiresOwner(t *testing.T) {
 		t.Fatal("expected error creating environment without owner")
 	}
 }
+
+func TestSetEnvironmentEnabled(t *testing.T) {
+	s := newTestStore(t)
+	u := &User{Username: "toggleowner", Email: "toggle@example.com", PasswordHash: "hash"}
+	if err := s.CreateUser(u); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	// New environments default to enabled.
+	env := &TestEnvironment{OwnerID: u.ID, Name: "node", Host: "h", Username: "u", PrivateKey: "k"}
+	if err := s.CreateEnvironment(env); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if !env.Enabled {
+		t.Fatal("expected new environment to default to enabled")
+	}
+
+	// Disable.
+	got, err := s.SetEnvironmentEnabled(u.ID, env.ID, false)
+	if err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("expected disabled after toggle")
+	}
+	// Persisted.
+	got, err = s.GetEnvironment(u.ID, env.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Enabled {
+		t.Fatal("expected disabled state to persist")
+	}
+
+	// Re-enable.
+	got, err = s.SetEnvironmentEnabled(u.ID, env.ID, true)
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("expected enabled after re-toggle")
+	}
+
+	// Foreign owner cannot toggle.
+	other := &User{Username: "toggler", Email: "toggler@example.com", PasswordHash: "hash"}
+	if err := s.CreateUser(other); err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+	if _, err := s.SetEnvironmentEnabled(other.ID, env.ID, false); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected not found for foreign owner, got %v", err)
+	}
+}

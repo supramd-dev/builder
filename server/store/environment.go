@@ -17,6 +17,7 @@ type TestEnvironment struct {
 	Username    string `gorm:"not null"`       // SSH login user on the host
 	PrivateKey  string `gorm:"not null"`       // PEM-encoded SSH private key (login token)
 	Description string `gorm:"not null;default:''"`
+	Enabled     bool   `gorm:"not null;default:true"` // whether jobs may be dispatched here
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
@@ -60,6 +61,20 @@ func (s *Store) GetEnvironment(ownerID, id int64) (*TestEnvironment, error) {
 // UpdateEnvironment saves changes to an existing environment owned by ownerID.
 func (s *Store) UpdateEnvironment(env *TestEnvironment) error {
 	return s.DB.Save(env).Error
+}
+
+// SetEnvironmentEnabled flips the enabled flag of an environment owned by
+// ownerID and returns the updated record.
+func (s *Store) SetEnvironmentEnabled(ownerID, id int64, enabled bool) (*TestEnvironment, error) {
+	env, err := s.GetEnvironment(ownerID, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.DB.Model(env).Update("enabled", enabled).Error; err != nil {
+		return nil, err
+	}
+	env.Enabled = enabled
+	return env, nil
 }
 
 // DeleteEnvironment removes an environment owned by ownerID.

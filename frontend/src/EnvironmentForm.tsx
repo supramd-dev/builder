@@ -19,6 +19,7 @@ export default function EnvironmentForm({ existing, onSaved, onCancel }: Props) 
     username: existing?.username ?? '',
     description: existing?.description ?? '',
     privateKey: '',
+    enabled: existing?.enabled ?? true,
   })
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -104,6 +105,18 @@ export default function EnvironmentForm({ existing, onSaved, onCancel }: Props) 
           onChange={(e) => setForm({ ...form, description: e.target.value })}
           placeholder="CPU pool / MPI / GPU environment notes"
         />
+      </div>
+
+      <div className="form-group">
+        <label style={{ fontWeight: 'normal' }}>
+          <input
+            type="checkbox"
+            checked={form.enabled ?? true}
+            onChange={(e) => setForm({ ...form, enabled: e.target.checked })}
+            style={{ marginRight: '0.35rem', position: 'relative', top: '2px' }}
+          />
+          Enabled (jobs may be dispatched to this environment)
+        </label>
       </div>
 
       {error && (
