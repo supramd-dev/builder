@@ -143,20 +143,21 @@ func TestGitLabWebhook(t *testing.T) {
 		t.Fatalf("bad payload: expected 400, got %d", rec.Code)
 	}
 
-	// A push event is accepted and echoed back.
+	// A push event is accepted and recorded as a commit.
 	push := `{
 		"object_kind": "push",
 		"project": {"name": "md-code", "path_with_namespace": "group/md-code", "web_url": "https://gitlab.com/group/md-code"},
 		"ref": "refs/heads/main",
 		"before": "0000000",
 		"after": "9c8b7a6d5e4f",
-		"user_name": "alice"
+		"user_name": "alice",
+		"commits": [{"id": "9c8b7a6d5e4f", "message": "Fix integrator drift\n\nLonger body."}]
 	}`
 	rec = post(map[string]string{"X-Gitlab-Event": "Push Hook"}, push)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("push webhook: expected 200, got %d, body %s", rec.Code, rec.Body.String())
 	}
-	var res map[string]string
+	var res map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
 		t.Fatalf("decode webhook result: %v", err)
 	}
@@ -165,6 +166,40 @@ func TestGitLabWebhook(t *testing.T) {
 	}
 	if res["project"] != "group/md-code" || res["ref"] != "main" {
 		t.Fatalf("push details not extracted: %v", res)
+	}
+	commitID, ok := res["commitId"].(float64)
+	if !ok || commitID <= 0 {
+		t.Fatalf("expected positive commitId, got %v", res["commitId"])
+	}
+	if res["created"] != true {
+		t.Fatalf("expected created=true for a new push, got %v", res["created"])
+	}
+
+	// The commit is persisted with the head commit's title.
+	c, err := apiServer.Store.GetCommitByID(int64(commitID))
+	if err != nil {
+		t.Fatalf("load commit: %v", err)
+	}
+	if c.SHA != "9c8b7a6d5e4f" || c.Repo != "group/md-code" || c.Ref != "main" || c.Author != "alice" {
+		t.Fatalf("unexpected commit: %+v", c)
+	}
+	if c.Message != "Fix integrator drift" {
+		t.Fatalf("expected commit title as message, got %q", c.Message)
+	}
+
+	// The same push again is idempotent: same commit, created=false.
+	rec = post(map[string]string{"X-Gitlab-Event": "Push Hook"}, push)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("repeat push: expected 200, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode repeat result: %v", err)
+	}
+	if res["created"] != false {
+		t.Fatalf("expected created=false for repeat push, got %v", res["created"])
+	}
+	if res["commitId"].(float64) != commitID {
+		t.Fatalf("expected same commitId, got %v", res["commitId"])
 	}
 
 	// Other event kinds are accepted but marked ignored.

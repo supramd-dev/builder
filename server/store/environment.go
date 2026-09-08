@@ -58,6 +58,16 @@ func (s *Store) GetEnvironment(ownerID, id int64) (*TestEnvironment, error) {
 	return &env, nil
 }
 
+// GetEnvironmentAny loads an environment by id regardless of ownership —
+// used by site-wide views (dashboard) and result reporting.
+func (s *Store) GetEnvironmentAny(id int64) (*TestEnvironment, error) {
+	var env TestEnvironment
+	if err := s.DB.First(&env, id).Error; err != nil {
+		return nil, err
+	}
+	return &env, nil
+}
+
 // UpdateEnvironment saves changes to an existing environment owned by ownerID.
 func (s *Store) UpdateEnvironment(env *TestEnvironment) error {
 	return s.DB.Save(env).Error
@@ -77,7 +87,34 @@ func (s *Store) SetEnvironmentEnabled(ownerID, id int64, enabled bool) (*TestEnv
 	return env, nil
 }
 
-// DeleteEnvironment removes an environment owned by ownerID.
+// DeleteEnvironment removes an environment owned by ownerID, together with
+// its test runs and case results (the dashboard shows site-wide history, so
+// dangling rows would otherwise survive the environment).
 func (s *Store) DeleteEnvironment(ownerID, id int64) error {
-	return s.DB.Where("id = ? AND owner_id = ?", id, ownerID).Delete(&TestEnvironment{}).Error
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		var runIDs []int64
+		if err := tx.Model(&TestRun{}).Where("environment_id = ?", id).
+			Pluck("id", &runIDs).Error; err != nil {
+			return err
+		}
+		if len(runIDs) > 0 {
+			if err := tx.Where("test_run_id IN ?", runIDs).Delete(&TestCaseResult{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("id IN ?", runIDs).Delete(&TestRun{}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Where("id = ? AND owner_id = ?", id, ownerID).Delete(&TestEnvironment{}).Error
+	})
+}
+
+// ListAllEnvironments returns every environment on the site, name-ordered.
+// The dashboard matrix is a site-wide view, so it is not owner-scoped.
+func (s *Store) ListAllEnvironments() ([]TestEnvironment, error) {
+	var envs []TestEnvironment
+	if err := s.DB.Order("name ASC, id ASC").Find(&envs).Error; err != nil {
+		return nil, err
+	}
+	return envs, nil
 }

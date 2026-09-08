@@ -6,14 +6,37 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
+
+	"md-builder/server/store"
 )
+
+// gitlabPushPayload holds the fields of a GitLab push event we consume.
+// GitLab payloads have a loosely defined schema; parse defensively.
+type gitlabPushPayload struct {
+	ObjectKind string `json:"object_kind"`
+	Project    struct {
+		Name              string `json:"name"`
+		PathWithNamespace string `json:"path_with_namespace"`
+		WebURL            string `json:"web_url"`
+	} `json:"project"`
+	Ref      string `json:"ref"`
+	Before   string `json:"before"`
+	After    string `json:"after"`
+	UserName string `json:"user_name"`
+	Commits  []struct {
+		ID      string `json:"id"`
+		Message string `json:"message"`
+	} `json:"commits"`
+}
 
 // handleGitLabWebhook receives GitLab webhook events (POST /api/webhooks/gitlab).
 //
-// For now a git push event is only logged — triggering test runs is future
-// work. The endpoint is unauthenticated by design: GitLab servers cannot
-// hold a session cookie. When a webhook secret is configured it should be
-// verified here (X-Gitlab-Token header).
+// Push events are recorded in the commits table — the dashboard's columns.
+// Triggering test runs automatically is future work; results are reported
+// via POST /api/test-runs. The endpoint is unauthenticated by design: GitLab
+// servers cannot hold a session cookie. When a webhook secret is configured
+// it should be verified here (X-Gitlab-Token header).
 func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -28,19 +51,7 @@ func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 
 	event := r.Header.Get("X-Gitlab-Event")
 
-	// GitLab payloads have a loosely defined schema; parse defensively.
-	var payload struct {
-		ObjectKind string `json:"object_kind"`
-		Project    struct {
-			Name              string `json:"name"`
-			PathWithNamespace string `json:"path_with_namespace"`
-			WebURL            string `json:"web_url"`
-		} `json:"project"`
-		Ref      string `json:"ref"`
-		Before   string `json:"before"`
-		After    string `json:"after"`
-		UserName string `json:"user_name"`
-	}
+	var payload gitlabPushPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
 		log.Printf("gitlab webhook: bad payload: %v", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
@@ -54,16 +65,7 @@ func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case kind == "push":
-		ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
-		log.Printf("gitlab webhook: push event on %s (%s -> %s) by %s; test triggering not implemented yet",
-			payload.Project.PathWithNamespace, ref, payload.After, payload.UserName)
-		writeJSON(w, http.StatusOK, map[string]string{
-			"status":  "received",
-			"event":   "push",
-			"project": payload.Project.PathWithNamespace,
-			"ref":     ref,
-			"message": "push event received; test triggering not implemented yet",
-		})
+		s.recordPush(w, payload)
 	default:
 		log.Printf("gitlab webhook: ignored event %q", kind)
 		writeJSON(w, http.StatusOK, map[string]string{
@@ -72,4 +74,52 @@ func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 			"message": "event type ignored; only push events are handled",
 		})
 	}
+}
+
+// recordPush stores a push event as a dashboard commit column. The head
+// commit (the last of the pushed list) is the tested revision.
+func (s *Server) recordPush(w http.ResponseWriter, payload gitlabPushPayload) {
+	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
+	// The head of a push is the last entry in the commits array; its message
+	// makes a useful column label.
+	message := ""
+	if n := len(payload.Commits); n > 0 {
+		message = firstLine(payload.Commits[n-1].Message)
+	}
+
+	commit := &store.Commit{
+		Repo:     payload.Project.PathWithNamespace,
+		SHA:      payload.After,
+		Ref:      ref,
+		Author:   payload.UserName,
+		Message:  message,
+		PushedAt: time.Now(),
+	}
+	created, err := s.Store.GetOrCreateCommit(commit)
+	if err != nil {
+		log.Printf("gitlab webhook: record commit %s/%s: %v", commit.Repo, commit.SHA, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	log.Printf("gitlab webhook: push event on %s (%s) by %s recorded as commit %d",
+		payload.Project.PathWithNamespace, commit.SHA, payload.UserName, commit.ID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "received",
+		"event":    "push",
+		"project":  payload.Project.PathWithNamespace,
+		"ref":      ref,
+		"commitId": commit.ID,
+		"created":  created,
+		"message":  "push event recorded; triggering test runs is not implemented yet",
+	})
+}
+
+// firstLine returns the first line of a commit message (its title).
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }

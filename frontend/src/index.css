@@ -493,6 +493,143 @@ footer .text-muted {
   font-size: 0.8rem;
 }
 
+/* --- Test dashboard matrix --- */
+
+/* Tabs to switch between the regression and unit dashboards. */
+.dash-tabs {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.dash-tab {
+  background: var(--btn-default-bg);
+  border-color: var(--btn-default-border);
+}
+
+.dash-tab-active,
+.dash-tab-active:hover {
+  background: var(--btn-primary-bg);
+  border-color: var(--btn-primary-border);
+  color: #fff;
+}
+
+/* The matrix can be wide; scroll horizontally on small screens. */
+.dash-scroll {
+  overflow-x: auto;
+}
+
+.dash-matrix {
+  margin-bottom: 1rem;
+}
+
+.dash-matrix thead th {
+  border: 1px solid var(--border);
+  background: var(--bg-alt);
+  vertical-align: bottom;
+  padding: 0.25rem 0.5rem;
+}
+
+/* Column headers: environment names. */
+.dash-env-head {
+  min-width: 6rem;
+}
+
+/* Row headers: commit cells — short sha, author · date, commit title. */
+.dash-matrix tbody th.dash-commit-cell {
+  border: 1px solid var(--border);
+  background: var(--bg-alt);
+  text-align: left;
+  padding: 0.25rem 0.5rem;
+  font-weight: 500;
+  min-width: 8rem;
+  max-width: 16rem;
+}
+
+.dash-commit-cell .dash-sha {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+.dash-commit-cell .dash-commit-meta {
+  display: block;
+  font-size: 0.8rem;
+}
+
+.dash-commit-cell .dash-commit-msg {
+  display: block;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 16rem;
+}
+
+.dash-cell {
+  text-align: center;
+  padding: 0.2rem 0.4rem;
+}
+
+/* A run cell button: green when passed, red when failed. */
+.btn.dash-run {
+  min-width: 4.5rem;
+}
+
+.dash-run-passed {
+  background: var(--success);
+  border-color: var(--btn-default-border);
+  color: #fff;
+}
+
+.dash-run-passed:hover {
+  filter: brightness(1.1);
+}
+
+.dash-run-failed {
+  background: var(--danger);
+  border-color: var(--btn-default-border);
+  color: #fff;
+}
+
+.dash-run-failed:hover {
+  filter: brightness(1.1);
+}
+
+.dash-no-run {
+  display: inline-block;
+  min-width: 4.5rem;
+}
+
+/* Run detail: definition list of the summary fields. */
+.dash-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 2rem;
+  margin: 0;
+}
+
+.dash-summary > div {
+  min-width: 10rem;
+  margin-bottom: 0.5rem;
+}
+
+.dash-summary dt {
+  font-weight: 600;
+}
+
+.dash-summary dd {
+  margin: 0;
+}
+
+/* Clickable case rows in the run detail table. */
+.dash-case-row {
+  cursor: pointer;
+}
+
+.dash-case-row:hover td {
+  background: var(--bg-alt);
+}
+
 /* --- Utilities --- */
 
 .text-right {

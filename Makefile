@@ -1,4 +1,4 @@
-.PHONY: dev-frontend dev-backend build serve test smoke-test clean adduser
+.PHONY: dev-frontend dev-backend build serve test smoke-test seed-demo clean adduser
 
 # --- Frontend (Vite dev server, hot reload, :5173) ---
 dev-frontend:
@@ -21,6 +21,10 @@ test:
 # Override with USER/EMAIL/PASSWORD if needed.
 smoke-test:
 	scripts/api-smoke.sh
+
+# Populate a running server with demo dashboard data (pushes + runs).
+seed-demo:
+	scripts/seed-demo.sh
 
 clean:
 	rm -rf frontend/dist frontend/node_modules server/md-builder.db md-builder.db

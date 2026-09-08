@@ -19,14 +19,18 @@ md-builder/
 │   ├── main.go            # entrypoint; subcommand dispatch + HTTP server
 │   ├── adduser.go         # CLI: create a user
 │   ├── terminal.go         # read password from TTY without echo
-│   ├── store/             # GORM models + queries (users, sessions, environments, site config)
+│   ├── store/             # GORM models + queries (users, sessions,
+│   │                      #   environments, site config, commits, test runs)
 │   ├── auth/               # bcrypt hashing + session tokens
-│   ├── api/                # HTTP handlers (auth + environments)
+│   ├── api/                # HTTP handlers (auth, environments, dashboard)
 │   ├── sshcheck/           # SSH connectivity test package
 │   └── go.mod
 └── frontend/              # Vite + React + TS frontend
-    ├── src/App.tsx        # shell: login vs user center routing
+    ├── src/App.tsx        # shell: login + page routing (incl. dashboard)
     ├── src/LoginPage.tsx  # static login page
+    ├── src/DashboardPage.tsx    # test result matrix (regression / unit)
+    ├── src/TestRunDetailPage.tsx # per-run case results
+    ├── src/CaseDetailPage.tsx   # per-case detail (placeholder)
     ├── src/UserCenter.tsx # environment management dashboard
     ├── src/RunPage.tsx    # remote command/script execution (Monaco editor)
     ├── src/SettingsPage.tsx # site config: repos, branch/commit, GitLab notice
@@ -34,7 +38,7 @@ md-builder/
     ├── src/api.ts         # typed API client
     ├── src/index.css      # hand-written sourcehut-style CSS
     └── vite.config.ts     # dev proxy /api -> :8080
-scripts/                  # end-to-end API smoke test
+scripts/                  # end-to-end API smoke test + demo data seeder
 ```
 
 ## Development
@@ -98,13 +102,16 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 | POST   | `/api/environments`             | Create a test environment                     |
 | GET    | `/api/environments/{id}`        | Get one environment                           |
 | PUT    | `/api/environments/{id}`        | Update one environment                        |
-| DELETE | `/api/environments/{id}`        | Delete one environment                        |
+| DELETE | `/api/environments/{id}`        | Delete one environment (and its test runs)    |
 | POST   | `/api/environments/{id}/test`   | SSH connectivity check                        |
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
 | GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `testInputRepo`, `testRepoRef`) |
 | PUT    | `/api/site-config`              | Update site configuration                     |
+| GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` (requires session) |
+| POST   | `/api/test-runs`                | Report a test run result (requires session)   |
+| GET    | `/api/test-runs/{id}`           | One run's detail incl. per-case results       |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (push events)         |
 
 ### Site configuration
@@ -124,11 +131,64 @@ arbitrary hosts.
 ### GitLab webhooks
 
 Point a GitLab project webhook at `POST /api/webhooks/gitlab` with the
-*Push events* trigger. Push events are received, logged server-side and
-acknowledged with the extracted project/ref; other event types are
-acknowledged with `status: ignored`. Automatic test runs from webhooks are
-future work. The endpoint is unauthenticated (called by the GitLab server);
-verify the `X-Gitlab-Token` header once a secret is configured.
+*Push events* trigger. Push events are recorded in the `commits` table —
+each becomes a column of the test dashboard (deduplicated by
+repo + sha). Other event types are acknowledged with `status: ignored`.
+Automatic test runs from webhooks are future work. The endpoint is
+unauthenticated (called by the GitLab server); verify the
+`X-Gitlab-Token` header once a secret is configured.
+
+When the site config's `codeRepo` is set, only pushes to that repository
+are shown as dashboard columns (the repo path is extracted from the URL
+and compared to the webhook's `path_with_namespace`).
+
+### Test dashboard
+
+The dashboard (first tab after login) shows a build.golang.org-style
+matrix: one **row per recent git push** (default 10, capped at 50 via
+`?commits=`, newest first), one **column per test environment**
+(site-wide — all environments configured by any user; disabled ones are
+greyed out). Two kinds are available: **regression** and **unit** tests.
+Cells with a recorded run show pass/fail counts; clicking one opens the
+run detail with the per-case results (name, status, error value, short
+note). Clicking a case opens a placeholder detail page — result
+visualization is future work.
+
+Results are reported with `POST /api/test-runs`:
+
+```json
+{
+  "environmentId": 1,
+  "commitId": 7,              // or "commitSha" + "commitRepo" instead
+  "kind": "regression",       // or "unit"
+  "startedAt": "2026-09-08T03:00:00Z",   // optional
+  "finishedAt": "2026-09-08T03:04:00Z",  // optional
+  "cases": [
+    {"name": "water-tip4p-npt", "status": "failed", "errorValue": 0.02,
+     "message": "drift above threshold"}
+  ]
+}
+```
+
+The run status and counts are derived from the cases. Reporting again for
+the same (environment, commit, kind) replaces the stored result — the API
+is idempotent, so a flaky reporter can retry safely. Reporting currently
+requires a logged-in session; a machine token for automated runners is
+future work.
+
+Deleting an environment also deletes its test runs (the dashboard is a
+site-wide view, so dangling rows would otherwise survive the environment).
+
+#### Demo data
+
+To see the dashboard populated without a real GitLab or test runner:
+
+```sh
+make seed-demo    # pushes 3 fake commits, reports regression + unit runs
+```
+
+It needs at least one environment (create one in the user center) and the
+smoke user (`make adduser USER=smoke-user EMAIL=smoke@example.com`).
 
 Sessions are stored in the database as random 64-char hex tokens and expire
 after 7 days. Passwords are hashed with bcrypt (cost 12).
@@ -138,7 +198,9 @@ after 7 days. Passwords are hashed with bcrypt (cost 12).
 [scripts/api-smoke.sh](scripts/api-smoke.sh) exercises the full API surface
 against a running server: auth gates, login/logout, environment CRUD,
 connectivity test, command exec, script execution (bash/python), enable/disable
-gating and deletion. It is idempotent — safe to run repeatedly.
+gating, webhook push recording, test-run reporting, the dashboard matrix
+and run details, and deletion (incl. run cleanup). It is idempotent — safe
+to run repeatedly.
 
 ```sh
 make smoke-test          # against the default server on :8080

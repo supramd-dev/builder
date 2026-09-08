@@ -85,7 +85,10 @@ func openDB(dsn string) (*gorm.DB, error) {
 
 // migrate creates/updates the schema via GORM AutoMigrate.
 func (s *Store) migrate() error {
-	if err := s.DB.AutoMigrate(&User{}, &Session{}, &TestEnvironment{}, &SiteConfig{}); err != nil {
+	if err := s.DB.AutoMigrate(
+		&User{}, &Session{}, &TestEnvironment{}, &SiteConfig{},
+		&Commit{}, &TestRun{}, &TestCaseResult{},
+	); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}
 	return nil

@@ -239,9 +239,11 @@ check "get site config 200" "$(tail -n1 <<<"$body_code")" "200"
 body_code=$(req PUT /api/site-config '{"codeRepo":"","testInputRepo":"","testRepoRef":""}')
 check "config empty fields 400" "$(tail -n1 <<<"$body_code")" "400"
 
+# Repository hosts are not validated (self-hosted GitLab lives on arbitrary
+# hosts), so any URL — including other platforms — is accepted.
 body_code=$(req PUT /api/site-config \
-  '{"codeRepo":"https://github.com/g/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":"main"}')
-check "config rejects github repo 400" "$(tail -n1 <<<"$body_code")" "400"
+  '{"codeRepo":"https://gitlab.example.com/group/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":"main"}')
+check "config self-hosted repo 200" "$(tail -n1 <<<"$body_code")" "200"
 
 body_code=$(req PUT /api/site-config \
   '{"codeRepo":"https://gitlab.com/g/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":""}')
@@ -258,19 +260,35 @@ check "config re-read persists" \
   "$(head -n1 <<<"$body_code" | jq -r .codeRepo)" "https://gitlab.com/group/code"
 
 # ---------------------------------------------------------------------------
-# 8. GitLab webhook
+# 8. GitLab webhook (records a dashboard commit column)
 # ---------------------------------------------------------------------------
 echo "== gitlab webhook =="
 
+# NOTE: the project path matches the site-config codeRepo above
+# (group/code) so the push shows up as a dashboard column under the
+# repository filter.
 body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
   -H 'X-Gitlab-Event: Push Hook' \
-  -d '{"object_kind":"push","project":{"path_with_namespace":"group/md-code"},"ref":"refs/heads/main","after":"abc123","user_name":"smoke"}' \
+  -d '{"object_kind":"push","project":{"path_with_namespace":"group/code"},"ref":"refs/heads/main","after":"abc123","user_name":"smoke","commits":[{"id":"abc123","message":"smoke push"}]}' \
   "$BASE_URL/api/webhooks/gitlab")
 check "webhook push 200" "$(tail -n1 <<<"$body_code")" "200"
 check "webhook push status received" \
   "$(head -n1 <<<"$body_code" | jq -r .status)" "received"
 check "webhook push ref extracted" \
   "$(head -n1 <<<"$body_code" | jq -r .ref)" "main"
+check "webhook push records commitId" \
+  "$(head -n1 <<<"$body_code" | jq -r '.commitId > 0')" "true"
+COMMIT_ID=$(head -n1 <<<"$body_code" | jq -r .commitId)
+
+# A repeat of the same push is idempotent (same commit, created=false).
+body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -H 'X-Gitlab-Event: Push Hook' \
+  -d '{"object_kind":"push","project":{"path_with_namespace":"group/code"},"ref":"refs/heads/main","after":"abc123","user_name":"smoke","commits":[{"id":"abc123","message":"smoke push"}]}' \
+  "$BASE_URL/api/webhooks/gitlab")
+check "webhook repeat created=false" \
+  "$(head -n1 <<<"$body_code" | jq -r .created)" "false"
+check "webhook repeat same commitId" \
+  "$(head -n1 <<<"$body_code" | jq -r .commitId)" "$COMMIT_ID"
 
 body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
   -d '{"object_kind":"pipeline"}' "$BASE_URL/api/webhooks/gitlab")
@@ -285,12 +303,115 @@ body_code=$(curl -s -w '\n%{http_code}' "$BASE_URL/api/webhooks/gitlab")
 check "webhook GET 405" "$(tail -n1 <<<"$body_code")" "405"
 
 # ---------------------------------------------------------------------------
-# 9. Delete + logout
+# 8b. Test dashboard: result reporting, matrix, run detail
+# ---------------------------------------------------------------------------
+echo "== test dashboard =="
+
+# Unauthenticated dashboard access is rejected.
+body_code=$(curl -s -w '\n%{http_code}' "$BASE_URL/api/dashboard/regression")
+check "dashboard without session 401" "$(tail -n1 <<<"$body_code")" "401"
+
+# Report a regression run for the created environment at the pushed commit.
+body_code=$(req POST /api/test-runs "$(jq -n --argjson env "$ENV_ID" --argjson commit "$COMMIT_ID" '{
+  environmentId: $env,
+  commitId: $commit,
+  kind: "regression",
+  startedAt: "2026-09-08T03:00:00Z",
+  finishedAt: "2026-09-08T03:04:00Z",
+  cases: [
+    {"name": "lj-argon-nve", "status": "passed", "errorValue": 1.2e-07, "message": "max rel err"},
+    {"name": "water-tip4p-npt", "status": "failed", "errorValue": 0.02, "message": "drift above threshold"}
+  ]
+}')")
+check "report run 201" "$(tail -n1 <<<"$body_code")" "201"
+body="$(head -n1 <<<"$body_code")"
+RUN_ID=$(jq -r .id <<<"$body")
+check "report derives status failed" "$(jq -r .status <<<"$body")" "failed"
+check "report derives counts" "$(jq -r '"\(.passed)/\(.total)"' <<<"$body")" "1/2"
+
+# Validation: bad kind, bad case status, missing commit. Use the live
+# ENV_ID/COMMIT_ID so re-runs (where env #1 is gone) still hit validation.
+body_code=$(req POST /api/test-runs "$(jq -n --argjson env "$ENV_ID" --argjson commit "$COMMIT_ID" '{environmentId: $env, commitId: $commit, kind: "perf"}')")
+check "report bad kind 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(req POST /api/test-runs "$(jq -n --argjson env "$ENV_ID" --argjson commit "$COMMIT_ID" '{environmentId: $env, commitId: $commit, kind: "regression", cases: [{name: "a", status: "skipped"}]}')")
+check "report bad case status 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(req POST /api/test-runs '{"environmentId":1,"kind":"regression"}')
+check "report missing commit 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(req POST /api/test-runs '{"environmentId":999,"commitSha":"nope","kind":"regression"}')
+check "report unknown env 404" "$(tail -n1 <<<"$body_code")" "404"
+
+# Report a unit run (counts only, via cases).
+body_code=$(req POST /api/test-runs "$(jq -n --argjson env "$ENV_ID" --argjson commit "$COMMIT_ID" '{
+  environmentId: $env,
+  commitId: $commit,
+  kind: "unit",
+  cases: [
+    {"name": "TestForce", "status": "passed"},
+    {"name": "TestIntegrate", "status": "passed"},
+    {"name": "TestNeighborList", "status": "failed"}
+  ]
+}')")
+check "report unit run 201" "$(tail -n1 <<<"$body_code")" "201"
+
+# The regression matrix has one row (the push/commit) and one column (the
+# environment), and the cell points at the reported run.
+body_code=$(req GET /api/dashboard/regression)
+check "dashboard regression 200" "$(tail -n1 <<<"$body_code")" "200"
+body="$(head -n1 <<<"$body_code")"
+check "matrix has one row" "$(jq '.rows | length' <<<"$body")" "1"
+check "matrix column is the env" "$(jq -r '.environments[0].name' <<<"$body")" "smoke-node-2"
+check "matrix row is the commit" "$(jq -r '.rows[0].commit.shortSha' <<<"$body")" "abc123"
+check "matrix cell runId" "$(jq -r '.rows[0].cells[0].runId' <<<"$body")" "$RUN_ID"
+check "matrix cell counts" "$(jq -r '.rows[0].cells[0] | "\(.passed)/\(.total)"' <<<"$body")" "1/2"
+
+body_code=$(req GET /api/dashboard/unit)
+check "dashboard unit 200" "$(tail -n1 <<<"$body_code")" "200"
+check "unit matrix cell counts" \
+  "$(head -n1 <<<"$body_code" | jq -r '.rows[0].cells[0] | "\(.passed)/\(.total)"')" "2/3"
+
+# Unknown kind and bad parameter are rejected.
+body_code=$(req GET /api/dashboard/other)
+check "dashboard unknown kind 404" "$(tail -n1 <<<"$body_code")" "404"
+
+body_code=$(req GET "/api/dashboard/regression?commits=0")
+check "dashboard commits=0 400" "$(tail -n1 <<<"$body_code")" "400"
+
+# Run detail carries the case list and commit context.
+body_code=$(req GET "/api/test-runs/$RUN_ID")
+check "run detail 200" "$(tail -n1 <<<"$body_code")" "200"
+body="$(head -n1 <<<"$body_code")"
+check "detail environment name" "$(jq -r .environmentName <<<"$body")" "smoke-node-2"
+check "detail commit shortSha" "$(jq -r .commitShortSha <<<"$body")" "abc123"
+check "detail case count" "$(jq '.cases | length' <<<"$body")" "2"
+check "detail case error value" "$(jq -r '.cases[0].errorValue == 1.2e-07' <<<"$body")" "true"
+
+body_code=$(req GET /api/test-runs/9999)
+check "run detail unknown 404" "$(tail -n1 <<<"$body_code")" "404"
+
+body_code=$(req GET /api/test-runs)
+check "GET test-runs collection 405" "$(tail -n1 <<<"$body_code")" "405"
+
+# ---------------------------------------------------------------------------
+# 9. Delete + logout (deleting the environment removes its runs too)
 # ---------------------------------------------------------------------------
 echo "== delete and logout =="
 
 body_code=$(req DELETE "/api/environments/$ENV_ID")
 check "delete environment 200" "$(tail -n1 <<<"$body_code")" "200"
+
+body_code=$(req GET "/api/test-runs/$RUN_ID")
+check "run gone after env delete 404" "$(tail -n1 <<<"$body_code")" "404"
+
+# The commit rows may remain, but the environment column is gone and no
+# cell holds a run anymore.
+body_code=$(req GET /api/dashboard/regression)
+check "matrix env column gone after delete" \
+  "$(head -n1 <<<"$body_code" | jq '.environments | length')" "0"
+check "matrix runs gone after env delete" \
+  "$(head -n1 <<<"$body_code" | jq '[.rows[].cells[] | select(. != null)] | length')" "0"
 
 body_code=$(req GET "/api/environments/$ENV_ID")
 check "get after delete 404" "$(tail -n1 <<<"$body_code")" "404"

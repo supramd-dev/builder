@@ -45,6 +45,12 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// Environment management (requires an authenticated user).
 	mux.HandleFunc("/api/environments", s.requireAuth(s.handleEnvironments))
 	mux.HandleFunc("/api/environments/", s.requireAuth(s.handleEnvironmentItem))
+
+	// Test dashboard: matrix view, result reporting, run details
+	// (require an authenticated user).
+	mux.HandleFunc("/api/dashboard/", s.requireAuth(s.handleDashboard))
+	mux.HandleFunc("/api/test-runs", s.requireAuth(s.handleTestRuns))
+	mux.HandleFunc("/api/test-runs/", s.requireAuth(s.handleTestRunItem))
 }
 
 // --- handlers ---

@@ -138,3 +138,85 @@ export async function updateSiteConfig(
     body: JSON.stringify(input),
   })
 }
+
+// --- Test dashboard ---
+
+export type DashboardKind = 'regression' | 'unit'
+
+export interface DashboardEnvironment {
+  id: number
+  name: string
+  description: string
+  enabled: boolean
+}
+
+export interface DashboardCommit {
+  id: number
+  sha: string
+  shortSha: string
+  repo: string
+  ref: string
+  author: string
+  message: string
+  pushedAt: string
+}
+
+export interface RunCell {
+  runId: number
+  status: 'passed' | 'failed'
+  total: number
+  passed: number
+  failed: number
+  startedAt: string
+  finishedAt: string
+}
+
+export interface DashboardRow {
+  commit: DashboardCommit
+  cells: (RunCell | null)[]
+}
+
+export interface Dashboard {
+  kind: DashboardKind
+  repoFilter?: string
+  environments: DashboardEnvironment[]
+  rows: DashboardRow[] // one row per commit, newest first
+}
+
+export async function getDashboard(
+  kind: DashboardKind,
+  commits = 10,
+): Promise<Dashboard> {
+  return api<Dashboard>(`/api/dashboard/${kind}?commits=${commits}`)
+}
+
+export interface CaseResult {
+  id: number
+  name: string
+  status: 'passed' | 'failed'
+  errorValue: number
+  message: string
+}
+
+export interface TestRunDetail {
+  id: number
+  kind: DashboardKind
+  status: 'passed' | 'failed'
+  total: number
+  passed: number
+  failed: number
+  environmentId: number
+  environmentName: string | null
+  commitId: number
+  commitSha: string | null
+  commitShortSha: string | null
+  commitMessage: string | null
+  commitAuthor: string | null
+  startedAt: string
+  finishedAt: string
+  cases: CaseResult[]
+}
+
+export async function getTestRun(id: number): Promise<TestRunDetail> {
+  return api<TestRunDetail>(`/api/test-runs/${id}`)
+}
