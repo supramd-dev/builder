@@ -1,4 +1,4 @@
-.PHONY: dev-frontend dev-backend build serve test clean adduser
+.PHONY: dev-frontend dev-backend build serve test smoke-test clean adduser
 
 # --- Frontend (Vite dev server, hot reload, :5173) ---
 dev-frontend:
@@ -6,20 +6,25 @@ dev-frontend:
 
 # --- Backend (Go, :8080) ---
 dev-backend:
-	go run ./server
+	cd server && go run .
 
 build:
 	cd frontend && npm run build
 
 serve: build
-	go run ./server
+	cd server && go run .
 
 test:
 	cd server && go test ./...
 
+# End-to-end API smoke test against a running server (default :8080).
+# Override with USER/EMAIL/PASSWORD if needed.
+smoke-test:
+	scripts/api-smoke.sh
+
 clean:
 	rm -rf frontend/dist frontend/node_modules server/md-builder.db md-builder.db
 
-# Create a user via the CLI. Override: make adduser USER=alice EMAIL=a@b.c
+# Create a user via the CLI. Override: make adduser USER=alice EMAIL=a@b.c [PASSWORD=x]
 adduser:
-	go run ./server adduser -username $(USER) -email $(EMAIL)
+	cd server && go run . adduser -username $(USER) -email $(EMAIL)

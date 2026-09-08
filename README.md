@@ -28,10 +28,12 @@ md-builder/
     ├── src/App.tsx        # shell: login vs user center routing
     ├── src/LoginPage.tsx  # static login page
     ├── src/UserCenter.tsx # environment management dashboard
+    ├── src/RunPage.tsx    # remote command/script execution (Monaco editor)
     ├── src/EnvironmentForm.tsx # create/edit environment form
     ├── src/api.ts         # typed API client
-    ├── src/index.css      # Tailwind theme tokens
+    ├── src/index.css      # hand-written sourcehut-style CSS
     └── vite.config.ts     # dev proxy /api -> :8080
+scripts/                  # end-to-end API smoke test
 ```
 
 ## Development
@@ -103,6 +105,22 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 
 Sessions are stored in the database as random 64-char hex tokens and expire
 after 7 days. Passwords are hashed with bcrypt (cost 12).
+
+### API smoke test
+
+[scripts/api-smoke.sh](scripts/api-smoke.sh) exercises the full API surface
+against a running server: auth gates, login/logout, environment CRUD,
+connectivity test, command exec, script execution (bash/python), enable/disable
+gating and deletion. It is idempotent — safe to run repeatedly.
+
+```sh
+make smoke-test          # against the default server on :8080
+# or directly, with options:
+BASE_URL=http://localhost:9000 USERNAME=alice PASSWORD=secret scripts/api-smoke.sh
+SKIP_SETUP=1 scripts/api-smoke.sh   # user already exists, skip adduser
+```
+
+It exits non-zero if any check fails, so it can double as a CI gate.
 
 ### Script execution
 
