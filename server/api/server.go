@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -28,12 +29,16 @@ func New(s *store.Store) *Server {
 	return &Server{Store: s}
 }
 
-// Register mounts the auth API on the given mux.
+// Register mounts the auth + environment API on the given mux.
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/logout", s.handleLogout)
 	mux.HandleFunc("/api/me", s.handleMe)
 	mux.HandleFunc("/api/health", s.handleHealth)
+
+	// Environment management (requires an authenticated user).
+	mux.HandleFunc("/api/environments", s.requireAuth(s.handleEnvironments))
+	mux.HandleFunc("/api/environments/", s.requireAuth(s.handleEnvironmentItem))
 }
 
 // --- handlers ---
@@ -165,3 +170,24 @@ func (s *Server) AuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
+
+// requireAuth wraps a handler that needs an authenticated user and passes the
+// user into the request context.
+func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, *store.User)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, ok := s.currentUser(r)
+		if !ok {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), userContextKey{}, user)), user)
+	}
+}
+
+// userFromRequest extracts the authenticated user injected by requireAuth.
+func userFromRequest(r *http.Request) *store.User {
+	user, _ := r.Context().Value(userContextKey{}).(*store.User)
+	return user
+}
+
+type userContextKey struct{}

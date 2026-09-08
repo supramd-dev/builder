@@ -1,30 +1,10 @@
 import { useEffect, useState } from 'react'
 import './App.css'
-
-// Minimal API client. Cookies (session token) are sent automatically since
-// /api is same-origin (via the Vite dev proxy or the Go server).
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...init,
-  })
-  const data = (await res.json().catch(() => null)) as (T & { error?: string }) | null
-  if (!res.ok) {
-    throw new Error(data?.error || `Request failed (${res.status})`)
-  }
-  return data as T
-}
-
-interface Me {
-  username: string
-  email: string
-}
+import { api, type Me } from './api'
+import LoginPage from './LoginPage'
+import UserCenter from './UserCenter'
 
 function App() {
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [submitting, setSubmitting] = useState(false)
   const [me, setMe] = useState<Me | null>(null)
   const [loadingMe, setLoadingMe] = useState(true)
 
@@ -36,23 +16,6 @@ function App() {
       .finally(() => setLoadingMe(false))
   }, [])
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setError('')
-    setSubmitting(true)
-    try {
-      const user = await api<Me>('/api/login', {
-        method: 'POST',
-        body: JSON.stringify({ username, password }),
-      })
-      setMe(user)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
   async function handleLogout() {
     try {
       await api('/api/logout', { method: 'POST' })
@@ -60,8 +23,6 @@ function App() {
       // Ignore logout errors; clear local state regardless.
     }
     setMe(null)
-    setUsername('')
-    setPassword('')
   }
 
   return (
@@ -94,75 +55,11 @@ function App() {
         {loadingMe ? (
           <p className="text-sm text-ink-muted">Loading…</p>
         ) : me ? (
-          <div className="w-full max-w-sm space-y-4 border border-border bg-surface p-6">
-            <h1 className="text-lg font-semibold">Signed in</h1>
-            <dl className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <dt className="text-ink-muted">Username</dt>
-                <dd>{me.username}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-ink-muted">Email</dt>
-                <dd>{me.email}</dd>
-              </div>
-            </dl>
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="w-full border border-border bg-surface-alt py-1.5 text-sm hover:bg-border"
-            >
-              Log out
-            </button>
+          <div className="w-full">
+            <UserCenter me={me} />
           </div>
         ) : (
-          <form
-            onSubmit={handleSubmit}
-            className="w-full max-w-sm space-y-5 border border-border bg-surface p-6"
-            noValidate
-          >
-            <h1 className="text-lg font-semibold">Log in</h1>
-
-            <label className="block space-y-1">
-              <span className="text-sm text-ink-muted">Username</span>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
-                className="w-full border border-border bg-surface px-2 py-1.5 text-sm outline-none focus:border-accent"
-              />
-            </label>
-
-            <label className="block space-y-1">
-              <span className="text-sm text-ink-muted">Password</span>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                className="w-full border border-border bg-surface px-2 py-1.5 text-sm outline-none focus:border-accent"
-              />
-            </label>
-
-            {error && (
-              <p role="alert" className="text-sm text-danger">
-                {error}
-              </p>
-            )}
-
-            <button
-              type="submit"
-              disabled={submitting}
-              className="w-full border border-accent bg-accent py-1.5 text-sm text-white hover:bg-accent-hover disabled:opacity-50"
-            >
-              {submitting ? 'Logging in…' : 'Log in'}
-            </button>
-
-            <p className="text-xs text-ink-muted">
-              A test execution and results platform for scientific computing
-              software such as molecular dynamics.
-            </p>
-          </form>
+          <LoginPage onLogin={setMe} />
         )}
       </main>
 

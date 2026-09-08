@@ -19,12 +19,17 @@ md-builder/
 │   ├── main.go            # entrypoint; subcommand dispatch + HTTP server
 │   ├── adduser.go         # CLI: create a user
 │   ├── terminal.go         # read password from TTY without echo
-│   ├── store/             # GORM models + queries (users, sessions)
+│   ├── store/             # GORM models + queries (users, sessions, environments)
 │   ├── auth/               # bcrypt hashing + session tokens
-│   ├── api/                # HTTP handlers (login/logout/me/health)
+│   ├── api/                # HTTP handlers (auth + environments)
+│   ├── sshcheck/           # SSH connectivity test package
 │   └── go.mod
 └── frontend/              # Vite + React + TS frontend
-    ├── src/App.tsx        # login page + auth state
+    ├── src/App.tsx        # shell: login vs user center routing
+    ├── src/LoginPage.tsx  # static login page
+    ├── src/UserCenter.tsx # environment management dashboard
+    ├── src/EnvironmentForm.tsx # create/edit environment form
+    ├── src/api.ts         # typed API client
     ├── src/index.css      # Tailwind theme tokens
     └── vite.config.ts     # dev proxy /api -> :8080
 ```

@@ -83,9 +83,9 @@ func openDB(dsn string) (*gorm.DB, error) {
 	return db, nil
 }
 
-// migrate creates/updates the users and sessions tables via GORM AutoMigrate.
+// migrate creates/updates the schema via GORM AutoMigrate.
 func (s *Store) migrate() error {
-	if err := s.DB.AutoMigrate(&User{}, &Session{}); err != nil {
+	if err := s.DB.AutoMigrate(&User{}, &Session{}, &TestEnvironment{}); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}
 	return nil
