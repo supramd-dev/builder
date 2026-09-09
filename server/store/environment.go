@@ -54,10 +54,12 @@ func NormalizeTags(raw string) string {
 	return strings.Join(out, ",")
 }
 
-// TagList splits the stored tag list into individual tags.
+// TagList splits the stored tag list into individual tags. An environment
+// without tags yields an empty slice (not nil) so JSON encoding produces
+// [] rather than null.
 func (e *TestEnvironment) TagList() []string {
 	if e.Tags == "" {
-		return nil
+		return []string{}
 	}
 	return strings.Split(e.Tags, ",")
 }

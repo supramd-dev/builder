@@ -176,7 +176,7 @@ export default function UserCenter({ me }: Props) {
                   </td>
                   <td>{env.username}</td>
                   <td>
-                    {env.tags.length > 0 ? (
+                    {env.tags && env.tags.length > 0 ? (
                       <span className="env-tags">
                         {env.tags.map((tag) => (
                           <span key={tag} className="env-tag">
