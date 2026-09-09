@@ -16,3 +16,4 @@ frontend/.vite/
 *.swp
 .idea/
 .vscode/
+private/

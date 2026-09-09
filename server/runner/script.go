@@ -16,6 +16,10 @@ type ScriptInput struct {
 	EnvTags       string // comma-joined
 	Entry         *MergedEntry
 	Creds         *GitCredentials // optional deploy key/token for cloning
+	// StreamOutput sends stage output to the SSH session's stdout instead
+	// of the per-stage log files (used by the interactive build test; the
+	// scheduled jobs keep log files for the failure summaries).
+	StreamOutput bool
 }
 
 // TotalScriptTimeout returns the overall SSH session timeout for a job:
@@ -154,17 +158,24 @@ func BuildScript(in *ScriptInput) (string, error) {
 	if buildTimeout <= 0 {
 		buildTimeout = DefaultTimeoutSeconds
 	}
+	// Stage redirection: log files for the scheduled jobs (the report
+	// summaries quote their tails), streamed stdout for interactive runs.
+	buildDest := `>"$BUILD_LOG" 2>&1`
+	buildAppend := `>>"$BUILD_LOG" 2>&1`
+	if in.StreamOutput {
+		buildDest, buildAppend = `2>&1`, `2>&1`
+	}
 	w("# Build stage.")
 	if entry.Build.Generator == GeneratorScript {
-		w("if (cd \"$CODE\" && timeout %d bash -c %s >\"$BUILD_LOG\" 2>&1); then", buildTimeout, shq(entry.Build.Command))
+		w("if (cd \"$CODE\" && timeout %d bash -c %s %s); then", buildTimeout, shq(entry.Build.Command), buildDest)
 	} else {
 		flags := strings.TrimSpace(entry.Build.CMakeFlags)
 		threads := entry.Build.Threads
 		if threads <= 0 {
 			threads = DefaultBuildThreads
 		}
-		w("if (cd \"$CODE\" && timeout %d cmake %s . >\"$BUILD_LOG\" 2>&1 && ", buildTimeout, flags)
-		w("     timeout %d cmake --build . -j%d >>\"$BUILD_LOG\" 2>&1); then", buildTimeout, threads)
+		w("if (cd \"$CODE\" && timeout %d cmake %s . %s && ", buildTimeout, flags, buildDest)
+		w("     timeout %d cmake --build . -j%d %s); then", buildTimeout, threads, buildAppend)
 	}
 	w("  BUILD_STATUS=passed")
 	w("else")

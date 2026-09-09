@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import Editor, { type Monaco, type OnMount } from '@monaco-editor/react'
 import {
+  buildTest,
   execEnvironment,
   execScript,
+  getSiteConfig,
   listEnvironments,
+  type BuildTestResult,
   type ExecResult,
   type ScriptLanguage,
   type TestEnvironment,
@@ -36,7 +39,44 @@ const INTERPRETERS: Record<ScriptLanguage, string[]> = {
   python: ['#!/usr/bin/env python3', '#!/usr/bin/env python', '# python3'],
 }
 
+// RunPage offers two ways to exercise a test environment, side by side as
+// tabs: ad-hoc command/script execution, and an interactive build test
+// (clone the site-configured code repository on the environment and run a
+// build command).
 export default function RunPage({ onError }: RunPageProps) {
+  const [tab, setTab] = useState<'exec' | 'build'>('exec')
+
+  return (
+    <div>
+      <h2>Run command</h2>
+      <div className="tabs" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'exec'}
+          className={tab === 'exec' ? 'tab active' : 'tab'}
+          onClick={() => setTab('exec')}
+        >
+          Exec / script
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'build'}
+          className={tab === 'build' ? 'tab active' : 'tab'}
+          onClick={() => setTab('build')}
+        >
+          Build test
+        </button>
+      </div>
+      {tab === 'exec' ? <ExecTab onError={onError} /> : <BuildTestTab onError={onError} />}
+    </div>
+  )
+}
+
+// --- Exec / script tab (ad-hoc command & script execution) ------------------
+
+function ExecTab({ onError }: RunPageProps) {
   const [environments, setEnvironments] = useState<TestEnvironment[]>([])
   const [loading, setLoading] = useState(true)
   const [envId, setEnvId] = useState('')
@@ -121,7 +161,6 @@ export default function RunPage({ onError }: RunPageProps) {
 
   return (
     <div>
-      <h2>Run command</h2>
       <p className="text-muted">
         Execute a bash command or Python script on a remote test environment
         over SSH. Name the interpreter in the first-line comment
@@ -236,6 +275,192 @@ export default function RunPage({ onError }: RunPageProps) {
             ) : (
               <span style={{ color: 'var(--danger)' }}>
                 Failed (exit code {result.exitCode})
+              </span>
+            )}{' '}
+            · {result.durationMilliSeconds} ms
+          </p>
+          {result.stdout && (
+            <>
+              <h4>stdout</h4>
+              <pre className="output">{result.stdout}</pre>
+            </>
+          )}
+          {result.stderr && (
+            <>
+              <h4>stderr</h4>
+              <pre className="output">{result.stderr}</pre>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// --- Build test tab (clone + build on the environment) ----------------------
+
+function BuildTestTab({ onError }: RunPageProps) {
+  const [environments, setEnvironments] = useState<TestEnvironment[]>([])
+  const [loading, setLoading] = useState(true)
+  const [envId, setEnvId] = useState('')
+  const [ref, setRef] = useState('')
+  const [buildCommand, setBuildCommand] = useState('')
+  const [repo, setRepo] = useState('')
+  const [running, setRunning] = useState(false)
+  const [result, setResult] = useState<BuildTestResult | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([listEnvironments(), getSiteConfig().catch(() => null)])
+      .then(([envs, cfg]) => {
+        if (cancelled) return
+        const enabled = envs.filter((e) => e.enabled)
+        setEnvironments(enabled)
+        if (enabled.length > 0) {
+          setEnvId((current) =>
+            current && enabled.some((e) => String(e.id) === current)
+              ? current
+              : String(enabled[0].id),
+          )
+        }
+        if (cfg) setRepo(cfg.codeRepo)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        const msg = err instanceof Error ? err.message : String(err)
+        setError(msg)
+        onError(msg)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [onError])
+
+  const run = async () => {
+    if (!envId) return
+    setRunning(true)
+    setError('')
+    setResult(null)
+    try {
+      const res = await buildTest(Number(envId), buildCommand, ref)
+      setResult(res)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div>
+      <p className="text-muted">
+        Clone the site-configured code repository on the selected environment
+        (via the deploy key / token from the site settings) and run a build
+        command inside it — a dry run of a matrix build before wiring it into{' '}
+        <code>md-builder.yaml</code>.{' '}
+        {repo ? (
+          <>
+            Repository: <code>{repo}</code>
+          </>
+        ) : (
+          <em>No code repository configured in the site settings.</em>
+        )}
+      </p>
+
+      {loading ? (
+        <p>Loading environments…</p>
+      ) : environments.length === 0 ? (
+        <div className="alert alert-danger">
+          No enabled environments available. Enable one in the user center
+          first.
+        </div>
+      ) : (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (!running) void run()
+          }}
+        >
+          <div className="run-controls">
+            <div className="form-group">
+              <label htmlFor="build-env">Environment</label>
+              <select
+                id="build-env"
+                value={envId}
+                onChange={(e) => {
+                  setEnvId(e.target.value)
+                  setResult(null)
+                }}
+              >
+                {environments.map((env) => (
+                  <option key={env.id} value={env.id}>
+                    {env.name} ({env.host})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="build-ref">Branch, tag or commit (optional)</label>
+              <input
+                id="build-ref"
+                type="text"
+                value={ref}
+                onChange={(e) => setRef(e.target.value)}
+                placeholder="main / v1.2.0 / a commit id"
+              />
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="build-command">Build command</label>
+            <textarea
+              id="build-command"
+              className="form-control"
+              rows={4}
+              value={buildCommand}
+              onChange={(e) => setBuildCommand(e.target.value)}
+              placeholder="cmake . && cmake --build . -j8"
+              style={{
+                fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+                fontSize: '0.875rem',
+              }}
+            />
+            <small className="text-muted">
+              Runs inside the cloned repository directory with the same
+              environment as the scheduled jobs. Empty uses the CMake default.
+            </small>
+          </div>
+
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={running || !repo}
+          >
+            {running ? 'Building…' : 'Build'}
+          </button>
+        </form>
+      )}
+
+      {error && <div className="alert alert-danger">{error}</div>}
+
+      {result && (
+        <div style={{ marginTop: '1rem' }}>
+          <h3>Result</h3>
+          <p>
+            <strong>Status:</strong>{' '}
+            {result.success ? (
+              <span style={{ color: 'var(--success)' }}>
+                Build succeeded (exit code {result.exitCode})
+              </span>
+            ) : (
+              <span style={{ color: 'var(--danger)' }}>
+                Build failed (exit code {result.exitCode})
               </span>
             )}{' '}
             · {result.durationMilliSeconds} ms
