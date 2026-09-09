@@ -8,6 +8,7 @@ import SettingsPage from './SettingsPage'
 import DashboardPage from './DashboardPage'
 import TestRunDetailPage from './TestRunDetailPage'
 import CaseDetailPage from './CaseDetailPage'
+import DocsPage from './DocsPage'
 import type { CaseResult } from './api'
 
 // Page is the client-side routing state. The dashboard hierarchy is
@@ -17,6 +18,7 @@ type Page =
   | { view: 'environments' }
   | { view: 'run' }
   | { view: 'settings' }
+  | { view: 'docs' }
   | { view: 'run-detail'; runId: number }
   | { view: 'case-detail'; runId: number; caseResult: CaseResult }
 
@@ -119,6 +121,8 @@ function App() {
             <RunPage onError={console.warn} />
           ) : page.view === 'settings' ? (
             <SettingsPage onError={console.warn} />
+          ) : page.view === 'docs' ? (
+            <DocsPage />
           ) : (
             <UserCenter me={me} />
           )
@@ -132,6 +136,11 @@ function App() {
         <span className="text-muted">
           md-builder · Scientific computing test platform
         </span>
+        {me && (
+          <span className="footer-nav">
+            {navLink({ view: 'docs' }, 'Documentation')}
+          </span>
+        )}
       </footer>
     </div>
   )
