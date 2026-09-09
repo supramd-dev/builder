@@ -107,8 +107,8 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
-| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `testInputRepo`, `testRepoRef`) |
-| PUT    | `/api/site-config`              | Update site configuration                     |
+| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `testInputRepo`, `testRepoRef`, credential set-flags) |
+| PUT    | `/api/site-config`              | Update site configuration (deploy key/token: empty = keep, `clearDeploy*` = remove) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` (requires session) |
 | POST   | `/api/test-runs`                | Report a test run result (requires session)   |
 | GET    | `/api/test-runs/{id}`           | One run's detail incl. per-case results       |
@@ -129,6 +129,33 @@ Both repository locations are expected to be **GitLab** repositories
 The settings page in the UI states this prominently. Locations are not
 host-validated at the API level, since self-hosted GitLab instances live on
 arbitrary hosts.
+
+#### Private repositories: deploy key / deploy token
+
+For private repositories the settings page also accepts a **GitLab deploy
+token** or a **deploy key** (SSH private key). Either credential is used in
+two places: by the server itself (to fetch `md-builder.yaml` from the code
+repository) and by the generated job scripts on the test environments (to
+clone both repositories).
+
+- **Deploy token** — a GitLab deploy token or personal/group access token
+  with `read_repository` scope, plus the username GitLab shows next to it
+  (`gitlab+deploy-token-42`; empty means `oauth2`). It applies to https
+  repository URLs: the server passes it via an inline git credential
+  helper, the remote scripts via `GIT_CONFIG_*` environment variables —
+  the token never lands in a `.git/config` or a process command line.
+- **Deploy key** — a PEM-encoded SSH private key whose public counterpart
+  is registered as a deploy key with read access to both repositories.
+  https repository URLs are converted to their `ssh://git@host/...` form;
+  the key is used via `GIT_SSH_COMMAND` (a temp file on the server, a
+  file under the job directory on the environment, removed after the job).
+
+Both fields are write-only: the API reports only whether one is set
+(`deployKeySet` / `deployTokenSet`). An update with an empty value keeps
+the stored secret; the *Remove …* checkboxes clear it. When both are set,
+the token is preferred for https URLs and the key for SSH ones. Token
+material is redacted from dispatch/execution error messages before they
+are stored.
 
 ### GitLab webhooks
 
@@ -262,7 +289,9 @@ The server embeds a job scheduler (`server/worker`) started from main:
   match entries to enabled environments, create pending jobs (one per
   entry, requeueing an existing (commit, environment) job on re-push).
   Each job stores a config snapshot, so later YAML changes do not affect
-  already-dispatched jobs.
+  already-dispatched jobs. When a deploy key or deploy token is
+  configured, the fetch uses it (see
+  [Private repositories](#private-repositories-deploy-key--deploy-token)).
 - **Execution pool**: 2 goroutines by default (`MD_BUILDER_WORKERS`,
   `MD_BUILDER_DISABLE_WORKER=1` disables), polling every 2s, claiming
   jobs atomically. Jobs left in `running` after a crash are reset at
@@ -288,9 +317,9 @@ The server embeds a job scheduler (`server/worker`) started from main:
 
 Prerequisites: the server needs `git` on PATH and read access to the code
 repository (to read the YAML); each remote environment needs `git`, `bash`
-and `timeout`, plus access to both repositories (public repos, or
-credentials configured on the environment itself — injecting deploy
-tokens is future work).
+and `timeout`, plus access to both repositories — public repos work
+as-is, private ones use the deploy key / deploy token configured in the
+site settings (see above).
 
 ### Demo data
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"md-builder/server/runner"
 	"md-builder/server/store"
 	"md-builder/server/worker"
 )
@@ -18,7 +19,7 @@ import (
 func newDispatchTestServer(t *testing.T, yaml string) (*Server, *store.Store) {
 	t.Helper()
 	apiServer, s := newTestServer(t)
-	fetcher := func(repoURL, sha string) ([]byte, error) {
+	fetcher := func(repoURL, sha string, creds *runner.GitCredentials) ([]byte, error) {
 		if yaml == "" {
 			return nil, fmt.Errorf("repo unreachable")
 		}

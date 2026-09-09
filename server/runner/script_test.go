@@ -86,6 +86,134 @@ func TestBuildScriptScriptGeneratorAndNoTestInput(t *testing.T) {
 	}
 }
 
+func TestBuildScriptWithDeployToken(t *testing.T) {
+	creds := &GitCredentials{DeployToken: "glpat-secret", DeployTokenUser: "gitlab+deploy-token-7"}
+	script, err := BuildScript(&ScriptInput{
+		CommitSHA:     "0123456789abcdef",
+		CodeRepoURL:   "https://gitlab.example.com/group/code",
+		TestInputRepo: "https://gitlab.example.com/group/tests",
+		TestInputRef:  "main",
+		EnvName:       "cpu-node-1",
+		EnvTags:       "cpu",
+		Entry:         sampleEntry(),
+		Creds:         creds,
+	})
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+
+	for _, want := range []string{
+		// Inline credential helper via environment config.
+		"export GIT_CONFIG_COUNT=2",
+		"export GIT_CONFIG_KEY_0='credential.helper'",
+		"export GIT_CONFIG_VALUE_0=''",
+		"export GIT_CONFIG_VALUE_1='!f() { echo username='\\''gitlab+deploy-token-7'\\''; echo password='\\''glpat-secret'\\''; }; f'",
+		// Clones still use the plain URLs (no token embedded there).
+		"git clone --quiet --depth 1 --branch 'main' 'https://gitlab.example.com/group/tests' \"$TESTS\"",
+		"git clone --quiet 'https://gitlab.example.com/group/code' \"$CODE\"",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q\n--- script ---\n%s", want, script)
+		}
+	}
+	if strings.Contains(script, "https://gitlab+deploy-token-7:glpat-secret@") {
+		t.Errorf("token must not be embedded in URLs:\n%s", script)
+	}
+	if strings.Contains(script, "GIT_SSH_COMMAND") {
+		t.Errorf("token mode must not emit ssh plumbing:\n%s", script)
+	}
+}
+
+func TestBuildScriptWithDeployKey(t *testing.T) {
+	pem := "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----"
+	creds := &GitCredentials{DeployKey: pem}
+	script, err := BuildScript(&ScriptInput{
+		CommitSHA:     "0123456789abcdef",
+		CodeRepoURL:   "https://gitlab.example.com/group/code",
+		TestInputRepo: "https://gitlab.example.com/group/tests",
+		TestInputRef:  "main",
+		EnvName:       "cpu-node-1",
+		EnvTags:       "cpu",
+		Entry:         sampleEntry(),
+		Creds:         creds,
+	})
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+
+	for _, want := range []string{
+		// Key written to the job directory and removed on exit.
+		"KEYFILE=\"$WORK/.md-builder-deploy-key\"",
+		"trap 'rm -f \"$KEYFILE\"' EXIT",
+		"cat >\"$KEYFILE\" <<'MD-BUILDER-DEPLOY-KEY-EOF'",
+		pem,
+		"MD-BUILDER-DEPLOY-KEY-EOF",
+		"chmod 600 \"$KEYFILE\"",
+		"export GIT_SSH_COMMAND=\"ssh -i \\\"$KEYFILE\\\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new\"",
+		// https URLs rewritten to their SSH form.
+		"git clone --quiet --depth 1 --branch 'main' 'ssh://git@gitlab.example.com/group/tests.git' \"$TESTS\"",
+		"git clone --quiet 'ssh://git@gitlab.example.com/group/code.git' \"$CODE\"",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("script missing %q\n--- script ---\n%s", want, script)
+		}
+	}
+	// The checkout still runs in the clone (plain git, config via env).
+	if !strings.Contains(script, "git checkout --quiet '0123456789abcdef'") {
+		t.Errorf("checkout missing:\n%s", script)
+	}
+}
+
+func TestBuildScriptDeployKeyLeavesLocalPathsAlone(t *testing.T) {
+	// A file:// repo (local e2e testing) must not be rewritten to ssh://.
+	pem := "-----BEGIN OPENSSH PRIVATE KEY-----\nx\n-----END OPENSSH PRIVATE KEY-----"
+	creds := &GitCredentials{DeployKey: pem}
+	script, err := BuildScript(&ScriptInput{
+		CommitSHA:     "0123456789abcdef",
+		CodeRepoURL:   "file:///tmp/md-e2e/code",
+		TestInputRepo: "file:///tmp/md-e2e/tests",
+		TestInputRef:  "main",
+		EnvName:       "cpu",
+		EnvTags:       "cpu",
+		Entry:         sampleEntry(),
+		Creds:         creds,
+	})
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+	if !strings.Contains(script, "'file:///tmp/md-e2e/code'") ||
+		!strings.Contains(script, "'file:///tmp/md-e2e/tests'") {
+		t.Errorf("file:// URLs should be left unchanged:\n%s", script)
+	}
+	// The key file plumbing is still emitted (harmless for file:// clones).
+	if !strings.Contains(script, "GIT_SSH_COMMAND") {
+		t.Errorf("expected ssh plumbing for the key:\n%s", script)
+	}
+}
+
+func TestBuildScriptWithoutCredentials(t *testing.T) {
+	script, err := BuildScript(&ScriptInput{
+		CommitSHA:     "0123456789abcdef",
+		CodeRepoURL:   "https://gitlab.example.com/group/code",
+		TestInputRepo: "https://gitlab.example.com/group/tests",
+		TestInputRef:  "main",
+		EnvName:       "cpu-node-1",
+		EnvTags:       "cpu",
+		Entry:         sampleEntry(),
+	})
+	if err != nil {
+		t.Fatalf("build script: %v", err)
+	}
+	for _, unwanted := range []string{"GIT_CONFIG_COUNT", "GIT_SSH_COMMAND", "KEYFILE=", "DEPLOY-KEY-EOF"} {
+		if strings.Contains(script, unwanted) {
+			t.Errorf("no credentials configured; script should not contain %q:\n%s", unwanted, script)
+		}
+	}
+	if !strings.Contains(script, "git clone --quiet 'https://gitlab.example.com/group/code' \"$CODE\"") {
+		t.Errorf("plain clone missing:\n%s", script)
+	}
+}
+
 func TestTotalScriptTimeout(t *testing.T) {
 	entry := sampleEntry()
 	total, err := TotalScriptTimeout(entry)

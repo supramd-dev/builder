@@ -262,6 +262,44 @@ check "config update 200" "$(tail -n1 <<<"$body_code")" "200"
 check "config update persisted ref" \
   "$(head -n1 <<<"$body_code" | jq -r .testRepoRef)" "main"
 
+# Deploy key / deploy token: write-only secrets. Initial state: unset.
+body_code=$(req GET /api/site-config)
+check "config credentials initially unset" \
+  "$(head -n1 <<<"$body_code" | jq -r '"\(.deployKeySet)/\(.deployTokenSet)"')" "false/false"
+
+# Setting them reports set-flags without echoing the secrets.
+body_code=$(req PUT /api/site-config \
+  '{"codeRepo":"https://gitlab.com/group/code","testInputRepo":"https://gitlab.com/group/test-inputs","testRepoRef":"main","deployKey":"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n","deployToken":"glpat-smoke-secret","deployTokenUser":"gitlab+deploy-token-7"}')
+check "config set credentials 200" "$(tail -n1 <<<"$body_code")" "200"
+check "config credentials reported set" \
+  "$(head -n1 <<<"$body_code" | jq -r '"\(.deployKeySet)/\(.deployTokenSet)"')" "true/true"
+check "config token user echoed" \
+  "$(head -n1 <<<"$body_code" | jq -r .deployTokenUser)" "gitlab+deploy-token-7"
+if grep -q "glpat-smoke-secret" <<<"$(head -n1 <<<"$body_code")"; then
+  check "config secrets not echoed" "leaked" "clean"
+else
+  check "config secrets not echoed" "clean" "clean"
+fi
+
+# An update without the secret fields keeps them (empty = keep).
+body_code=$(req PUT /api/site-config \
+  '{"codeRepo":"https://gitlab.com/group/code","testInputRepo":"https://gitlab.com/group/test-inputs","testRepoRef":"dev"}')
+check "config keep credentials 200" "$(tail -n1 <<<"$body_code")" "200"
+check "config credentials kept" \
+  "$(head -n1 <<<"$body_code" | jq -r '"\(.deployKeySet)/\(.deployTokenSet)"')" "true/true"
+
+# A non-PEM deploy key is rejected.
+body_code=$(req PUT /api/site-config \
+  '{"codeRepo":"https://gitlab.com/group/code","testInputRepo":"https://gitlab.com/group/test-inputs","testRepoRef":"main","deployKey":"not a pem"}')
+check "config bad deploy key 400" "$(tail -n1 <<<"$body_code")" "400"
+
+# Explicit clear flags remove the credentials.
+body_code=$(req PUT /api/site-config \
+  '{"codeRepo":"https://gitlab.com/group/code","testInputRepo":"https://gitlab.com/group/test-inputs","testRepoRef":"main","clearDeployKey":true,"clearDeployToken":true,"deployTokenUser":""}')
+check "config clear credentials 200" "$(tail -n1 <<<"$body_code")" "200"
+check "config credentials cleared" \
+  "$(head -n1 <<<"$body_code" | jq -r '"\(.deployKeySet)/\(.deployTokenSet)"')" "false/false"
+
 body_code=$(req GET /api/site-config)
 check "config re-read persists" \
   "$(head -n1 <<<"$body_code" | jq -r .codeRepo)" "https://gitlab.com/group/code"

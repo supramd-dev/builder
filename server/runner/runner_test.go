@@ -193,7 +193,7 @@ matrix:
     unit:
       command: "ctest -L unit"
 `
-	fetcher := func(repoURL, sha string) ([]byte, error) {
+	fetcher := func(repoURL, sha string, creds *GitCredentials) ([]byte, error) {
 		if repoURL == "" {
 			t.Error("fetcher should receive the code repo URL")
 		}
@@ -240,7 +240,12 @@ func (d *dispatcherShim) DispatchForCommit(commit *store.Commit) (jobsCreated, e
 	if err != nil {
 		return 0, 0, err
 	}
-	yamlBytes, err := d.fetch(cfg.CodeRepo, commit.SHA)
+	creds := &GitCredentials{
+		DeployKey:       cfg.DeployKey,
+		DeployToken:     cfg.DeployToken,
+		DeployTokenUser: cfg.DeployTokenUser,
+	}
+	yamlBytes, err := d.fetch(cfg.CodeRepo, commit.SHA, creds)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -55,6 +55,11 @@ func (r *Runner) Run(job *store.Job) {
 		return
 	}
 
+	creds := &GitCredentials{
+		DeployKey:       cfg.DeployKey,
+		DeployToken:     cfg.DeployToken,
+		DeployTokenUser: cfg.DeployTokenUser,
+	}
 	script, err := BuildScript(&ScriptInput{
 		CommitSHA:     commit.SHA,
 		CodeRepoURL:   cfg.CodeRepo,
@@ -63,6 +68,7 @@ func (r *Runner) Run(job *store.Job) {
 		EnvName:       env.Name,
 		EnvTags:       env.Tags,
 		Entry:         &entry,
+		Creds:         creds,
 	})
 	if err != nil {
 		r.failJob(job, err.Error())
@@ -117,6 +123,11 @@ func (r *Runner) Run(job *store.Job) {
 }
 
 func (r *Runner) failJob(job *store.Job, msg string) {
+	// The message may embed credential material (git echoing a failing
+	// URL, ssh warnings); redact what we know about.
+	if cfg, err := r.Store.GetSiteConfig(); err == nil {
+		msg = Redact(msg, cfg.DeployToken)
+	}
 	if err := r.Store.FinishJob(job.ID, store.JobFailed, msg); err != nil {
 		log.Printf("runner: job %d: finish failed: %v", job.ID, err)
 	}

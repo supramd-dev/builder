@@ -102,6 +102,12 @@ func TestEnvironmentAPIFlow(t *testing.T) {
 		t.Fatal("private key leaked in response")
 	}
 
+	// --- tags serialize as [] (not null) so the frontend can rely on ---
+	// --- tags.length (regression: "null is not an object")            ---
+	if !strings.Contains(rec.Body.String(), `"tags":[]`) {
+		t.Fatalf("environment without tags must serialize tags as [], got: %s", rec.Body.String())
+	}
+
 	// --- list (owner-scoped) ---
 	rec = authed(aliceCookie, http.MethodGet, "/api/environments", "")
 	if rec.Code != http.StatusOK {

@@ -20,6 +20,13 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
   const [codeRepo, setCodeRepo] = useState('')
   const [testInputRepo, setTestInputRepo] = useState('')
   const [testRepoRef, setTestRepoRef] = useState('')
+  const [deployKey, setDeployKey] = useState('')
+  const [deployToken, setDeployToken] = useState('')
+  const [deployTokenUser, setDeployTokenUser] = useState('')
+  const [clearDeployKey, setClearDeployKey] = useState(false)
+  const [clearDeployToken, setClearDeployToken] = useState(false)
+  const [deployKeySet, setDeployKeySet] = useState(false)
+  const [deployTokenSet, setDeployTokenSet] = useState(false)
   const [updatedAt, setUpdatedAt] = useState('')
 
   useEffect(() => {
@@ -30,6 +37,9 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
         setCodeRepo(cfg.codeRepo)
         setTestInputRepo(cfg.testInputRepo)
         setTestRepoRef(cfg.testRepoRef)
+        setDeployTokenUser(cfg.deployTokenUser)
+        setDeployKeySet(cfg.deployKeySet)
+        setDeployTokenSet(cfg.deployTokenSet)
         setUpdatedAt(cfg.updatedAt)
       })
       .catch((err: unknown) => {
@@ -52,10 +62,26 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
     setSaveError('')
     setSaved(false)
     try {
-      const cfg = await updateSiteConfig({ codeRepo, testInputRepo, testRepoRef })
+      const cfg = await updateSiteConfig({
+        codeRepo,
+        testInputRepo,
+        testRepoRef,
+        deployKey: clearDeployKey ? '' : deployKey,
+        deployToken: clearDeployToken ? '' : deployToken,
+        deployTokenUser,
+        clearDeployKey,
+        clearDeployToken,
+      })
       setCodeRepo(cfg.codeRepo)
       setTestInputRepo(cfg.testInputRepo)
       setTestRepoRef(cfg.testRepoRef)
+      setDeployTokenUser(cfg.deployTokenUser)
+      setDeployKeySet(cfg.deployKeySet)
+      setDeployTokenSet(cfg.deployTokenSet)
+      setDeployKey('')
+      setDeployToken('')
+      setClearDeployKey(false)
+      setClearDeployToken(false)
       setUpdatedAt(cfg.updatedAt)
       setSaved(true)
     } catch (err: unknown) {
@@ -143,6 +169,122 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
           </small>
         </div>
 
+        <h4>Repository credentials (optional)</h4>
+        <p className="text-muted">
+          For <strong>private</strong> repositories, configure a GitLab{' '}
+          <strong>deploy token</strong> or a{' '}
+          <strong>deploy key</strong> — used both by the server (to read the
+          test matrix) and by the test environments (to clone the
+          repositories). For public repositories leave both empty. The token
+          applies to https repository URLs; the key converts them to SSH.
+          Secrets are stored server-side and never shown again.
+        </p>
+
+        <div className="form-group">
+          <label htmlFor="cfg-deploy-token">
+            Deploy token{' '}
+            {deployTokenSet &&
+              !clearDeployToken &&
+              '(configured — leave blank to keep)'}
+          </label>
+          <input
+            id="cfg-deploy-token"
+            type="password"
+            value={deployToken}
+            onChange={(e) => {
+              setDeployToken(e.target.value)
+              if (e.target.value) setClearDeployToken(false)
+              setSaved(false)
+            }}
+            placeholder={
+              deployTokenSet ? '••••••••' : 'glpat-… or the token value'
+            }
+            autoComplete="new-password"
+          />
+          <small className="text-muted">
+            A GitLab deploy token or personal/group access token with{' '}
+            <code>read_repository</code> scope.
+          </small>
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="cfg-deploy-token-user">
+            Deploy token username (optional)
+          </label>
+          <input
+            id="cfg-deploy-token-user"
+            type="text"
+            value={deployTokenUser}
+            onChange={(e) => {
+              setDeployTokenUser(e.target.value)
+              setSaved(false)
+            }}
+            placeholder="oauth2 (default for access tokens)"
+          />
+          <small className="text-muted">
+            GitLab shows this next to the token, e.g.{' '}
+            <code>gitlab+deploy-token-42</code>. Leave empty for{' '}
+            <code>oauth2</code>.
+          </small>
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="cfg-deploy-key">
+            Deploy key (SSH private key){' '}
+            {deployKeySet &&
+              !clearDeployKey &&
+              '(configured — leave blank to keep)'}
+          </label>
+          <textarea
+            id="cfg-deploy-key"
+            className="form-control"
+            rows={3}
+            value={deployKey}
+            onChange={(e) => {
+              setDeployKey(e.target.value)
+              if (e.target.value) setClearDeployKey(false)
+              setSaved(false)
+            }}
+            placeholder="-----BEGIN OPENSSH PRIVATE KEY----- ..."
+            style={{ fontFamily: 'monospace', fontSize: '0.875rem' }}
+          />
+          <small className="text-muted">
+            PEM-encoded SSH private key of a GitLab deploy key (granted read
+            access to both repositories).
+          </small>
+        </div>
+
+        {(deployKeySet || deployTokenSet) && (
+          <div className="form-group">
+            <label style={{ fontWeight: 'normal' }}>
+              <input
+                type="checkbox"
+                checked={clearDeployKey}
+                onChange={(e) => {
+                  setClearDeployKey(e.target.checked)
+                  if (e.target.checked) setDeployKey('')
+                  setSaved(false)
+                }}
+                style={{ marginRight: '0.35rem', position: 'relative', top: '2px' }}
+              />
+              Remove stored deploy key
+            </label>
+            <label style={{ fontWeight: 'normal' }}>
+              <input
+                type="checkbox"
+                checked={clearDeployToken}
+                onChange={(e) => {
+                  setClearDeployToken(e.target.checked)
+                  if (e.target.checked) setDeployToken('')
+                  setSaved(false)
+                }}
+                style={{ marginRight: '0.35rem', position: 'relative', top: '2px' }}
+              />
+              Remove stored deploy token
+            </label>
+          </div>
+        )}
+
         <button type="submit" className="btn btn-primary" disabled={saving}>
           {saving ? 'Saving…' : 'Save'}
         </button>{' '}
@@ -160,8 +302,8 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
       <p className="text-muted">
         Configure a GitLab webhook (Settings → Webhooks) pointing at{' '}
         <code>/api/webhooks/gitlab</code> with the <em>Push events</em>{' '}
-        trigger. Push events are received and logged; automatic test runs are
-        not wired up yet.
+        trigger. Pushes to the configured code repository dispatch test jobs
+        automatically.
       </p>
     </div>
   )

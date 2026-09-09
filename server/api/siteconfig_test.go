@@ -114,6 +114,107 @@ func TestSiteConfigAPIFlow(t *testing.T) {
 	}
 }
 
+func TestSiteConfigCredentials(t *testing.T) {
+	apiServer, _ := newTestServer(t)
+	seedUser(t, apiServer.Store, "carol", "carol@example.com", "s3cret")
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "carol", "s3cret")
+
+	authed := func(method, target, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		var req *http.Request
+		if body == "" {
+			req = httptest.NewRequest(method, target, nil)
+		} else {
+			req = httptest.NewRequest(method, target, strings.NewReader(body))
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	base := `{"codeRepo":"https://gitlab.com/g/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":"main"`
+
+	// Initial state: nothing set.
+	rec := authed(http.MethodGet, "/api/site-config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: %d", rec.Code)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["deployKeySet"] != false || cfg["deployTokenSet"] != false {
+		t.Fatalf("expected no credentials, got %v", cfg)
+	}
+
+	// Set both. The token user is optional and stored as given.
+	rec = authed(http.MethodPut, "/api/site-config", base+
+		`,"deployKey":"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n","deployToken":"glpat-secret","deployTokenUser":"gitlab+deploy-token-7"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set credentials: %d body %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["deployKeySet"] != true || cfg["deployTokenSet"] != true {
+		t.Fatalf("expected credentials set, got %v", cfg)
+	}
+	if cfg["deployTokenUser"] != "gitlab+deploy-token-7" {
+		t.Fatalf("token user not echoed: %v", cfg)
+	}
+	// The secrets themselves are never echoed.
+	body := rec.Body.String()
+	if strings.Contains(body, "glpat-secret") || strings.Contains(body, "OPENSSH") {
+		t.Fatalf("secrets leaked in response: %s", body)
+	}
+
+	// Re-read: persisted, still masked.
+	rec = authed(http.MethodGet, "/api/site-config", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["deployKeySet"] != true || cfg["deployTokenSet"] != true {
+		t.Fatalf("credentials not persisted: %v", cfg)
+	}
+	if strings.Contains(rec.Body.String(), "glpat-secret") {
+		t.Fatalf("token leaked on read: %s", rec.Body.String())
+	}
+
+	// An update without the secret fields keeps them (empty = keep).
+	rec = authed(http.MethodPut, "/api/site-config", base+`,"testRepoRef":"dev"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update without credentials: %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["deployKeySet"] != true || cfg["deployTokenSet"] != true {
+		t.Fatalf("credentials should be kept: %v", cfg)
+	}
+
+	// Explicit clear flags remove them.
+	rec = authed(http.MethodPut, "/api/site-config", base+
+		`,"testRepoRef":"dev","clearDeployKey":true,"clearDeployToken":true,"deployTokenUser":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear credentials: %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["deployKeySet"] != false || cfg["deployTokenSet"] != false {
+		t.Fatalf("credentials should be cleared: %v", cfg)
+	}
+
+	// Non-PEM deploy keys are rejected.
+	rec = authed(http.MethodPut, "/api/site-config", base+`,"deployKey":"not a pem key"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad deploy key: expected 400, got %d", rec.Code)
+	}
+}
+
 func TestGitLabWebhook(t *testing.T) {
 	apiServer, _ := newTestServer(t)
 

@@ -125,7 +125,24 @@ export interface SiteConfig {
   codeRepo: string
   testInputRepo: string
   testRepoRef: string
+  deployKeySet: boolean
+  deployTokenSet: boolean
+  deployTokenUser: string
   updatedAt: string
+}
+
+// SiteConfigUpdate is the PUT body: the secret fields are write-only.
+// An empty deployKey/deployToken keeps the stored one; the clear flags
+// remove it.
+export interface SiteConfigUpdate {
+  codeRepo: string
+  testInputRepo: string
+  testRepoRef: string
+  deployKey?: string
+  deployToken?: string
+  deployTokenUser?: string
+  clearDeployKey?: boolean
+  clearDeployToken?: boolean
 }
 
 export async function getSiteConfig(): Promise<SiteConfig> {
@@ -133,7 +150,7 @@ export async function getSiteConfig(): Promise<SiteConfig> {
 }
 
 export async function updateSiteConfig(
-  input: Omit<SiteConfig, 'updatedAt'>,
+  input: SiteConfigUpdate,
 ): Promise<SiteConfig> {
   return api<SiteConfig>('/api/site-config', {
     method: 'PUT',

@@ -53,7 +53,12 @@ func (d *Dispatcher) DispatchForCommit(commit *store.Commit) DispatchResult {
 		return res
 	}
 
-	yamlBytes, err := d.FetchYAML(cfg.CodeRepo, commit.SHA)
+	creds := &runner.GitCredentials{
+		DeployKey:       cfg.DeployKey,
+		DeployToken:     cfg.DeployToken,
+		DeployTokenUser: cfg.DeployTokenUser,
+	}
+	yamlBytes, err := d.FetchYAML(cfg.CodeRepo, commit.SHA, creds)
 	if err != nil {
 		res.Err = err
 		return res

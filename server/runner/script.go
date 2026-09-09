@@ -15,6 +15,7 @@ type ScriptInput struct {
 	EnvName       string
 	EnvTags       string // comma-joined
 	Entry         *MergedEntry
+	Creds         *GitCredentials // optional deploy key/token for cloning
 }
 
 // TotalScriptTimeout returns the overall SSH session timeout for a job:
@@ -77,6 +78,11 @@ func BuildScript(in *ScriptInput) (string, error) {
 	w("  tail -n 5 \"$1\" 2>/dev/null | tr '\\n' ' ' | cut -c1-500")
 	w("}")
 	w("")
+
+	// Optional credential setup for cloning the repositories. The helpers
+	// are emitted before any use and cleaned up on exit.
+	gitCmd, codeURL, testsURL := credentialSetup(w, in)
+
 	w("emit_report() {")
 	w("  echo \"===MD-BUILDER-REPORT-BEGIN===\"")
 	w("  echo \"unit-status $UNIT_STATUS\"")
@@ -94,8 +100,8 @@ func BuildScript(in *ScriptInput) (string, error) {
 			ref = "HEAD"
 		}
 		w("# Clone the test input repository (test cases).")
-		w("if git clone --quiet --depth 1 --branch %s %s \"$TESTS\" >\"$TESTS.clone.log\" 2>&1 ||", shq(ref), shq(in.TestInputRepo))
-		w("   git clone --quiet %s \"$TESTS\" >\"$TESTS.clone.log\" 2>&1; then", shq(in.TestInputRepo))
+		w("if %s clone --quiet --depth 1 --branch %s %s \"$TESTS\" >\"$TESTS.clone.log\" 2>&1 ||", gitCmd, shq(ref), shq(testsURL))
+		w("   %s clone --quiet %s \"$TESTS\" >\"$TESTS.clone.log\" 2>&1; then", gitCmd, shq(testsURL))
 		w("  :")
 		w("else")
 		w("  UNIT_STATUS=failed")
@@ -114,7 +120,7 @@ func BuildScript(in *ScriptInput) (string, error) {
 
 	// Stage 2: clone the code repository at the pushed SHA.
 	w("# Clone the code repository at the pushed commit.")
-	w("if git clone --quiet %s \"$CODE\" >\"$CODE.clone.log\" 2>&1 &&", shq(in.CodeRepoURL))
+	w("if %s clone --quiet %s \"$CODE\" >\"$CODE.clone.log\" 2>&1 &&", gitCmd, shq(codeURL))
 	w("   (cd \"$CODE\" && git checkout --quiet %s >>\"$CODE.clone.log\" 2>&1); then", shq(in.CommitSHA))
 	w("  :")
 	w("else")
@@ -231,4 +237,64 @@ func BuildScript(in *ScriptInput) (string, error) {
 // shq single-quotes a string for safe use in bash.
 func shq(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// credentialSetup emits the credential plumbing for the remote script's git
+// clones and returns the git command prefix plus the (possibly rewritten)
+// repository URLs. Without credentials it emits nothing and returns plain
+// "git" with the original URLs.
+//
+//   - Deploy token: git configuration is passed via GIT_CONFIG_* environment
+//     variables (git >= 2.31), registering an inline credential helper. The
+//     helper disables any system-wide helpers first, so the token is the only
+//     authentication tried. The token never lands in .git/config or the
+//     process command line; it is visible only in the script itself (streamed
+//     over SSH) and the environment of this bash process.
+//   - Deploy key: the key is written to $WORK/.md-builder-deploy-key (removed
+//     by an EXIT trap) and git is pointed at it via GIT_SSH_COMMAND; the
+//     repository URLs are rewritten to their ssh://git@host/... form. URLs
+//     that cannot be interpreted as hosted repositories (e.g. file:// local
+//     paths) are left unchanged and cloned as-is.
+func credentialSetup(w func(format string, args ...any), in *ScriptInput) (gitCmd, codeURL, testsURL string) {
+	gitCmd, codeURL, testsURL = "git", in.CodeRepoURL, in.TestInputRepo
+	creds := in.Creds
+	if creds.Empty() {
+		return gitCmd, codeURL, testsURL
+	}
+
+	switch {
+	case creds.HasToken():
+		// Inline credential helper via environment config: applies to the
+		// http(s) clones only (git ignores it for ssh:// or file://).
+		user, token := creds.TokenUser(), strings.TrimSpace(creds.DeployToken)
+		helper := fmt.Sprintf("!f() { echo username=%s; echo password=%s; }; f", shq(user), shq(token))
+		w("# Deploy token authentication for git over HTTPS (via an inline")
+		w("# credential helper; not stored in .git/config or argv).")
+		w("export GIT_CONFIG_COUNT=2")
+		w("export GIT_CONFIG_KEY_0='credential.helper'")
+		w("export GIT_CONFIG_VALUE_0=''")
+		w("export GIT_CONFIG_KEY_1='credential.helper'")
+		w("export GIT_CONFIG_VALUE_1=%s", shq(helper))
+
+	case creds.HasKey():
+		w("# Deploy key authentication for git over SSH: the key is written to")
+		w("# the job directory, used by ssh only, and removed on exit.")
+		w("KEYFILE=\"$WORK/.md-builder-deploy-key\"")
+		w("trap 'rm -f \"$KEYFILE\"' EXIT")
+		w("cat >\"$KEYFILE\" <<'MD-BUILDER-DEPLOY-KEY-EOF'")
+		for _, line := range strings.Split(strings.TrimRight(creds.DeployKey, "\n"), "\n") {
+			w("%s", line)
+		}
+		w("MD-BUILDER-DEPLOY-KEY-EOF")
+		w("chmod 600 \"$KEYFILE\"")
+		w("export GIT_SSH_COMMAND=\"ssh -i \\\"$KEYFILE\\\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new\"")
+		if u, ok := creds.SSHURL(in.CodeRepoURL); ok {
+			codeURL = u
+		}
+		if u, ok := creds.SSHURL(in.TestInputRepo); ok {
+			testsURL = u
+		}
+	}
+	w("")
+	return gitCmd, codeURL, testsURL
 }

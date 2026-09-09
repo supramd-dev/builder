@@ -24,6 +24,22 @@ type SiteConfig struct {
 	// repository to run tests against.
 	TestRepoRef string
 
+	// DeployKey optionally holds a PEM-encoded SSH private key of a GitLab
+	// deploy key, used to clone the repositories over SSH (and to convert
+	// https repository URLs to SSH). Write-only via the API: it is never
+	// returned to clients.
+	DeployKey string
+
+	// DeployToken optionally holds a GitLab deploy token (or personal/group
+	// access token) used to clone the repositories over HTTPS, paired with
+	// DeployTokenUser. Write-only via the API.
+	DeployToken string
+
+	// DeployTokenUser is the username GitLab issued alongside DeployToken
+	// (e.g. "gitlab+deploy-token-42"). Not a secret. Empty means "oauth2",
+	// the default for personal/group access tokens.
+	DeployTokenUser string
+
 	UpdatedAt time.Time
 }
 

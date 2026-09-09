@@ -8,19 +8,31 @@ import (
 	"md-builder/server/store"
 )
 
-// siteConfigJSON is the wire representation of the site configuration.
+// siteConfigJSON is the wire representation of the site configuration. The
+// deploy key and token are write-only secrets: only whether they are set is
+// reported, never the values themselves.
 type siteConfigJSON struct {
-	CodeRepo      string `json:"codeRepo"`
-	TestInputRepo string `json:"testInputRepo"`
-	TestRepoRef   string `json:"testRepoRef"`
-	UpdatedAt     string `json:"updatedAt"`
+	CodeRepo        string `json:"codeRepo"`
+	TestInputRepo   string `json:"testInputRepo"`
+	TestRepoRef     string `json:"testRepoRef"`
+	DeployKeySet    bool   `json:"deployKeySet"`
+	DeployTokenSet  bool   `json:"deployTokenSet"`
+	DeployTokenUser string `json:"deployTokenUser"`
+	UpdatedAt       string `json:"updatedAt"`
 }
 
-// siteConfigInput is the request body for updating the configuration.
+// siteConfigInput is the request body for updating the configuration. The
+// secret fields follow the environment private-key convention: an empty
+// value keeps the stored one; the explicit Clear* flags remove it.
 type siteConfigInput struct {
-	CodeRepo      string `json:"codeRepo"`
-	TestInputRepo string `json:"testInputRepo"`
-	TestRepoRef   string `json:"testRepoRef"`
+	CodeRepo         string `json:"codeRepo"`
+	TestInputRepo    string `json:"testInputRepo"`
+	TestRepoRef      string `json:"testRepoRef"`
+	DeployKey        string `json:"deployKey"`       // empty = keep current
+	DeployToken      string `json:"deployToken"`     // empty = keep current
+	DeployTokenUser  string `json:"deployTokenUser"` // not a secret, replaced as given
+	ClearDeployKey   bool   `json:"clearDeployKey"`
+	ClearDeployToken bool   `json:"clearDeployToken"`
 }
 
 // handleSiteConfig routes GET/PUT /api/site-config. Any logged-in user may
@@ -68,6 +80,18 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request) {
 	cfg.CodeRepo = strings.TrimSpace(in.CodeRepo)
 	cfg.TestInputRepo = strings.TrimSpace(in.TestInputRepo)
 	cfg.TestRepoRef = strings.TrimSpace(in.TestRepoRef)
+	// Credentials: empty = keep, Clear* = remove, otherwise replace.
+	if in.ClearDeployKey {
+		cfg.DeployKey = ""
+	} else if key := strings.TrimSpace(in.DeployKey); key != "" {
+		cfg.DeployKey = key
+	}
+	if in.ClearDeployToken {
+		cfg.DeployToken = ""
+	} else if tok := strings.TrimSpace(in.DeployToken); tok != "" {
+		cfg.DeployToken = tok
+	}
+	cfg.DeployTokenUser = strings.TrimSpace(in.DeployTokenUser)
 	if err := s.Store.SaveSiteConfig(cfg); err != nil {
 		log.Printf("save site config: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -89,14 +113,20 @@ func validateSiteConfigInput(in *siteConfigInput) string {
 	if strings.TrimSpace(in.TestRepoRef) == "" {
 		return "branch or commit id is required"
 	}
+	if key := strings.TrimSpace(in.DeployKey); key != "" && !isPEMKey(key) {
+		return "deploy key must be a PEM-encoded SSH key"
+	}
 	return ""
 }
 
 func toSiteConfigJSON(cfg *store.SiteConfig) siteConfigJSON {
 	return siteConfigJSON{
-		CodeRepo:      cfg.CodeRepo,
-		TestInputRepo: cfg.TestInputRepo,
-		TestRepoRef:   cfg.TestRepoRef,
-		UpdatedAt:     cfg.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		CodeRepo:        cfg.CodeRepo,
+		TestInputRepo:   cfg.TestInputRepo,
+		TestRepoRef:     cfg.TestRepoRef,
+		DeployKeySet:    strings.TrimSpace(cfg.DeployKey) != "",
+		DeployTokenSet:  strings.TrimSpace(cfg.DeployToken) != "",
+		DeployTokenUser: cfg.DeployTokenUser,
+		UpdatedAt:       cfg.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 }
