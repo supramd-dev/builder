@@ -3,6 +3,9 @@
 /server/bin/
 *.exe
 
+# Local SQLite databases (created at runtime by the server or adduser).
+*.db
+
 # Frontend
 frontend/node_modules/
 frontend/dist/

@@ -17,25 +17,27 @@ import (
 // environmentJSON is the wire representation of a test environment. The
 // private key is accepted on create/update but never returned in full.
 type environmentJSON struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Host        string `json:"host"`
-	Username    string `json:"username"`
-	PrivateKey  string `json:"privateKey,omitempty"` // write-only; masked on read
-	Description string `json:"description"`
-	Enabled     bool   `json:"enabled"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	Host        string   `json:"host"`
+	Username    string   `json:"username"`
+	PrivateKey  string   `json:"privateKey,omitempty"` // write-only; masked on read
+	Tags        []string `json:"tags"`                 // lowercased labels used for job matching
+	Description string   `json:"description"`
+	Enabled     bool     `json:"enabled"`
+	CreatedAt   string   `json:"createdAt"`
+	UpdatedAt   string   `json:"updatedAt"`
 }
 
 // environmentInput is the request body for create/update.
 type environmentInput struct {
-	Name        string `json:"name"`
-	Host        string `json:"host"`
-	Username    string `json:"username"`
-	PrivateKey  string `json:"privateKey"`
-	Description string `json:"description"`
-	Enabled     *bool  `json:"enabled"` // pointer so omitted means "keep current" on update
+	Name        string   `json:"name"`
+	Host        string   `json:"host"`
+	Username    string   `json:"username"`
+	PrivateKey  string   `json:"privateKey"`
+	Tags        []string `json:"tags"`
+	Description string   `json:"description"`
+	Enabled     *bool    `json:"enabled"` // pointer so omitted means "keep current" on update
 }
 
 // handleEnvironments routes /api/environments (list, create).
@@ -151,6 +153,7 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request, user 
 		Host:        in.Host,
 		Username:    in.Username,
 		PrivateKey:  in.PrivateKey,
+		Tags:        strings.Join(in.Tags, ","),
 		Description: in.Description,
 		Enabled:     true, // new environments start enabled unless overridden below
 	}
@@ -202,6 +205,7 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request, user 
 	env.Host = in.Host
 	env.Username = in.Username
 	env.PrivateKey = in.PrivateKey
+	env.Tags = strings.Join(in.Tags, ",")
 	env.Description = in.Description
 	if in.Enabled != nil {
 		env.Enabled = *in.Enabled
@@ -412,6 +416,7 @@ func toEnvironmentJSON(env *store.TestEnvironment) environmentJSON {
 		Name:        env.Name,
 		Host:        env.Host,
 		Username:    env.Username,
+		Tags:        env.TagList(),
 		Description: env.Description,
 		Enabled:     env.Enabled,
 		CreatedAt:   env.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),

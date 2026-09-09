@@ -40,6 +40,7 @@ type TestRun struct {
 	CommitID      int64  `gorm:"uniqueIndex:idx_test_runs_env_commit_kind;not null"`
 	Kind          string `gorm:"uniqueIndex:idx_test_runs_env_commit_kind;not null"` // "regression" or "unit"
 	Status        string `gorm:"not null"`                                           // derived from the cases
+	Summary       string `gorm:"not null;default:''"`                                // one-paragraph conclusion (simplified report)
 	Total         int    `gorm:"not null;default:0"`
 	Passed        int    `gorm:"not null;default:0"`
 	Failed        int    `gorm:"not null;default:0"`
@@ -50,12 +51,16 @@ type TestRun struct {
 }
 
 // RunInput carries a test-run report as submitted by the reporter: the case
-// list plus optional timestamps. Counts are derived from the cases.
+// list plus optional timestamps and a simplified summary. Counts are derived
+// from the cases when any are present; when there are no cases the explicit
+// Status/Summary on RunInput is used directly (the worker's simplified path).
 type RunInput struct {
 	EnvironmentID int64
 	CommitID      int64
 	Kind          string
 	Cases         []TestCaseResult
+	Status        string // used only when Cases is empty; defaults to passed
+	Summary       string
 	StartedAt     time.Time
 	FinishedAt    time.Time
 }
@@ -106,6 +111,7 @@ func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
 		run.Kind = in.Kind
 		run.StartedAt = in.StartedAt
 		run.FinishedAt = in.FinishedAt
+		run.Summary = in.Summary
 		run.Total = len(in.Cases)
 		run.Passed = 0
 		for i := range in.Cases {
@@ -114,9 +120,22 @@ func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
 			}
 		}
 		run.Failed = run.Total - run.Passed
-		run.Status = StatusFailed
-		if run.Failed == 0 {
-			run.Status = StatusPassed
+		if run.Total == 0 {
+			// No case-level results: the explicit status is authoritative
+			// (the simplified worker path reports a one-paragraph conclusion
+			// without per-case detail).
+			run.Status = in.Status
+			if run.Status == "" {
+				run.Status = StatusPassed
+			}
+			if run.Status != StatusPassed && run.Status != StatusFailed {
+				return ErrInvalidCaseStatus
+			}
+		} else {
+			run.Status = StatusFailed
+			if run.Failed == 0 {
+				run.Status = StatusPassed
+			}
 		}
 
 		if err := tx.Save(&run).Error; err != nil {

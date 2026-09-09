@@ -228,6 +228,13 @@ body_code=$(req PUT "/api/environments/$ENV_ID/enabled" '{"enabled":true}')
 check "re-enable 200" "$(tail -n1 <<<"$body_code")" "200"
 check "enabled state returned" "$(head -n1 <<<"$body_code" | jq -r .enabled)" "true"
 
+# Tags: set on update, echoed back, normalized to lowercase.
+body_code=$(req PUT "/api/environments/$ENV_ID" \
+  '{"name":"smoke-node-2","host":"203.0.113.2","username":"runner2","privateKey":"","tags":["CPU","mpi CUDA","cpu"],"description":"updated"}')
+check "update with tags 200" "$(tail -n1 <<<"$body_code")" "200"
+check "tags normalized and deduped" \
+  "$(head -n1 <<<"$body_code" | jq -c '.tags')" '["cpu","mpi","cuda"]'
+
 # ---------------------------------------------------------------------------
 # 7. Site configuration (GitLab-only repos)
 # ---------------------------------------------------------------------------
@@ -301,6 +308,18 @@ check "webhook bad json 400" "$(tail -n1 <<<"$body_code")" "400"
 
 body_code=$(curl -s -w '\n%{http_code}' "$BASE_URL/api/webhooks/gitlab")
 check "webhook GET 405" "$(tail -n1 <<<"$body_code")" "405"
+
+# The earlier push matched the configured code repository, so the server
+# attempted to dispatch jobs. With no reachable git host the dispatch error
+# surfaces but the commit is still recorded (HTTP stays 200). Re-check the
+# recorded push response by re-pushing the same SHA: the fields must still
+# include the dispatch error (idempotent).
+body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -H 'X-Gitlab-Event: Push Hook' \
+  -d '{"object_kind":"push","project":{"path_with_namespace":"group/code"},"ref":"refs/heads/main","after":"abc123","user_name":"smoke","commits":[{"id":"abc123","message":"smoke push"}]}' \
+  "$BASE_URL/api/webhooks/gitlab")
+check "webhook dispatch error surfaced" \
+  "$(head -n1 <<<"$body_code" | jq 'has("dispatchError")')" "true"
 
 # ---------------------------------------------------------------------------
 # 8b. Test dashboard: result reporting, matrix, run detail
@@ -393,6 +412,40 @@ check "run detail unknown 404" "$(tail -n1 <<<"$body_code")" "404"
 
 body_code=$(req GET /api/test-runs)
 check "GET test-runs collection 405" "$(tail -n1 <<<"$body_code")" "405"
+
+# ---------------------------------------------------------------------------
+# 8c. Jobs: manual trigger and monitoring
+# ---------------------------------------------------------------------------
+echo "== jobs =="
+
+# Unauthenticated access is rejected.
+body_code=$(curl -s -w '\n%{http_code}' "$BASE_URL/api/jobs")
+check "jobs without session 401" "$(tail -n1 <<<"$body_code")" "401"
+
+# Manual trigger for the pushed commit: the dispatch runs again. With no
+# reachable git host the trigger reports the failure (422), with the
+# counters still present.
+body_code=$(req POST /api/jobs "$(jq -n --argjson commit "$COMMIT_ID" '{commitId: $commit}')")
+check "trigger dispatch failure 422" "$(tail -n1 <<<"$body_code")" "422"
+check "trigger error body present" \
+  "$(head -n1 <<<"$body_code" | jq 'has("error")')" "true"
+
+# Validation: missing commit, unknown commit, bad limit.
+body_code=$(req POST /api/jobs '{}')
+check "trigger missing commit 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(req POST /api/jobs '{"commitId":999999}')
+check "trigger unknown commit 404" "$(tail -n1 <<<"$body_code")" "404"
+
+body_code=$(req GET "/api/jobs?limit=0")
+check "jobs bad limit 400" "$(tail -n1 <<<"$body_code")" "400"
+
+# The jobs list endpoint works (empty or populated depending on dispatch
+# outcomes; assert shape only).
+body_code=$(req GET /api/jobs)
+check "jobs list 200" "$(tail -n1 <<<"$body_code")" "200"
+check "jobs list is an array" \
+  "$(head -n1 <<<"$body_code" | jq '.jobs | type == "array"')" "true"
 
 # ---------------------------------------------------------------------------
 # 9. Delete + logout (deleting the environment removes its runs too)

@@ -87,7 +87,7 @@ func openDB(dsn string) (*gorm.DB, error) {
 func (s *Store) migrate() error {
 	if err := s.DB.AutoMigrate(
 		&User{}, &Session{}, &TestEnvironment{}, &SiteConfig{},
-		&Commit{}, &TestRun{}, &TestCaseResult{},
+		&Commit{}, &TestRun{}, &TestCaseResult{}, &Job{},
 	); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}

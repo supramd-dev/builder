@@ -148,6 +148,9 @@ function DashboardMatrix({
               >
                 {env.name}
                 {!env.enabled && <span className="text-muted"> (off)</span>}
+                {env.tags && (
+                  <span className="dash-env-tags text-muted">{env.tags}</span>
+                )}
               </th>
             ))}
           </tr>
@@ -171,7 +174,7 @@ function DashboardMatrix({
                   <RunCellView
                     cell={cell}
                     kind={kind}
-                    onOpen={cell ? () => onOpenRun(cell.runId) : undefined}
+                    onOpen={cell && cell.runId > 0 ? () => onOpenRun(cell.runId) : undefined}
                   />
                 </td>
               ))}
@@ -183,8 +186,9 @@ function DashboardMatrix({
   )
 }
 
-// RunCellView renders one matrix cell: a clickable summary, or an em dash
-// when no run exists for that (commit, environment).
+// RunCellView renders one matrix cell: a clickable summary of a recorded
+// run, a live job state (running…/queued), or an em dash when neither
+// exists for that (commit, environment).
 function RunCellView({
   cell,
   kind,
@@ -198,6 +202,28 @@ function RunCellView({
     return (
       <span className="text-muted dash-no-run" title="No test run recorded">
         —
+      </span>
+    )
+  }
+  // Live job overlay (runId 0): the run has not been reported yet.
+  if (cell.runId === 0) {
+    if (cell.status === 'running') {
+      return (
+        <span className="text-muted dash-run-live" title="Job running">
+          running…
+        </span>
+      )
+    }
+    if (cell.status === 'pending') {
+      return (
+        <span className="text-muted dash-run-live" title="Job queued">
+          queued
+        </span>
+      )
+    }
+    return (
+      <span className="dash-run-live dash-run-failed" title="Job failed before reporting a run">
+        ✗
       </span>
     )
   }

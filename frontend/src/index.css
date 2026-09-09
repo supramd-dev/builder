@@ -529,9 +529,27 @@ footer .text-muted {
   padding: 0.25rem 0.5rem;
 }
 
-/* Column headers: environment names. */
+/* Column headers: environment names, with tags underneath. */
 .dash-env-head {
   min-width: 6rem;
+}
+
+.dash-env-tags {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+/* Live job overlay cells: queued / running states, muted; the failure
+   variant reuses the failure color as plain text. */
+.dash-run-live {
+  display: inline-block;
+  min-width: 4.5rem;
+}
+
+.dash-run-live.dash-run-failed {
+  color: var(--danger);
+  font-weight: 600;
 }
 
 /* Row headers: commit cells — short sha, author · date, commit title. */
@@ -598,6 +616,32 @@ footer .text-muted {
 .dash-no-run {
   display: inline-block;
   min-width: 4.5rem;
+}
+
+/* Run detail: the one-paragraph conclusion reported by the worker. */
+.dash-run-summary {
+  margin: 0 0 0.5rem 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 0.875rem;
+  white-space: pre-wrap;
+}
+
+/* Environment tag badges in the user center list. */
+.env-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+}
+
+.env-tag {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  background: var(--bg-alt);
+  color: var(--muted);
+  border-radius: 0;
 }
 
 /* Run detail: definition list of the summary fields. */

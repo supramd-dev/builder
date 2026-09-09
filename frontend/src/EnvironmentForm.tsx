@@ -17,6 +17,7 @@ export default function EnvironmentForm({ existing, onSaved, onCancel }: Props) 
     name: existing?.name ?? '',
     host: existing?.host ?? '',
     username: existing?.username ?? '',
+    tags: existing?.tags ?? [],
     description: existing?.description ?? '',
     privateKey: '',
     enabled: existing?.enabled ?? true,
@@ -94,6 +95,29 @@ export default function EnvironmentForm({ existing, onSaved, onCancel }: Props) 
           placeholder="-----BEGIN OPENSSH PRIVATE KEY----- ..."
           style={{ fontFamily: 'monospace', fontSize: '0.875rem' }}
         />
+      </div>
+
+      <div className="form-group">
+        <label htmlFor="env-tags">Tags</label>
+        <input
+          id="env-tags"
+          type="text"
+          value={form.tags.join(', ')}
+          onChange={(e) =>
+            setForm({
+              ...form,
+              tags: e.target.value
+                .split(/[\s,]+/)
+                .filter((t) => t.length > 0)
+                .map((t) => t.toLowerCase()),
+            })
+          }
+          placeholder="cpu, mpi, cuda"
+        />
+        <span className="text-muted">
+          Comma or space separated, lowercase. Matrix entries in
+          md-builder.yaml select environments by these tags.
+        </span>
       </div>
 
       <div className="form-group">

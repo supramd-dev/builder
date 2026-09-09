@@ -22,6 +22,7 @@ export interface TestEnvironment {
   name: string
   host: string
   username: string
+  tags: string[]
   description: string
   enabled: boolean
   createdAt: string
@@ -33,6 +34,7 @@ export interface EnvironmentInput {
   host: string
   username: string
   privateKey: string
+  tags: string[]
   description: string
   enabled?: boolean
 }
@@ -147,6 +149,7 @@ export interface DashboardEnvironment {
   id: number
   name: string
   description: string
+  tags: string
   enabled: boolean
 }
 
@@ -163,12 +166,42 @@ export interface DashboardCommit {
 
 export interface RunCell {
   runId: number
-  status: 'passed' | 'failed'
+  status: 'passed' | 'failed' | 'running' | 'pending'
   total: number
   passed: number
   failed: number
   startedAt: string
   finishedAt: string
+}
+
+// --- Jobs ---
+
+export interface Job {
+  id: number
+  commitId: number
+  environmentId: number
+  tags: string
+  status: 'pending' | 'running' | 'done' | 'failed'
+  error: string
+  attempts: number
+  testInputRef: string
+  startedAt: string
+  finishedAt: string
+}
+
+export async function listJobs(limit = 20): Promise<Job[]> {
+  const res = await api<{ jobs: Job[] }>(`/api/jobs?limit=${limit}`)
+  return res.jobs
+}
+
+export async function triggerJobs(commitId: number): Promise<{
+  jobsCreated: number
+  entriesSkipped: number
+}> {
+  return api<{ jobsCreated: number; entriesSkipped: number }>('/api/jobs', {
+    method: 'POST',
+    body: JSON.stringify({ commitId }),
+  })
 }
 
 export interface DashboardRow {
@@ -202,6 +235,7 @@ export interface TestRunDetail {
   id: number
   kind: DashboardKind
   status: 'passed' | 'failed'
+  summary: string
   total: number
   passed: number
   failed: number

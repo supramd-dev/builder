@@ -72,6 +72,7 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
       </h2>
 
       <div className="event">
+        {run.summary && <p className="dash-run-summary">{run.summary}</p>}
         <dl className="dash-summary">
           <div>
             <dt>Environment</dt>
@@ -122,7 +123,8 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
       <h3>Test cases</h3>
       {run.cases.length === 0 ? (
         <p className="text-muted">
-          No per-case results were reported for this run (counts only).
+          No per-case results were reported for this run — see the summary
+          above.
         </p>
       ) : (
         <table className="table">

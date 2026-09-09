@@ -156,6 +156,7 @@ export default function UserCenter({ me }: Props) {
               <th>Name</th>
               <th>Host</th>
               <th>User</th>
+              <th>Tags</th>
               <th>Description</th>
               <th>Enabled</th>
               <th>Updated</th>
@@ -174,6 +175,19 @@ export default function UserCenter({ me }: Props) {
                     <code>{env.host}</code>
                   </td>
                   <td>{env.username}</td>
+                  <td>
+                    {env.tags.length > 0 ? (
+                      <span className="env-tags">
+                        {env.tags.map((tag) => (
+                          <span key={tag} className="env-tag">
+                            {tag}
+                          </span>
+                        ))}
+                      </span>
+                    ) : (
+                      <span className="text-muted">—</span>
+                    )}
+                  </td>
                   <td className="text-muted">{env.description}</td>
                   <td>
                     <button

@@ -4,13 +4,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"md-builder/server/api"
+	"md-builder/server/runner"
+	"md-builder/server/sshcheck"
 	"md-builder/server/store"
+	"md-builder/server/worker"
 )
 
 const listenAddr = ":8080"
@@ -63,6 +69,23 @@ func main() {
 	apiServer := api.New(s)
 	apiServer.Register(mux)
 
+	// --- Job dispatch + worker pool ---
+	dispatcher := &worker.Dispatcher{
+		Store:     s,
+		FetchYAML: runner.GitYAMLFetcher,
+	}
+	apiServer.SetDispatcher(dispatcher)
+
+	pool := &worker.Pool{
+		Store:  s,
+		Runner: &runner.Runner{Store: s, Exec: sshExecFunc},
+	}
+	if os.Getenv("MD_BUILDER_DISABLE_WORKER") != "1" {
+		rootCtx, cancel := context.WithCancel(context.Background())
+		pool.Start(rootCtx)
+		defer cancel()
+	}
+
 	// --- Static frontend assets (with SPA fallback) ---
 	distDir := resolveDistDir()
 	fs := http.FileServer(http.Dir(distDir))
@@ -86,4 +109,16 @@ func main() {
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// sshExecFunc adapts sshcheck to the runner.ExecFunc signature: it runs the
+// generated script over SSH with an overall timeout and returns stdout.
+func sshExecFunc(env *store.TestEnvironment, script string, timeoutSecs int) (string, int, error) {
+	res := sshcheck.ScriptWithTimeout(env.Host, env.Username, env.PrivateKey, "bash -s", script,
+		time.Duration(timeoutSecs)*time.Second)
+	if res.ExitCode < 0 && !res.Success {
+		// Connection failure, timeout or run error: treat as execution error.
+		return res.Stdout, res.ExitCode, errors.New(strings.TrimSpace(res.Stderr))
+	}
+	return res.Stdout, res.ExitCode, nil
 }

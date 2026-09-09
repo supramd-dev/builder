@@ -102,6 +102,15 @@ func Script(host, username, keyPEM, cmd, script string) ExecResult {
 	return run(host, username, keyPEM, cmd, script, scriptExecTimeout)
 }
 
+// ScriptWithTimeout is Script with a caller-provided overall timeout. Long
+// jobs (clone + build + test) need more than the default script timeout.
+func ScriptWithTimeout(host, username, keyPEM, cmd, script string, timeout time.Duration) ExecResult {
+	if timeout <= 0 {
+		timeout = scriptExecTimeout
+	}
+	return run(host, username, keyPEM, cmd, script, timeout)
+}
+
 // run executes cmd remotely with stdin fed from stdinData ("" means no
 // stdin), bounded by timeout.
 func run(host, username, keyPEM, cmd, stdinData string, timeout time.Duration) ExecResult {

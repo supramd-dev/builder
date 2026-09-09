@@ -32,11 +32,12 @@ type gitlabPushPayload struct {
 
 // handleGitLabWebhook receives GitLab webhook events (POST /api/webhooks/gitlab).
 //
-// Push events are recorded in the commits table — the dashboard's columns.
-// Triggering test runs automatically is future work; results are reported
-// via POST /api/test-runs. The endpoint is unauthenticated by design: GitLab
-// servers cannot hold a session cookie. When a webhook secret is configured
-// it should be verified here (X-Gitlab-Token header).
+// Push events are recorded in the commits table — the dashboard's columns —
+// and dispatched: the md-builder.yaml matrix at the pushed commit is read,
+// its entries matched to enabled environments by tags, and one job per entry
+// is created for the worker pool. The endpoint is unauthenticated by design:
+// GitLab servers cannot hold a session cookie. When a webhook secret is
+// configured it should be verified here (X-Gitlab-Token header).
 func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -104,15 +105,49 @@ func (s *Server) recordPush(w http.ResponseWriter, payload gitlabPushPayload) {
 
 	log.Printf("gitlab webhook: push event on %s (%s) by %s recorded as commit %d",
 		payload.Project.PathWithNamespace, commit.SHA, payload.UserName, commit.ID)
-	writeJSON(w, http.StatusOK, map[string]any{
+
+	// Dispatch: only for pushes to the configured code repository.
+	resp := map[string]any{
 		"status":   "received",
 		"event":    "push",
 		"project":  payload.Project.PathWithNamespace,
 		"ref":      ref,
 		"commitId": commit.ID,
 		"created":  created,
-		"message":  "push event recorded; triggering test runs is not implemented yet",
-	})
+	}
+	if s.Dispatch != nil {
+		if s.shouldDispatch(payload) {
+			d := s.Dispatch.DispatchForCommit(commit)
+			resp["jobsCreated"] = d.JobsCreated
+			resp["entriesSkipped"] = d.EntriesSkipped
+			if d.Err != nil {
+				// The commit is recorded; the dispatch failure is surfaced but
+				// is not a webhook-level error (GitLab would retry pointlessly).
+				resp["dispatchError"] = d.Err.Error()
+				log.Printf("gitlab webhook: dispatch for commit %d failed: %v", commit.ID, d.Err)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// shouldDispatch reports whether a push should trigger jobs: the pushed
+// repository must match the configured code repository (when one is set).
+// The payload carries path_with_namespace ("group/code"), while the config
+// may be a full URL — compare on the extracted repo path, falling back to a
+// suffix comparison for bare-path configs.
+func (s *Server) shouldDispatch(payload gitlabPushPayload) bool {
+	cfg, err := s.Store.GetSiteConfig()
+	if err != nil || cfg.CodeRepo == "" {
+		return false
+	}
+	pushed := strings.TrimSuffix(strings.Trim(payload.Project.PathWithNamespace, "/"), ".git")
+	configured := store.RepoPath(cfg.CodeRepo)
+	if configured == "" || configured == pushed {
+		return configured == pushed
+	}
+	// Configured as a bare path (e.g. "group/code"): match the tail.
+	return strings.HasSuffix(pushed, "/"+configured) || pushed == configured
 }
 
 // firstLine returns the first line of a commit message (its title).

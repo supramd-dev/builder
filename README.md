@@ -112,7 +112,9 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` (requires session) |
 | POST   | `/api/test-runs`                | Report a test run result (requires session)   |
 | GET    | `/api/test-runs/{id}`           | One run's detail incl. per-case results       |
-| POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (push events)         |
+| POST   | `/api/jobs`                     | Manually re-dispatch test jobs for a commit (requires session) |
+| GET    | `/api/jobs`                     | Recent test jobs (`?limit=`, monitoring)      |
+| POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (push events, triggers job dispatch) |
 
 ### Site configuration
 
@@ -134,13 +136,19 @@ Point a GitLab project webhook at `POST /api/webhooks/gitlab` with the
 *Push events* trigger. Push events are recorded in the `commits` table —
 each becomes a column of the test dashboard (deduplicated by
 repo + sha). Other event types are acknowledged with `status: ignored`.
-Automatic test runs from webhooks are future work. The endpoint is
-unauthenticated (called by the GitLab server); verify the
+The endpoint is unauthenticated (called by the GitLab server); verify the
 `X-Gitlab-Token` header once a secret is configured.
 
-When the site config's `codeRepo` is set, only pushes to that repository
-are shown as dashboard columns (the repo path is extracted from the URL
-and compared to the webhook's `path_with_namespace`).
+When the site config's `codeRepo` is set and a push to that repository
+arrives, the server dispatches test jobs automatically: it reads the
+`md-builder.yaml` test matrix at the pushed commit (see below), matches
+matrix entries to **enabled** environments by tags, and creates one job
+per entry. The response carries `jobsCreated` / `entriesSkipped`, plus a
+`dispatchError` when the YAML cannot be fetched or parsed (the commit is
+still recorded). `POST /api/jobs` re-runs the dispatch for a commit
+(`{"commitId": N}` or `{"commitSha", "commitRepo"}`) — useful after
+changing environment tags or the YAML. `GET /api/jobs?limit=20` lists
+recent jobs for monitoring.
 
 ### Test dashboard
 
@@ -151,8 +159,10 @@ matrix: one **row per recent git push** (default 10, capped at 50 via
 greyed out). Two kinds are available: **regression** and **unit** tests.
 Cells with a recorded run show pass/fail counts; clicking one opens the
 run detail with the per-case results (name, status, error value, short
-note). Clicking a case opens a placeholder detail page — result
-visualization is future work.
+note) and the one-paragraph summary reported by the worker. Clicking a
+case opens a placeholder detail page — result visualization is future
+work. Cells without a run but with a live job show **queued** /
+**running…** (or ✗ when the job failed before reporting).
 
 Results are reported with `POST /api/test-runs`:
 
@@ -161,6 +171,7 @@ Results are reported with `POST /api/test-runs`:
   "environmentId": 1,
   "commitId": 7,              // or "commitSha" + "commitRepo" instead
   "kind": "regression",       // or "unit"
+  "summary": "max relative error 3e-7 within tolerance",  // optional
   "startedAt": "2026-09-08T03:00:00Z",   // optional
   "finishedAt": "2026-09-08T03:04:00Z",  // optional
   "cases": [
@@ -170,16 +181,118 @@ Results are reported with `POST /api/test-runs`:
 }
 ```
 
-The run status and counts are derived from the cases. Reporting again for
-the same (environment, commit, kind) replaces the stored result — the API
-is idempotent, so a flaky reporter can retry safely. Reporting currently
-requires a logged-in session; a machine token for automated runners is
-future work.
+When `cases` are present the run status and counts are derived from them.
+With no cases, an explicit `"status"` ("passed" \| "failed") and
+`"summary"` are stored directly — the worker's simplified report path.
+Reporting again for the same (environment, commit, kind) replaces the
+stored result — the API is idempotent, so a flaky reporter can retry
+safely.
 
 Deleting an environment also deletes its test runs (the dashboard is a
 site-wide view, so dangling rows would otherwise survive the environment).
 
-#### Demo data
+## Test matrix configuration (md-builder.yaml)
+
+The test matrix is defined in **`md-builder.yaml` at the root of the code
+repository** — it changes with the code, and a push that changes it
+changes the dispatch. Every environment carries **tags** (set at creation
+in the user center, editable later); matrix entries select environments
+by these tags:
+
+```yaml
+version: 1
+
+# Optional defaults, merged into every matrix entry (maps merge key-wise,
+# scalars are overridden per entry).
+defaults:
+  timeout: 3600                 # per-command timeout seconds (hard cap 4h)
+  env:
+    OMP_NUM_THREADS: "4"
+  build:
+    generator: cmake            # cmake (default) | script
+    cmake_flags: "-DCMAKE_BUILD_TYPE=Release"
+    threads: 8                  # cmake --build -j
+
+# Required: the matrix. Each entry names the tags an environment must
+# carry; dispatch picks one matching enabled environment per entry.
+matrix:
+  - tags: [cpu]
+    description: Generic CPU build
+    env:
+      CC: gcc
+      CXX: g++
+    build:
+      cmake_flags: "-DENABLE_MPI=OFF"
+    unit:
+      command: "ctest --test-dir build -L unit --output-on-failure"
+      timeout: 600
+    regression:
+      command: "python3 run_regression.py --suite full"
+      timeout: 1800
+
+  - tags: [gpu, cuda]
+    env:
+      CC: clang
+    build:
+      generator: script         # non-cmake projects
+      command: "./build.sh --cuda"
+    unit:
+      command: "ctest --test-dir build -L unit"
+```
+
+Rules:
+
+- `version` must be 1. `matrix` must be non-empty; each entry needs
+  non-empty `tags` and at least one of `unit` / `regression` (each with a
+  `command`). Duplicate tag sets across entries are rejected.
+- Tag matching is subset semantics: an environment matches when its tag
+  set contains all entry tags (extra environment tags are fine). Tags are
+  compared case-insensitively (normalized to lowercase).
+- When several enabled environments match, the tightest match wins
+  (fewest unrelated tags), ties broken by environment name. Exactly one
+  environment runs each entry. No match → the entry is skipped (counted
+  in `entriesSkipped`), not an error.
+
+## Worker
+
+The server embeds a job scheduler (`server/worker`) started from main:
+
+- **Dispatch** (webhook or `POST /api/jobs`): fetch the code repository,
+  read `md-builder.yaml` at the pushed commit via `git show`, parse it,
+  match entries to enabled environments, create pending jobs (one per
+  entry, requeueing an existing (commit, environment) job on re-push).
+  Each job stores a config snapshot, so later YAML changes do not affect
+  already-dispatched jobs.
+- **Execution pool**: 2 goroutines by default (`MD_BUILDER_WORKERS`,
+  `MD_BUILDER_DISABLE_WORKER=1` disables), polling every 2s, claiming
+  jobs atomically. Jobs left in `running` after a crash are reset at
+  startup.
+- **Per job**: a bash script is generated from the config snapshot and
+  streamed to the environment over SSH (`bash -s`). The script clones
+  the **test input repository** (test cases) and the **code repository**
+  at the pushed commit into `~/.md-builder/jobs/<sha>` on the remote
+  host, exports `MD_COMMIT`, `MD_ENV_NAME`, `MD_ENV_TAGS`, `MD_CODE_DIR`,
+  `MD_TEST_INPUT_DIR` plus the YAML `env`, builds (cmake or the script
+  generator) and runs the unit/regression commands, each bounded by the
+  configured timeout via the remote `timeout` command.
+- **Report**: the script prints a line protocol
+  (`===MD-BUILDER-REPORT-BEGIN===` … `unit-status passed`,
+  `unit-summary …`, `regression-status …` … `===MD-BUILDER-REPORT-END===`)
+  which the worker parses and stores as test runs — status plus a
+  one-paragraph summary (the simplified report; per-case results are
+  future work). Test commands may emit `MD-BUILDER-SUMMARY: <text>` on
+  stdout to provide the summary text; otherwise the exit code plus the
+  log tail is used.
+- The overall SSH session timeout is the sum of the stage timeouts plus
+  15 minutes slack.
+
+Prerequisites: the server needs `git` on PATH and read access to the code
+repository (to read the YAML); each remote environment needs `git`, `bash`
+and `timeout`, plus access to both repositories (public repos, or
+credentials configured on the environment itself — injecting deploy
+tokens is future work).
+
+### Demo data
 
 To see the dashboard populated without a real GitLab or test runner:
 
@@ -196,11 +309,12 @@ after 7 days. Passwords are hashed with bcrypt (cost 12).
 ### API smoke test
 
 [scripts/api-smoke.sh](scripts/api-smoke.sh) exercises the full API surface
-against a running server: auth gates, login/logout, environment CRUD,
-connectivity test, command exec, script execution (bash/python), enable/disable
-gating, webhook push recording, test-run reporting, the dashboard matrix
-and run details, and deletion (incl. run cleanup). It is idempotent — safe
-to run repeatedly.
+against a running server: auth gates, login/logout, environment CRUD
+(incl. tags), connectivity test, command exec, script execution
+(bash/python), enable/disable gating, webhook push recording (incl. job
+dispatch error surfacing), job trigger/list endpoints, test-run
+reporting, the dashboard matrix and run details, and deletion (incl. run
+cleanup). It is idempotent — safe to run repeatedly.
 
 ```sh
 make smoke-test          # against the default server on :8080

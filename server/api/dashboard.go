@@ -25,6 +25,7 @@ type dashboardEnvJSON struct {
 	ID          int64  `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+	Tags        string `json:"tags"`
 	Enabled     bool   `json:"enabled"`
 }
 
@@ -41,7 +42,9 @@ type commitJSON struct {
 }
 
 // runCellJSON is one cell of the matrix: a run's summary, aligned with an
-// environment column. Null when no run exists for that (commit, environment).
+// environment column. Null when neither a run nor a job exists for that
+// (commit, environment). When only a job exists (queued/running, or failed
+// before any report), the cell carries the job status with runId 0.
 type runCellJSON struct {
 	RunID      int64  `json:"runId"`
 	Status     string `json:"status"`
@@ -129,6 +132,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	jobs, err := s.Store.FindJobsByCommits(envIDs, commitIDs)
+	if err != nil {
+		log.Printf("dashboard: find jobs: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
 
 	out := dashboardJSON{
 		Kind:         kind,
@@ -144,6 +153,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 			ID:          env.ID,
 			Name:        env.Name,
 			Description: env.Description,
+			Tags:        env.Tags,
 			Enabled:     env.Enabled,
 		})
 	}
@@ -157,8 +167,14 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 		}
 		for j := range envs {
 			env := &envs[j]
-			if run, ok := runs[store.EnvCommit{Env: env.ID, Commit: commit.ID}]; ok {
+			key := store.EnvCommit{Env: env.ID, Commit: commit.ID}
+			if run, ok := runs[key]; ok {
 				row.Cells[j] = toRunCellJSON(&run)
+				continue
+			}
+			// No run yet: overlay the job state when a live job exists.
+			if job, ok := jobs[key]; ok {
+				row.Cells[j] = jobCellJSON(&job)
 			}
 		}
 		out.Rows = append(out.Rows, row)
@@ -194,6 +210,7 @@ type runJSON struct {
 	ID            int64  `json:"id"`
 	Kind          string `json:"kind"`
 	Status        string `json:"status"`
+	Summary       string `json:"summary"`
 	Total         int    `json:"total"`
 	Passed        int    `json:"passed"`
 	Failed        int    `json:"failed"`
@@ -442,11 +459,35 @@ func toRunCellJSON(run *store.TestRun) *runCellJSON {
 	}
 }
 
+// jobCellJSON renders a live job as a matrix cell (runId 0: not clickable).
+func jobCellJSON(job *store.Job) *runCellJSON {
+	cell := &runCellJSON{RunID: 0}
+	switch job.Status {
+	case store.JobPending:
+		cell.Status = "pending"
+	case store.JobRunning:
+		cell.Status = "running"
+	default: // failed before any report
+		cell.Status = store.StatusFailed
+	}
+	if job.StartedAt != nil {
+		cell.StartedAt = job.StartedAt.UTC().Format(time.RFC3339)
+	}
+	if job.FinishedAt != nil {
+		cell.FinishedAt = job.FinishedAt.UTC().Format(time.RFC3339)
+	}
+	// Surface the job error via the total/passed/failed fields? No — keep the
+	// summary in a dedicated field would grow the schema; the job list API
+	// carries details. Mark failure through status.
+	return cell
+}
+
 func toRunJSON(run *store.TestRun) runJSON {
 	return runJSON{
 		ID:            run.ID,
 		Kind:          run.Kind,
 		Status:        run.Status,
+		Summary:       run.Summary,
 		Total:         run.Total,
 		Passed:        run.Passed,
 		Failed:        run.Failed,

@@ -10,6 +10,7 @@ import (
 
 	"md-builder/server/auth"
 	"md-builder/server/store"
+	"md-builder/server/worker"
 
 	"gorm.io/gorm"
 )
@@ -22,11 +23,22 @@ const (
 // Server holds dependencies shared across API handlers.
 type Server struct {
 	Store *store.Store
+
+	// Dispatch, when non-nil, creates test jobs for pushed commits (webhook)
+	// and manual triggers. Injected by main so API tests can run without it
+	// or with a fake.
+	Dispatch *worker.Dispatcher
 }
 
 // New returns a configured *Server.
 func New(s *store.Store) *Server {
 	return &Server{Store: s}
+}
+
+// SetDispatcher wires the job dispatcher used by the webhook and the manual
+// trigger endpoint.
+func (s *Server) SetDispatcher(d *worker.Dispatcher) {
+	s.Dispatch = d
 }
 
 // Register mounts the auth + environment API on the given mux.
@@ -51,6 +63,10 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/dashboard/", s.requireAuth(s.handleDashboard))
 	mux.HandleFunc("/api/test-runs", s.requireAuth(s.handleTestRuns))
 	mux.HandleFunc("/api/test-runs/", s.requireAuth(s.handleTestRunItem))
+
+	// Job scheduling: manual trigger and monitoring (requires an
+	// authenticated user).
+	mux.HandleFunc("/api/jobs", s.requireAuth(s.handleJobs))
 }
 
 // --- handlers ---
