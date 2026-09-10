@@ -250,7 +250,23 @@ hwIDAQAB
 	// clean cells): finished graphs with logs, so the dependency-graph page
 	// has something to show. Statuses are terminal (done/failed/skipped) so
 	// the live scheduler will not claim them.
-	if err := seedGraphs(s, *force, commits, envs); err != nil {
+	//
+	// The newest push (f666666) carries two in-flight graphs (one running
+	// mid-build with live-style logs, one fully queued) so the dashboards,
+	// the job detail and the graph page can be seen handling pending/running
+	// states. These are seeds, not live tasks: no worker will ever claim
+	// them (nothing writes new logs), but every read path renders them.
+	liveCommit := &store.Commit{Repo: "group/md-code", SHA: "f666666", Ref: "main",
+		Author: "carol", Message: "Add thermostat barostat coupling",
+		PushedAt: time.Now().Add(-20 * time.Minute)}
+	if _, err := s.GetOrCreateCommit(liveCommit); err != nil {
+		fmt.Fprintf(os.Stderr, "error: create commit %s: %v\n", liveCommit.SHA, err)
+		return 1
+	}
+	if err := seedGraphs(s, *force, commits, envs,
+		liveSpec{env: gpu, commit: liveCommit.ID, phase: "running"},
+		liveSpec{env: mpi, commit: liveCommit.ID, phase: "pending"},
+	); err != nil {
 		fmt.Fprintf(os.Stderr, "error: seed task graphs: %v\n", err)
 		return 1
 	}
@@ -279,7 +295,7 @@ func runStatusOf(cases []store.TestCaseResult) string {
 // from the run reports: a failed run makes the stage failed (and the test
 // stages skipped, mirroring the runner's failure propagation). Statuses are
 // terminal so the live scheduler will not claim them.
-func seedGraphs(s *store.Store, force bool, commits []*store.Commit, envs []*store.TestEnvironment) error {
+func seedGraphs(s *store.Store, force bool, commits []*store.Commit, envs []*store.TestEnvironment, live ...liveSpec) error {
 	if force {
 		// Drop all demo graphs (roots, sub-tasks and logs) so they are
 		// rebuilt. Run reports are kept: they are idempotent.
@@ -312,15 +328,11 @@ func seedGraphs(s *store.Store, force bool, commits []*store.Commit, envs []*sto
 	if err := s.DB.Find(&runs).Error; err != nil {
 		return err
 	}
-	type runState struct {
-		status  string
-		summary string
-	}
-	runStateOf := map[store.EnvCommit]map[string]runState{}
+	runStateOf := map[store.EnvCommit]map[string]seedRunState{}
 	for _, r := range runs {
 		key := store.EnvCommit{Env: r.EnvironmentID, Commit: r.CommitID}
 		if runStateOf[key] == nil {
-			runStateOf[key] = map[string]runState{}
+			runStateOf[key] = map[string]seedRunState{}
 		}
 		st := r.Status
 		// A failed run whose summary starts with "skipped:" is the runner's
@@ -329,7 +341,7 @@ func seedGraphs(s *store.Store, force bool, commits []*store.Commit, envs []*sto
 		if st == store.StatusFailed && strings.HasPrefix(r.Summary, "skipped:") {
 			st = "skipped"
 		}
-		runStateOf[key][r.Kind] = runState{status: st, summary: r.Summary}
+		runStateOf[key][r.Kind] = seedRunState{status: st, summary: r.Summary}
 	}
 
 	for _, env := range envs {
@@ -343,44 +355,88 @@ func seedGraphs(s *store.Store, force bool, commits []*store.Commit, envs []*sto
 				// a graph without any run would render as blank nodes.
 				continue
 			}
-			spec := &graphSpec{cloneStatus: store.TaskDone}
-			// Every graph carries all four nodes. A stage's status comes
-			// from its run: passed → done, failed → failed, skipped (or no
-			// run at all) → skipped. A stage without its own run never
-			// executed — it is downstream of a failure, exactly the runner's
-			// SkipDependents/recordSkippedRuns outcome.
-			for _, pair := range []struct {
-				kind   string
-				status *string
-			}{
-				{store.RunKindBuild, &spec.buildStatus},
-				{store.RunKindUnit, &spec.unitStatus},
-				{store.RunKindRegression, &spec.regStatus},
-			} {
-				switch runSt := stageRuns[pair.kind].status; {
-				case runSt == "skipped", runSt == "":
-					*pair.status = store.TaskSkipped
-				case runSt == store.StatusFailed:
-					*pair.status = store.TaskFailed
-					// The failed build's error text (the CMake error) feeds
-					// the node's error and log, like the runner's fail path.
-					if pair.kind == store.RunKindBuild {
-						spec.buildErr = stageRuns[pair.kind].summary
-						spec.buildSummary = stageRuns[pair.kind].summary
-					}
-				default: // passed
-					*pair.status = store.TaskDone
-					if pair.kind == store.RunKindBuild {
-						spec.buildSummary = stageRuns[pair.kind].summary
-					}
-				}
-			}
-			if err := seedGraph(s, env, commit, spec); err != nil {
+			if err := seedGraph(s, env, commit, specFor(stageRuns)); err != nil {
 				return err
 			}
 		}
 	}
+
+	// In-flight demo graphs: seeded after the terminal ones (they are on
+	// their own commit, so the idempotence check never collides).
+	for _, ls := range live {
+		env := envByID(envs, ls.env)
+		if env == nil {
+			continue
+		}
+		if err := seedLiveGraph(s, env, ls.commit, ls.phase); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// liveSpec requests one in-flight demo graph: phase is "running" (clone
+// done, build running with log output, tests queued) or "pending" (nothing
+// claimed yet).
+type liveSpec struct {
+	env    int64
+	commit int64
+	phase  string
+}
+
+// seedRunState is one stage's run status/summary snapshot used to derive a
+// terminal graph spec.
+type seedRunState struct {
+	status  string
+	summary string
+}
+
+// envByID finds an environment by id (nil when absent).
+func envByID(envs []*store.TestEnvironment, id int64) *store.TestEnvironment {
+	for _, e := range envs {
+		if e.ID == id {
+			return e
+		}
+	}
+	return nil
+}
+
+// specFor derives the terminal graph spec from the stage runs (passed →
+// done, failed → failed, skipped or missing → skipped).
+func specFor(stageRuns map[string]seedRunState) *graphSpec {
+	spec := &graphSpec{cloneStatus: store.TaskDone}
+	// Every graph carries all four nodes. A stage's status comes from its
+	// run: passed → done, failed → failed, skipped (or no run at all) →
+	// skipped. A stage without its own run never executed — it is
+	// downstream of a failure, exactly the runner's
+	// SkipDependents/recordSkippedRuns outcome.
+	for _, pair := range []struct {
+		kind   string
+		status *string
+	}{
+		{store.RunKindBuild, &spec.buildStatus},
+		{store.RunKindUnit, &spec.unitStatus},
+		{store.RunKindRegression, &spec.regStatus},
+	} {
+		switch runSt := stageRuns[pair.kind].status; {
+		case runSt == "skipped", runSt == "":
+			*pair.status = store.TaskSkipped
+		case runSt == store.StatusFailed:
+			*pair.status = store.TaskFailed
+			// The failed build's error text (the CMake error) feeds the
+			// node's error and log, like the runner's fail path.
+			if pair.kind == store.RunKindBuild {
+				spec.buildErr = stageRuns[pair.kind].summary
+				spec.buildSummary = stageRuns[pair.kind].summary
+			}
+		default: // passed
+			*pair.status = store.TaskDone
+			if pair.kind == store.RunKindBuild {
+				spec.buildSummary = stageRuns[pair.kind].summary
+			}
+		}
+	}
+	return spec
 }
 
 // graphSpec describes one seeded graph's stage outcomes. Every stage has a
@@ -515,5 +571,93 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 	}
 	fmt.Printf("seeded task graph: root #%d (%s × %s on %s)\n",
 		root.ID, commit.SHA[:7], "pipeline", env.Name)
+	return nil
+}
+
+// seedLiveGraph inserts one in-flight graph (root + four sub-tasks) for the
+// demo's newest push, so the dashboards, the job detail and the graph page
+// can be seen rendering pending/running states. phase "running" gives a
+// mid-build snapshot (clone done with its log, build running with partial
+// output, tests pending); phase "pending" leaves everything unclaimed. The
+// graph is a static snapshot — no worker will ever advance it — but every
+// read path (matrix live overlay, task detail, log polling, graph page)
+// handles it exactly like a real dispatch.
+func seedLiveGraph(s *store.Store, env *store.TestEnvironment, commitID int64, phase string) error {
+	var commit store.Commit
+	if err := s.DB.Where("id = ?", commitID).First(&commit).Error; err != nil {
+		return err
+	}
+	var existing store.Task
+	if err := s.DB.Where("kind = ? AND environment_id = ? AND commit_id = ?",
+		store.TaskKindRoot, env.ID, commitID).First(&existing).Error; err == nil {
+		fmt.Printf("live task graph for %s on %s already exists (root #%d)\n",
+			commit.SHA[:7], env.Name, existing.ID)
+		return nil
+	}
+	root := &store.Task{
+		Kind: store.TaskKindRoot, Name: "test " + commit.SHA[:7], Status: store.TaskPending,
+		CommitID: commitID, EnvironmentID: env.ID, Tags: env.Tags,
+		Config: `{"build":{"generator":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
+	}
+	clone := &store.Task{Kind: store.TaskKindClone, Name: "clone repositories",
+		CommitID: commitID, EnvironmentID: env.ID}
+	build := &store.Task{Kind: store.TaskKindBuild, Name: "build (ninja)",
+		CommitID: commitID, EnvironmentID: env.ID}
+	unitT := &store.Task{Kind: store.TaskKindUnit, Name: "unit tests",
+		CommitID: commitID, EnvironmentID: env.ID}
+	regT := &store.Task{Kind: store.TaskKindRegression, Name: "regression tests",
+		CommitID: commitID, EnvironmentID: env.ID}
+	subs := []*store.Task{clone, build, unitT, regT}
+	deps := [][]int64{
+		{store.TaskRootPlaceholder},
+		{store.TaskSubPlaceholderBase + 0},
+		{store.TaskSubPlaceholderBase + 1},
+		{store.TaskSubPlaceholderBase + 1},
+	}
+	stored, err := store.CreateTaskGraph(s, root, subs, deps)
+	if err != nil {
+		return err
+	}
+
+	// Statuses and timestamps: the running phase marks root+build running
+	// and clone done (with a started_at each); pending leaves everything
+	// untouched (CreateTaskGraph wrote pending). The running build carries
+	// partial log output, like a session mid-flight.
+	now := time.Now()
+	statuses := map[*store.Task]string{}
+	logs := map[int64][]string{}
+	if phase == "running" {
+		statuses[root] = store.TaskRunning
+		statuses[stored[1]] = store.TaskDone    // clone
+		statuses[stored[2]] = store.TaskRunning // build
+		logs[stored[1].ID] = []string{
+			"Cloning into '" + commit.Repo + "'...\n",
+			"* branch main -> FETCH_HEAD\nHEAD is now at " + commit.SHA[:7] + " " + commit.Message + "\n",
+			"uploaded 118.4 MiB to " + env.Host + " (tar stream)\n",
+		}
+		logs[stored[2].ID] = []string{
+			"-- The C compiler identification is GNU 13.2.0\n-- The CXX compiler identification is GNU 13.2.0\n",
+			"[17/42] Building CXX object src/CMakeFiles/md.dir/integrate/verlet.cpp.o\n",
+			"[24/42] Building CXX object src/CMakeFiles/md.dir/neighbor/skin.cpp.o\n",
+		}
+	}
+	for t, st := range statuses {
+		updates := map[string]any{"status": st}
+		if st == store.TaskRunning || st == store.TaskDone {
+			updates["started_at"] = now.Add(-4 * time.Minute)
+		}
+		if err := s.DB.Model(t).Updates(updates).Error; err != nil {
+			return err
+		}
+	}
+	for taskID, chunks := range logs {
+		for i, content := range chunks {
+			if err := s.AppendTaskLog(taskID, i+1, content); err != nil {
+				return err
+			}
+		}
+	}
+	fmt.Printf("seeded live task graph (%s): root #%d (%s on %s)\n",
+		phase, root.ID, commit.SHA[:7], env.Name)
 	return nil
 }
