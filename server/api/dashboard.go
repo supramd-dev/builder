@@ -181,9 +181,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 				row.Cells[j] = toRunCellJSON(&run, runStatusForDisplay(&run))
 				continue
 			}
-			// No run yet: overlay the root task state when a live graph exists.
+			// No run yet: overlay the live task state when a graph exists.
+			// The cell shows THIS view's stage (kind), not the root: while a
+			// graph is mid-build its unit stage is still queued, even though
+			// the root reports running.
 			if summary, ok := jobs[key]; ok {
-				row.Cells[j] = taskCellJSON(summary.Root, summary.Subs)
+				row.Cells[j] = taskCellJSON(kind, summary.Root, summary.Subs)
 			}
 		}
 		out.Rows = append(out.Rows, row)
@@ -695,26 +698,52 @@ func toRunCellJSON(run *store.TestRun, status string) *runCellJSON {
 }
 
 // taskCellJSON renders a live task graph as a matrix cell (runId 0,
-// taskId set: clickable through to the task detail). When the root failed
-// before any report, the sub-task errors hint at the stage that broke.
-func taskCellJSON(root *store.Task, subs []store.Task) *runCellJSON {
+// taskId set: clickable through to the task detail). kind selects the stage
+// this dashboard view is about (build/unit/regression): the cell mirrors
+// that sub-task's own state — a running root with a queued unit stage shows
+// "pending" on the unit dashboard, a running build stage shows "running".
+// The root's state is only a fallback for graphs where the stage sub-task
+// is missing. When the stage failed before any report, the sub-task errors
+// hint at what broke.
+func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON {
 	cell := &runCellJSON{RunID: 0, TaskID: root.ID}
-	switch root.Status {
+	// The sub-task whose kind matches this view (build/unit/regression).
+	stageKind := map[string]string{
+		store.RunKindBuild:      store.TaskKindBuild,
+		store.RunKindUnit:       store.TaskKindUnit,
+		store.RunKindRegression: store.TaskKindRegression,
+	}[kind]
+	status := root.Status
+	errMsg := root.Error
+	for i := range subs {
+		if subs[i].Kind != stageKind {
+			continue
+		}
+		// The stage exists: mirror its own state (pending stays pending,
+		// running stays running, failed stays failed). The root aggregate
+		// must not bleed into a per-stage cell.
+		status = subs[i].Status
+		errMsg = subs[i].Error
+		break
+	}
+	switch status {
 	case store.TaskPending:
 		cell.Status = "pending"
 	case store.TaskRunning:
 		cell.Status = "running"
-	default: // failed before any report
+	default: // stage/root failed (or finished without a report)
 		cell.Status = store.StatusFailed
-		cell.Error = root.Error
-		// Prefer the first failed sub-task's error (clone/build failures are
-		// more actionable than the root's derived status).
-		for i := range subs {
-			if subs[i].Status == store.TaskFailed || subs[i].Status == store.TaskSkipped {
-				if subs[i].Error != "" {
-					cell.Error = subs[i].Error
+		cell.Error = errMsg
+		if cell.Error == "" {
+			// Prefer the first failed sub-task's error (clone/build failures
+			// are more actionable than the root's derived status).
+			for i := range subs {
+				if subs[i].Status == store.TaskFailed || subs[i].Status == store.TaskSkipped {
+					if subs[i].Error != "" {
+						cell.Error = subs[i].Error
+					}
+					break
 				}
-				break
 			}
 		}
 	}
