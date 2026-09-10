@@ -42,4 +42,5 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 5. **GitLab**: add a push-events webhook pointing at the server (see
    [GitLab webhooks](#/docs/webhooks)).
 6. Push a commit — the dashboard (see
-   [Dashboard and reporting](#/docs/dashboard)) fills in as jobs run.
+   [Dashboard and reporting](#/docs/dashboard)) fills in as the task
+   graphs run (see [Runner and tasks](#/docs/runner-strategy)).

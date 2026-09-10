@@ -5,75 +5,46 @@ import (
 	"strings"
 )
 
-// Report markers delimit the line-protocol report in the script output.
-const (
-	ReportBegin = "===MD-BUILDER-REPORT-BEGIN==="
-	ReportEnd   = "===MD-BUILDER-REPORT-END==="
-)
+// Summary extraction. The former line-protocol report (REPORT-BEGIN/END
+// markers) is gone: each sub-task streams its full output into the task
+// log, and its outcome is derived from the exit code. What remains is the
+// one-paragraph summary convention: a stage command may print a line
+// starting with MD-BUILDER-SUMMARY: which becomes the stored test-run
+// summary; without it the summary is the exit code plus the log tail.
 
-// StageOutcome is the result of one test stage (unit / regression).
-type StageOutcome struct {
-	Status  string // "passed" or "failed"
-	Summary string
-}
-
-// Report is the parsed outcome of a job's remote execution.
-type Report struct {
-	Unit       *StageOutcome
-	Regression *StageOutcome
-}
-
-// ParseReport extracts the line-protocol report from script output. Lines
-// between the BEGIN/END markers carry "<stage>-status <status>" and
-// "<stage>-summary <text>". A missing marker pair is an error (the script did
-// not run to completion); stages absent from the report are nil.
-func ParseReport(output string) (*Report, error) {
-	begin := strings.Index(output, ReportBegin)
-	end := strings.LastIndex(output, ReportEnd)
-	if begin < 0 || end < 0 || end < begin {
-		return nil, fmt.Errorf("report markers not found in output")
-	}
-	body := output[begin+len(ReportBegin) : end]
-
-	rep := &Report{}
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.HasPrefix(line, "unit-status ") {
-			oc := stageOrNew(rep.Unit)
-			oc.Status = strings.TrimSpace(strings.TrimPrefix(line, "unit-status "))
-			rep.Unit = oc
-		} else if strings.HasPrefix(line, "unit-summary ") {
-			oc := stageOrNew(rep.Unit)
-			oc.Summary = truncateSummary(strings.TrimSpace(strings.TrimPrefix(line, "unit-summary ")))
-			rep.Unit = oc
-		} else if strings.HasPrefix(line, "regression-status ") {
-			oc := stageOrNew(rep.Regression)
-			oc.Status = strings.TrimSpace(strings.TrimPrefix(line, "regression-status "))
-			rep.Regression = oc
-		} else if strings.HasPrefix(line, "regression-summary ") {
-			oc := stageOrNew(rep.Regression)
-			oc.Summary = truncateSummary(strings.TrimSpace(strings.TrimPrefix(line, "regression-summary ")))
-			rep.Regression = oc
-		}
-	}
-	// Normalize statuses to passed/failed; anything else counts as failed.
-	for _, st := range []*StageOutcome{rep.Unit, rep.Regression} {
-		if st != nil && st.Status != "passed" && st.Status != "failed" {
-			st.Status = "failed"
-		}
-	}
-	return rep, nil
-}
-
-func stageOrNew(st *StageOutcome) *StageOutcome {
-	if st != nil {
-		return st
-	}
-	return &StageOutcome{}
-}
+// SummaryPrefix is the line prefix a stage command prints to declare its
+// own one-line conclusion.
+const SummaryPrefix = "MD-BUILDER-SUMMARY: "
 
 // maxSummaryLen caps a stored summary.
 const maxSummaryLen = 500
+
+// ExtractSummary pulls the test-run summary from a stage's log output: the
+// first MD-BUILDER-SUMMARY: line when present, otherwise "exit N" plus the
+// last lines of the output flattened to one line.
+func ExtractSummary(output string, exitCode int) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, SummaryPrefix) {
+			return truncateSummary(strings.TrimSpace(strings.TrimPrefix(line, SummaryPrefix)))
+		}
+	}
+	return truncateSummary(fmt.Sprintf("exit %d; %s", exitCode, tailLine(output, 5)))
+}
+
+// TailLine returns the last n lines of s, flattened to one line (used for
+// failure summaries and error messages).
+func TailLine(s string, n int) string { return tailLine(s, n) }
+
+func tailLine(s string, n int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	start := 0
+	if len(lines) > n {
+		start = len(lines) - n
+	}
+	joined := strings.Join(strings.Fields(strings.Join(lines[start:], " ")), " ")
+	return joined
+}
 
 func truncateSummary(s string) string {
 	s = strings.TrimSpace(s)

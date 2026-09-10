@@ -486,6 +486,31 @@ check "jobs list is an array" \
   "$(head -n1 <<<"$body_code" | jq '.jobs | type == "array"')" "true"
 
 # ---------------------------------------------------------------------------
+# 8d. Task graph API: detail and incremental logs
+# ---------------------------------------------------------------------------
+echo "== task api =="
+
+# Unauthenticated access is rejected.
+body_code=$(curl -s -w '\n%{http_code}' "$BASE_URL/api/tasks/1")
+check "task detail without session 401" "$(tail -n1 <<<"$body_code")" "401"
+
+body_code=$(curl -s -w '\n%{http_code}' "$BASE_URL/api/tasks/1/log")
+check "task logs without session 401" "$(tail -n1 <<<"$body_code")" "401"
+
+# Validation: bad id, unknown task, bad cursor.
+body_code=$(req GET /api/tasks/not-a-number)
+check "task detail bad id 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(req GET /api/tasks/999999)
+check "task detail unknown 404" "$(tail -n1 <<<"$body_code")" "404"
+
+body_code=$(req GET "/api/tasks/999999/log?after=-1")
+check "task logs negative after 400" "$(tail -n1 <<<"$body_code")" "400"
+
+body_code=$(req GET "/api/tasks/999999/log")
+check "task logs unknown task 404" "$(tail -n1 <<<"$body_code")" "404"
+
+# ---------------------------------------------------------------------------
 # 9. Delete + logout (deleting the environment removes its runs too)
 # ---------------------------------------------------------------------------
 echo "== delete and logout =="

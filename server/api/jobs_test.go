@@ -11,11 +11,11 @@ import (
 
 	"md-builder/server/runner"
 	"md-builder/server/store"
-	"md-builder/server/worker"
 )
 
-// newDispatchTestServer wires a Dispatcher with an in-memory YAML fetcher so
-// webhook pushes trigger job creation without any git/network access.
+// newDispatchTestServer wires a runner Service with an in-memory YAML
+// fetcher so webhook pushes create task graphs without any git/network
+// access.
 func newDispatchTestServer(t *testing.T, yaml string) (*Server, *store.Store) {
 	t.Helper()
 	apiServer, s := newTestServer(t)
@@ -25,7 +25,8 @@ func newDispatchTestServer(t *testing.T, yaml string) (*Server, *store.Store) {
 		}
 		return []byte(yaml), nil
 	}
-	apiServer.SetDispatcher(&worker.Dispatcher{Store: s, FetchYAML: fetcher})
+	svc := &runner.Service{Store: s, FetchYAML: fetcher}
+	apiServer.SetRunner(svc)
 	return apiServer, s
 }
 
@@ -69,7 +70,7 @@ func pushBody(repo, sha string) string {
 	}`, repo, repo, sha, sha)
 }
 
-func TestWebhookDispatchesJobs(t *testing.T) {
+func TestWebhookDispatchesTasks(t *testing.T) {
 	apiServer, s := newDispatchTestServer(t, dispatchYAML)
 	mux := http.NewServeMux()
 	apiServer.Register(mux)
@@ -106,44 +107,57 @@ func TestWebhookDispatchesJobs(t *testing.T) {
 		t.Fatalf("jobsCreated: want 2, got %v", res["jobsCreated"])
 	}
 
-	jobs, err := s.ListJobs(10)
+	roots, err := s.ListRootTasks(10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jobs) != 2 {
-		t.Fatalf("want 2 jobs, got %d", len(jobs))
+	if len(roots) != 2 {
+		t.Fatalf("want 2 root tasks, got %d", len(roots))
 	}
-	for _, j := range jobs {
-		if j.Status != store.JobPending {
-			t.Errorf("job should be pending: %+v", j)
+	for _, r := range roots {
+		if r.Status != store.TaskPending {
+			t.Errorf("root should be pending: %+v", r)
 		}
-		if j.TestInputRef != "main" {
-			t.Errorf("job should snapshot TestInputRef: %+v", j)
+		subs, err := s.ListSubTasks(r.ID)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if j.Tags != "cpu" && j.Tags != "cuda,gpu" {
-			t.Errorf("job tags wrong: %q", j.Tags)
+		// clone + build + (unit) (+ regression for the cpu entry).
+		want := 3
+		if r.Tags == "cpu" {
+			want = 4
+		}
+		if len(subs) != want {
+			t.Errorf("root %d (%s) subtask count: want %d, got %d", r.ID, r.Tags, want, len(subs))
+		}
+		if r.Tags != "cpu" && r.Tags != "cuda,gpu" {
+			t.Errorf("root tags wrong: %q", r.Tags)
 		}
 	}
 
-	// Repeat push: jobs are requeued (not duplicated), attempts bumped.
+	// Repeat push: graphs are requeued (not duplicated), attempts bumped.
 	res = post(pushBody("group/code", "abc123def"))
 	if res["jobsCreated"].(float64) != 2 {
 		t.Fatalf("re-push jobsCreated: want 2, got %v", res["jobsCreated"])
 	}
-	jobs, _ = s.ListJobs(10)
-	if len(jobs) != 2 {
-		t.Fatalf("re-push should requeue, not duplicate: %d jobs", len(jobs))
+	roots, _ = s.ListRootTasks(10)
+	if len(roots) != 2 {
+		t.Fatalf("re-push should requeue, not duplicate: %d roots", len(roots))
 	}
-	for _, j := range jobs {
-		if j.Attempts != 1 {
-			t.Errorf("re-push attempts: want 1, got %d", j.Attempts)
+	for _, r := range roots {
+		if r.Attempts != 1 {
+			t.Errorf("re-push attempts: want 1, got %d", r.Attempts)
+		}
+		subs, _ := s.ListSubTasks(r.ID)
+		if len(subs) == 0 {
+			t.Errorf("re-push should rebuild sub-tasks of root %d", r.ID)
 		}
 	}
 
-	// Push to another repo: recorded, no jobs.
+	// Push to another repo: recorded, no tasks.
 	res = post(pushBody("group/other", "fff222"))
 	if _, ok := res["jobsCreated"]; ok {
-		t.Fatalf("no jobs expected for non-code repo: %v", res)
+		t.Fatalf("no tasks expected for non-code repo: %v", res)
 	}
 }
 
@@ -218,6 +232,12 @@ func TestJobsAPIListAndTrigger(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth jobs: expected 401, got %d", rec.Code)
 	}
+	// Unauthenticated tasks API: 401.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tasks/1", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth tasks: expected 401, got %d", rec.Code)
+	}
 
 	// Trigger without environments: everything skipped, no error.
 	rec = authed(http.MethodPost, "/api/jobs", fmt.Sprintf(`{"commitId":%d}`, commit.ID))
@@ -239,7 +259,7 @@ func TestJobsAPIListAndTrigger(t *testing.T) {
 		t.Fatalf("jobsCreated: want 1, got %v", res)
 	}
 
-	// List shows the job.
+	// List shows the root task.
 	rec = authed(http.MethodGet, "/api/jobs", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: expected 200, got %d", rec.Code)
@@ -257,7 +277,7 @@ func TestJobsAPIListAndTrigger(t *testing.T) {
 		t.Fatalf("listed job wrong: %+v", list.Jobs[0])
 	}
 
-	// Validation: bad limit, missing commit.
+	// Validation: bad limit, missing commit, unknown task.
 	rec = authed(http.MethodGet, "/api/jobs?limit=0", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad limit: expected 400, got %d", rec.Code)
@@ -270,9 +290,139 @@ func TestJobsAPIListAndTrigger(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown commit: expected 404, got %d", rec.Code)
 	}
+	rec = authed(http.MethodGet, "/api/tasks/99999", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown task: expected 404, got %d", rec.Code)
+	}
+	rec = authed(http.MethodGet, "/api/tasks/notanumber", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad task id: expected 400, got %d", rec.Code)
+	}
 }
 
-func TestDashboardOverlaysJobState(t *testing.T) {
+// TestTaskDetailAndLogs covers GET /api/tasks/{id} and /log on a seeded
+// graph: the root detail carries sub-tasks; logs are read incrementally.
+func TestTaskDetailAndLogs(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	seedUser(t, s, "taskuser", "task@example.com", "pw")
+	env := seedDispatchEnv(t, s, "cpu-detail", "cpu", true)
+	commit := &store.Commit{Repo: "group/code", SHA: "detail01", PushedAt: time.Now()}
+	if _, err := s.GetOrCreateCommit(commit); err != nil {
+		t.Fatal(err)
+	}
+
+	root := &store.Task{
+		Kind: store.TaskKindRoot, Name: "test detail01", CommitID: commit.ID,
+		EnvironmentID: env.ID, Tags: "cpu", Config: `{"entry":{"tags":["cpu"]},"testInputRef":"main"}`,
+	}
+	subs := []*store.Task{
+		{Kind: store.TaskKindClone, Name: "clone repositories", CommitID: commit.ID, EnvironmentID: env.ID},
+		{Kind: store.TaskKindBuild, Name: "build (cmake)", CommitID: commit.ID, EnvironmentID: env.ID},
+		{Kind: store.TaskKindUnit, Name: "unit tests", CommitID: commit.ID, EnvironmentID: env.ID},
+	}
+	deps := [][]int64{
+		{store.TaskRootPlaceholder},
+		{store.TaskSubPlaceholderBase + 0},
+		{store.TaskSubPlaceholderBase + 1},
+	}
+	stored, err := store.CreateTaskGraph(s, root, subs, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Logs on the clone task.
+	if err := s.AppendTaskLog(stored[1].ID, 1, "cloning...\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendTaskLog(stored[1].ID, 2, "uploading 12.3 MiB\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "taskuser", "pw")
+	authed := func(method, target string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, target, nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Root detail: carries sub-tasks and commit/environment context.
+	rec := authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d", root.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("task detail: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var detail taskDetailJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Kind != store.TaskKindRoot || len(detail.SubTasks) != 3 {
+		t.Fatalf("root detail wrong: kind=%s subs=%d", detail.Kind, len(detail.SubTasks))
+	}
+	if detail.Commit == nil || detail.Commit.SHA != "detail01" {
+		t.Fatalf("commit context missing: %+v", detail.Commit)
+	}
+	if detail.Environment == nil || detail.Environment.Name != "cpu-detail" {
+		t.Fatalf("environment context missing: %+v", detail.Environment)
+	}
+	if detail.SubTasks[0].DependsOn[0] != root.ID {
+		t.Fatalf("clone should depend on root: %+v", detail.SubTasks[0])
+	}
+
+	// Sub-task detail: no sub-tasks of its own.
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d", stored[1].ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sub detail: expected 200, got %d", rec.Code)
+	}
+	var subDetail taskDetailJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &subDetail); err != nil {
+		t.Fatal(err)
+	}
+	if subDetail.Kind != store.TaskKindClone || len(subDetail.SubTasks) != 0 {
+		t.Fatalf("sub detail wrong: %+v", subDetail)
+	}
+
+	// Logs: full read then incremental.
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log", stored[1].ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("log read: expected 200, got %d", rec.Code)
+	}
+	var logs struct {
+		Chunks  []logChunkJSON `json:"chunks"`
+		LastSeq int            `json:"lastSeq"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs.Chunks) != 2 || logs.LastSeq != 2 {
+		t.Fatalf("log read wrong: %+v", logs)
+	}
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=1", stored[1].ID))
+	if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs.Chunks) != 1 || logs.Chunks[0].Seq != 2 {
+		t.Fatalf("incremental log read wrong: %+v", logs)
+	}
+
+	// Log of an unknown task: 404; bad after: 400.
+	rec = authed(http.MethodGet, "/api/tasks/99999/log")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown task log: expected 404, got %d", rec.Code)
+	}
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=x", stored[1].ID))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad after: expected 400, got %d", rec.Code)
+	}
+}
+
+func TestDashboardOverlaysTaskState(t *testing.T) {
 	apiServer, s := newDispatchTestServer(t, dispatchYAML)
 	seedUser(t, s, "overlayuser", "ov@example.com", "pw")
 
@@ -281,10 +431,15 @@ func TestDashboardOverlaysJobState(t *testing.T) {
 	if _, err := s.GetOrCreateCommit(commit); err != nil {
 		t.Fatal(err)
 	}
-	// A pending job for (env, commit) with no run.
-	if _, err := s.CreateJobs([]*store.Job{{
-		CommitID: commit.ID, EnvironmentID: env.ID, Tags: "cpu", Config: "{}", TestInputRef: "main",
-	}}); err != nil {
+	// A pending task graph for (env, commit) with no run.
+	root := &store.Task{
+		Kind: store.TaskKindRoot, Name: "test cafe11", CommitID: commit.ID,
+		EnvironmentID: env.ID, Tags: "cpu", Config: "{}",
+	}
+	subs := []*store.Task{
+		{Kind: store.TaskKindClone, Name: "clone", CommitID: commit.ID, EnvironmentID: env.ID},
+	}
+	if _, err := store.CreateTaskGraph(s, root, subs, [][]int64{{store.TaskRootPlaceholder}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -308,10 +463,26 @@ func TestDashboardOverlaysJobState(t *testing.T) {
 	}
 	cell := dash.Rows[0].Cells[0]
 	if cell == nil {
-		t.Fatal("expected a job overlay cell, got null")
+		t.Fatal("expected a task overlay cell, got null")
 	}
-	if cell.Status != "pending" || cell.RunID != 0 {
+	if cell.Status != "pending" || cell.RunID != 0 || cell.TaskID != root.ID {
 		t.Fatalf("overlay cell wrong: %+v", cell)
+	}
+
+	// A done root is not overlaid (the run takes over).
+	if err := s.FinishTask(root.ID, store.TaskDone, ""); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/dashboard/regression", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	mux.ServeHTTP(rec, req)
+	dash = dashboardJSON{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if dash.Rows[0].Cells[0] != nil {
+		t.Fatalf("done root should not overlay: %+v", dash.Rows[0].Cells[0])
 	}
 
 	// Environment columns now include tags.

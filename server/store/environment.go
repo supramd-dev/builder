@@ -119,8 +119,8 @@ func (s *Store) SetEnvironmentEnabled(ownerID, id int64, enabled bool) (*TestEnv
 }
 
 // DeleteEnvironment removes an environment owned by ownerID, together with
-// its test runs and case results (the dashboard shows site-wide history, so
-// dangling rows would otherwise survive the environment).
+// its test runs, case results and tasks (the dashboard shows site-wide
+// history, so dangling rows would otherwise survive the environment).
 func (s *Store) DeleteEnvironment(ownerID, id int64) error {
 	return s.DB.Transaction(func(tx *gorm.DB) error {
 		var runIDs []int64
@@ -133,6 +133,19 @@ func (s *Store) DeleteEnvironment(ownerID, id int64) error {
 				return err
 			}
 			if err := tx.Where("id IN ?", runIDs).Delete(&TestRun{}).Error; err != nil {
+				return err
+			}
+		}
+		var taskIDs []int64
+		if err := tx.Model(&Task{}).Where("environment_id = ?", id).
+			Pluck("id", &taskIDs).Error; err != nil {
+			return err
+		}
+		if len(taskIDs) > 0 {
+			if err := tx.Where("task_id IN ?", taskIDs).Delete(&TaskLog{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("id IN ?", taskIDs).Delete(&Task{}).Error; err != nil {
 				return err
 			}
 		}

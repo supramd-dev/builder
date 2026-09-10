@@ -22,7 +22,8 @@ that repository (matched by path), dispatching kicks in automatically:
 
 1. The server reads `md-builder.yaml` **at the pushed commit**.
 2. Matrix entries are matched to **enabled** environments by tags; one
-   job is created per entry (see
+   task graph (root + clone/build/test stages) is created per entry (see
+   [Runner and tasks](#/docs/runner-strategy) and
    [The test matrix](#/docs/test-matrix)).
 3. The response carries `jobsCreated` / `entriesSkipped`, plus a
    `dispatchError` when the YAML cannot be fetched or parsed — the
@@ -34,8 +35,8 @@ configured in the site settings (see
 
 ## Re-running dispatch
 
-Jobs are keyed by (commit, environment): pushing the same commit again
-requeues its jobs instead of duplicating them. To re-run a dispatch
+Task graphs are keyed by (commit, environment): pushing the same commit
+again requeues its graph instead of duplicating it. To re-run a dispatch
 without a push — after changing environment tags or the YAML — use the
 jobs API with a session:
 
@@ -44,5 +45,5 @@ POST /api/jobs {"commitId": 7}
 POST /api/jobs {"commitSha": "abc123", "commitRepo": "group/code"}
 ```
 
-`GET /api/jobs?limit=20` lists recent jobs for monitoring (status,
+`GET /api/jobs?limit=20` lists recent graphs for monitoring (status,
 attempts, error).

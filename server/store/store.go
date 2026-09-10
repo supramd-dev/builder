@@ -83,11 +83,13 @@ func openDB(dsn string) (*gorm.DB, error) {
 	return db, nil
 }
 
-// migrate creates/updates the schema via GORM AutoMigrate.
+// migrate creates/updates the schema via GORM AutoMigrate. The former
+// `jobs` table is intentionally no longer migrated (superseded by `tasks`;
+// stale rows in old databases are harmless).
 func (s *Store) migrate() error {
 	if err := s.DB.AutoMigrate(
 		&User{}, &Session{}, &TestEnvironment{}, &SiteConfig{},
-		&Commit{}, &TestRun{}, &TestCaseResult{}, &Job{},
+		&Commit{}, &TestRun{}, &TestCaseResult{}, &Task{}, &TaskLog{},
 	); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}

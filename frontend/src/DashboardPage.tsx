@@ -8,13 +8,14 @@ import {
 
 interface Props {
   onOpenRun: (runId: number) => void
+  onOpenTask: (taskId: number) => void
   onError: (message: string) => void
 }
 
 // DashboardPage renders the test result matrix: one row per test
 // environment, one column per recent git push (commit). Regression mode
 // shows pass/fail counts per run; unit mode shows passed/total.
-export default function DashboardPage({ onOpenRun, onError }: Props) {
+export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props) {
   const [kind, setKind] = useState<DashboardKind>('regression')
   const [dash, setDash] = useState<Dashboard | null>(null)
   const [error, setError] = useState('')
@@ -89,7 +90,12 @@ export default function DashboardPage({ onOpenRun, onError }: Props) {
       {effectiveKind !== kind && <p className="text-muted">Loading…</p>}
 
       {effectiveKind === kind && dash && (
-        <DashboardMatrix dash={dash} kind={kind} onOpenRun={onOpenRun} />
+        <DashboardMatrix
+          dash={dash}
+          kind={kind}
+          onOpenRun={onOpenRun}
+          onOpenTask={onOpenTask}
+        />
       )}
     </div>
   )
@@ -101,10 +107,12 @@ function DashboardMatrix({
   dash,
   kind,
   onOpenRun,
+  onOpenTask,
 }: {
   dash: Dashboard
   kind: DashboardKind
   onOpenRun: (runId: number) => void
+  onOpenTask: (taskId: number) => void
 }) {
   if (dash.environments.length === 0) {
     return (
@@ -174,7 +182,15 @@ function DashboardMatrix({
                   <RunCellView
                     cell={cell}
                     kind={kind}
-                    onOpen={cell && cell.runId > 0 ? () => onOpenRun(cell.runId) : undefined}
+                    onOpen={
+                      cell
+                        ? cell.runId > 0
+                          ? () => onOpenRun(cell.runId)
+                          : cell.taskId
+                            ? () => onOpenTask(cell.taskId as number)
+                            : undefined
+                        : undefined
+                    }
                   />
                 </td>
               ))}
@@ -187,8 +203,9 @@ function DashboardMatrix({
 }
 
 // RunCellView renders one matrix cell: a clickable summary of a recorded
-// run, a live job state (running…/queued), or an em dash when neither
-// exists for that (commit, environment).
+// run, a live task-graph state (running…/queued/failed before reporting —
+// clickable through to the task detail), or an em dash when neither exists
+// for that (commit, environment).
 function RunCellView({
   cell,
   kind,
@@ -205,26 +222,41 @@ function RunCellView({
       </span>
     )
   }
-  // Live job overlay (runId 0): the run has not been reported yet.
+  // Live task overlay (runId 0): the run has not been reported yet.
   if (cell.runId === 0) {
     if (cell.status === 'running') {
       return (
-        <span className="text-muted dash-run-live" title="Job running">
+        <button
+          type="button"
+          className="btn btn-sm dash-run dash-run-live"
+          title="Task graph running — click to follow the log"
+          onClick={onOpen}
+        >
           running…
-        </span>
+        </button>
       )
     }
     if (cell.status === 'pending') {
       return (
-        <span className="text-muted dash-run-live" title="Job queued">
+        <button
+          type="button"
+          className="btn btn-sm dash-run dash-run-live"
+          title="Task queued — click for details"
+          onClick={onOpen}
+        >
           queued
-        </span>
+        </button>
       )
     }
     return (
-      <span className="dash-run-live dash-run-failed" title="Job failed before reporting a run">
+      <button
+        type="button"
+        className="btn btn-sm dash-run dash-run-failed"
+        title={(cell.error || 'Task failed before reporting a run') + ' — click for details'}
+        onClick={onOpen}
+      >
         ✗
-      </span>
+      </button>
     )
   }
   const failed = cell.status === 'failed'

@@ -42,12 +42,15 @@ type commitJSON struct {
 }
 
 // runCellJSON is one cell of the matrix: a run's summary, aligned with an
-// environment column. Null when neither a run nor a job exists for that
-// (commit, environment). When only a job exists (queued/running, or failed
-// before any report), the cell carries the job status with runId 0.
+// environment column. Null when neither a run nor a task graph exists for
+// that (commit, environment). When only a task graph exists (queued/running,
+// or failed before any report), the cell carries the root task's status with
+// runId 0 and taskId set (the frontend links to the task detail).
 type runCellJSON struct {
 	RunID      int64  `json:"runId"`
+	TaskID     int64  `json:"taskId,omitempty"`
 	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
 	Total      int    `json:"total"`
 	Passed     int    `json:"passed"`
 	Failed     int    `json:"failed"`
@@ -132,9 +135,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	jobs, err := s.Store.FindJobsByCommits(envIDs, commitIDs)
+	jobs, err := s.Store.FindRootTasksByCommits(envIDs, commitIDs)
 	if err != nil {
-		log.Printf("dashboard: find jobs: %v", err)
+		log.Printf("dashboard: find root tasks: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
@@ -172,9 +175,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 				row.Cells[j] = toRunCellJSON(&run)
 				continue
 			}
-			// No run yet: overlay the job state when a live job exists.
-			if job, ok := jobs[key]; ok {
-				row.Cells[j] = jobCellJSON(&job)
+			// No run yet: overlay the root task state when a live graph exists.
+			if summary, ok := jobs[key]; ok {
+				row.Cells[j] = taskCellJSON(summary.Root, summary.Subs)
 			}
 		}
 		out.Rows = append(out.Rows, row)
@@ -459,26 +462,36 @@ func toRunCellJSON(run *store.TestRun) *runCellJSON {
 	}
 }
 
-// jobCellJSON renders a live job as a matrix cell (runId 0: not clickable).
-func jobCellJSON(job *store.Job) *runCellJSON {
-	cell := &runCellJSON{RunID: 0}
-	switch job.Status {
-	case store.JobPending:
+// taskCellJSON renders a live task graph as a matrix cell (runId 0,
+// taskId set: clickable through to the task detail). When the root failed
+// before any report, the sub-task errors hint at the stage that broke.
+func taskCellJSON(root *store.Task, subs []store.Task) *runCellJSON {
+	cell := &runCellJSON{RunID: 0, TaskID: root.ID}
+	switch root.Status {
+	case store.TaskPending:
 		cell.Status = "pending"
-	case store.JobRunning:
+	case store.TaskRunning:
 		cell.Status = "running"
 	default: // failed before any report
 		cell.Status = store.StatusFailed
+		cell.Error = root.Error
+		// Prefer the first failed sub-task's error (clone/build failures are
+		// more actionable than the root's derived status).
+		for i := range subs {
+			if subs[i].Status == store.TaskFailed || subs[i].Status == store.TaskSkipped {
+				if subs[i].Error != "" {
+					cell.Error = subs[i].Error
+				}
+				break
+			}
+		}
 	}
-	if job.StartedAt != nil {
-		cell.StartedAt = job.StartedAt.UTC().Format(time.RFC3339)
+	if root.StartedAt != nil {
+		cell.StartedAt = root.StartedAt.UTC().Format(time.RFC3339)
 	}
-	if job.FinishedAt != nil {
-		cell.FinishedAt = job.FinishedAt.UTC().Format(time.RFC3339)
+	if root.FinishedAt != nil {
+		cell.FinishedAt = root.FinishedAt.UTC().Format(time.RFC3339)
 	}
-	// Surface the job error via the total/passed/failed fields? No — keep the
-	// summary in a dedicated field would grow the schema; the job list API
-	// carries details. Mark failure through status.
 	return cell
 }
 

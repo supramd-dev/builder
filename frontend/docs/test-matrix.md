@@ -72,6 +72,7 @@ The build stage has two forms:
 | build.generator     | cmake (default) or script.                                                  |
 | build.cmake_flags   | Flags passed to cmake (cmake generator only).                               |
 | build.threads       | Parallel build jobs (default 8).                                            |
+
 | build.command       | Shell command (script generator only).                                      |
 
 Every timeout bounds the stage via the remote `timeout` command; the
@@ -89,21 +90,26 @@ slack.
 
 Invalid YAML fails dispatch: the push is recorded and
 `dispatchError` surfaces in the webhook response (see
-[Webhooks](#/docs/webhooks)), but no jobs are created.
+[Webhooks](#/docs/webhooks)), but no tasks are created.
 
 ## What the runner does
 
-For each job the generated script, on the environment:
+Each matched entry becomes a task graph (see
+[Runner and tasks](#/docs/runner-strategy)); the stages run in order:
 
-1. Clones the **test input repository** (at the configured ref) and the
-   **code repository**, checking out the pushed commit, into
-   ~/.md-builder/jobs/<sha>.
-2. Exports MD_COMMIT, MD_ENV_NAME, MD_ENV_TAGS, MD_CODE_DIR,
-   MD_TEST_INPUT_DIR plus the yaml env variables.
-3. Runs the build stage. If it fails, the test stages are reported as
-   failed (skipped) with the build log tail.
-4. Runs the unit / regression stages, each under its timeout.
-5. Prints a line-protocol report that the server parses and stores.
+1. **clone**: the *server* clones the test input repository (at the
+   configured ref) and the code repository at the pushed commit, packs
+   both working trees into a tarball and extracts it on the environment
+   into ~/.md-builder/tasks/<sha12>.
+2. **build**: a generated script exports MD_COMMIT, MD_ENV_NAME,
+   MD_ENV_TAGS, MD_CODE_DIR (`…/code`), MD_TEST_INPUT_DIR (`…/tests`)
+   plus the yaml env variables, then runs the build stage in the code
+   directory.
+3. If the build (or the clone) fails, the dependent test stages are
+   marked skipped and the dashboard shows ✗.
+4. **unit / regression**: the stage command runs in the code directory,
+   each under its timeout; the full output streams into the task log and
+   the outcome is stored as a test run.
 
 ## Custom summaries
 

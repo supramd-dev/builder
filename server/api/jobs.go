@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"strconv"
 
+	"md-builder/server/runner"
 	"md-builder/server/store"
 
 	"gorm.io/gorm"
 )
 
-// jobJSON is the wire representation of a scheduled job.
+// jobJSON is the wire representation of a scheduled root task. The shape
+// matches the former Job rows so existing clients keep working.
 type jobJSON struct {
 	ID            int64  `json:"id"`
 	CommitID      int64  `json:"commitId"`
@@ -20,13 +22,12 @@ type jobJSON struct {
 	Status        string `json:"status"`
 	Error         string `json:"error"`
 	Attempts      int    `json:"attempts"`
-	TestInputRef  string `json:"testInputRef"`
 	StartedAt     string `json:"startedAt"`
 	FinishedAt    string `json:"finishedAt"`
 }
 
 // handleJobs routes /api/jobs: POST re-dispatches a commit (manual trigger),
-// GET lists recent jobs.
+// GET lists recent root tasks.
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	switch r.Method {
@@ -39,7 +40,7 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request, user *store.
 	}
 }
 
-// listJobs handles GET /api/jobs?limit=20 — recent jobs for monitoring.
+// listJobs handles GET /api/jobs?limit=20 — recent root tasks for monitoring.
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	limit := 20
 	if v := r.URL.Query().Get("limit"); v != "" {
@@ -50,15 +51,15 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	jobs, err := s.Store.ListJobs(limit)
+	tasks, err := s.Store.ListRootTasks(limit)
 	if err != nil {
 		log.Printf("jobs list: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	out := make([]jobJSON, 0, len(jobs))
-	for i := range jobs {
-		out = append(out, toJobJSON(&jobs[i]))
+	out := make([]jobJSON, 0, len(tasks))
+	for i := range tasks {
+		out = append(out, toJobJSON(&tasks[i]))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
 }
@@ -72,10 +73,10 @@ type triggerInput struct {
 
 // triggerJobs handles POST /api/jobs — re-run the dispatch for a commit:
 // read the md-builder.yaml at that commit, match entries to environments
-// (picking up tag/config changes since the push), requeue the jobs.
+// (picking up tag/config changes since the push), rebuild the task graphs.
 func (s *Server) triggerJobs(w http.ResponseWriter, r *http.Request) {
-	if s.Dispatch == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "job dispatch is not configured"})
+	if s.Runner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "task dispatch is not configured"})
 		return
 	}
 	var in triggerInput
@@ -110,40 +111,42 @@ func (s *Server) triggerJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d := s.Dispatch.DispatchForCommit(commit)
+	d := s.Runner.DispatchForCommit(commit)
 	if d.Err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 			"error":          d.Err.Error(),
-			"jobsCreated":    d.JobsCreated,
+			"jobsCreated":    d.TasksCreated,
 			"entriesSkipped": d.EntriesSkipped,
 		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"jobsCreated":    d.JobsCreated,
+		"jobsCreated":    d.TasksCreated,
 		"entriesSkipped": d.EntriesSkipped,
 	})
 }
 
-func toJobJSON(j *store.Job) jobJSON {
+func toJobJSON(t *store.Task) jobJSON {
 	out := jobJSON{
-		ID:            j.ID,
-		CommitID:      j.CommitID,
-		EnvironmentID: j.EnvironmentID,
-		Tags:          j.Tags,
-		Status:        j.Status,
-		Error:         j.Error,
-		Attempts:      j.Attempts,
-		TestInputRef:  j.TestInputRef,
+		ID:            t.ID,
+		CommitID:      t.CommitID,
+		EnvironmentID: t.EnvironmentID,
+		Tags:          t.Tags,
+		Status:        t.Status,
+		Error:         t.Error,
+		Attempts:      t.Attempts,
 	}
-	if j.StartedAt != nil {
-		out.StartedAt = j.StartedAt.UTC().Format(timeFormat)
+	if t.StartedAt != nil {
+		out.StartedAt = t.StartedAt.UTC().Format(timeFormat)
 	}
-	if j.FinishedAt != nil {
-		out.FinishedAt = j.FinishedAt.UTC().Format(timeFormat)
+	if t.FinishedAt != nil {
+		out.FinishedAt = t.FinishedAt.UTC().Format(timeFormat)
 	}
 	return out
 }
 
 // timeFormat is the shared RFC3339 layout.
 const timeFormat = "2006-01-02T15:04:05Z"
+
+// Compile-time interface shape check for the dispatch surface used here.
+var _ = runner.DispatchResult{}

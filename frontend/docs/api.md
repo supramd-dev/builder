@@ -11,8 +11,10 @@ greyed out). Two kinds are available: **regression** and **unit** tests.
 Cells with a recorded run show pass/fail counts; clicking one opens the
 run detail with the per-case results (name, status, error value, short
 note) and the one-paragraph summary reported by the worker. Cells
-without a run but with a live job show **queued** / **running…** (or ✗
-when the job failed before reporting).
+without a run but with a live task graph show **queued** / **running…**
+(or ✗ when the task failed before reporting) — clicking those opens the
+**task detail** with the pipeline stages and the live log (see
+[Runner and tasks](#/docs/runner-strategy)).
 
 ## Reporting results
 
@@ -46,8 +48,8 @@ Results are reported with `POST /api/test-runs`:
 
 ## Script execution (interactive)
 
-Besides the automatic jobs, environments accept ad-hoc commands and
-scripts from the **Run command** page:
+Besides the automatic task graphs, environments accept ad-hoc commands
+and scripts from the **Run command** page:
 
 - `POST /api/environments/{id}/exec` runs a raw shell command.
 - `POST /api/environments/{id}/script` accepts a bash or Python script
@@ -89,6 +91,8 @@ created with the `adduser` CLI (see
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` |
 | POST   | `/api/test-runs`                | Report a test run result                      |
 | GET    | `/api/test-runs/{id}`           | One run's detail incl. per-case results       |
-| POST   | `/api/jobs`                     | Manually re-dispatch test jobs for a commit   |
-| GET    | `/api/jobs`                     | Recent test jobs (`?limit=`, monitoring)      |
+| POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit |
+| GET    | `/api/jobs`                     | Recent task graphs (`?limit=`, monitoring; legacy job shape) |
+| GET    | `/api/tasks/{id}`               | One task; a root carries its sub-task list and commit/environment context |
+| GET    | `/api/tasks/{id}/log?after=<seq>` | The task's log chunks after the given sequence (incremental, live-following) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session; see [Webhooks](#/docs/webhooks)) |

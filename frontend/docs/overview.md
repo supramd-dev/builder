@@ -14,5 +14,6 @@ The workflow in short:
    the tests, each labeled with tags.
 3. **Add a test matrix** (md-builder.yaml at the root of the code
    repository): which tags run what commands.
-4. **Push**: a GitLab webhook dispatches one job per matrix entry to a
-   matching environment; the results appear on the dashboard.
+4. **Push**: a GitLab webhook dispatches a task graph (clone → build →
+   tests) per matrix entry to a matching environment; the results appear
+   on the dashboard and each stage's log can be followed live.

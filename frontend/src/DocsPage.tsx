@@ -19,7 +19,7 @@ const DOCS: { id: string; label: string; source: string }[] = [
   { id: 'site-configuration', label: 'Site configuration', source: siteConfiguration },
   { id: 'environments', label: 'Test environments', source: environments },
   { id: 'test-matrix', label: 'Test matrix (YAML)', source: testMatrix },
-  { id: 'runner-strategy', label: 'Runner strategy', source: runnerStrategy },
+  { id: 'runner-strategy', label: 'Runner and tasks', source: runnerStrategy },
   { id: 'webhooks', label: 'GitLab webhooks', source: webhooks },
   { id: 'dashboard', label: 'Dashboard & API', source: api },
 ]

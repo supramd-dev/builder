@@ -129,9 +129,8 @@ export interface BuildTestResult {
   durationMilliSeconds: number
 }
 
-// buildTest clones the site-configured code repository on the remote
-// environment (using the site deploy key/token when needed) at the given
-// ref and runs a build command there.
+// buildTest clones the site-configured code repository on the server,
+// uploads it to the remote environment and runs a build command there.
 export async function buildTest(
   id: number,
   buildCommand: string,
@@ -205,12 +204,14 @@ export interface DashboardCommit {
 
 export interface RunCell {
   runId: number
+  taskId?: number
   status: 'passed' | 'failed' | 'running' | 'pending'
   total: number
   passed: number
   failed: number
   startedAt: string
   finishedAt: string
+  error?: string
 }
 
 // --- Jobs ---
@@ -292,4 +293,85 @@ export interface TestRunDetail {
 
 export async function getTestRun(id: number): Promise<TestRunDetail> {
   return api<TestRunDetail>(`/api/test-runs/${id}`)
+}
+
+// --- Tasks (runner component) ---
+
+export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+
+export type TaskKind = 'root' | 'clone' | 'build' | 'unit' | 'regression'
+
+// SubTask is one node of a task graph (clone/build/unit/...).
+export interface SubTask {
+  id: number
+  kind: TaskKind
+  name: string
+  status: TaskStatus
+  error: string
+  dependsOn: number[]
+  startedAt: string
+  finishedAt: string
+}
+
+export interface TaskCommit {
+  id: number
+  sha: string
+  shortSha: string
+  repo: string
+  ref: string
+  author: string
+  message: string
+  pushedAt: string
+}
+
+export interface TaskEnvironment {
+  id: number
+  name: string
+  description: string
+  tags: string
+  enabled: boolean
+}
+
+// TaskDetail is GET /api/tasks/{id}: the task plus, for a root, its
+// sub-tasks and commit/environment context.
+export interface TaskDetail {
+  id: number
+  rootId: number
+  kind: TaskKind
+  name: string
+  status: TaskStatus
+  error: string
+  attempts: number
+  commitId: number
+  environmentId: number
+  tags: string
+  startedAt: string
+  finishedAt: string
+  subTasks?: SubTask[]
+  commit?: TaskCommit | null
+  environment?: TaskEnvironment | null
+}
+
+export async function getTask(id: number): Promise<TaskDetail> {
+  return api<TaskDetail>(`/api/tasks/${id}`)
+}
+
+// LogChunk is one stored chunk of a task's incremental log.
+export interface LogChunk {
+  seq: number
+  content: string
+}
+
+export interface TaskLogs {
+  chunks: LogChunk[]
+  lastSeq: number
+}
+
+// getTaskLogs returns log chunks after the given sequence (0 = from the
+// beginning) — poll with the lastSeq to follow a running task.
+export async function getTaskLogs(
+  id: number,
+  after = 0,
+): Promise<TaskLogs> {
+  return api<TaskLogs>(`/api/tasks/${id}/log?after=${after}`)
 }

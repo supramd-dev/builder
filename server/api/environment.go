@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"md-builder/server/sshcheck"
+	"md-builder/server/runner"
 	"md-builder/server/store"
 
 	"gorm.io/gorm"
@@ -267,7 +267,7 @@ func (s *Server) testEnvironment(w http.ResponseWriter, r *http.Request, user *s
 		respondEnvironmentError(w, err)
 		return
 	}
-	res := sshcheck.Check(env.Host, env.Username, env.PrivateKey)
+	res := runner.CheckSSH(runner.SSHHostFromEnv(env))
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -300,7 +300,7 @@ func (s *Server) execEnvironment(w http.ResponseWriter, r *http.Request, user *s
 		return
 	}
 
-	res := sshcheck.Exec(env.Host, env.Username, env.PrivateKey, req.Command)
+	res := runner.ExecSSH(runner.SSHHostFromEnv(env), req.Command)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -346,7 +346,7 @@ func (s *Server) scriptEnvironment(w http.ResponseWriter, r *http.Request, user 
 		return
 	}
 
-	res := sshcheck.Script(env.Host, env.Username, env.PrivateKey, cmd, req.Script)
+	res := runner.ScriptSSH(runner.SSHHostFromEnv(env), cmd, req.Script)
 	writeJSON(w, http.StatusOK, res)
 }
 

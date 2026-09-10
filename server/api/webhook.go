@@ -115,10 +115,10 @@ func (s *Server) recordPush(w http.ResponseWriter, payload gitlabPushPayload) {
 		"commitId": commit.ID,
 		"created":  created,
 	}
-	if s.Dispatch != nil {
+	if s.Runner != nil {
 		if s.shouldDispatch(payload) {
-			d := s.Dispatch.DispatchForCommit(commit)
-			resp["jobsCreated"] = d.JobsCreated
+			d := s.Runner.DispatchForCommit(commit)
+			resp["jobsCreated"] = d.TasksCreated
 			resp["entriesSkipped"] = d.EntriesSkipped
 			if d.Err != nil {
 				// The commit is recorded; the dispatch failure is surfaced but

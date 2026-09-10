@@ -1,22 +1,21 @@
 package api
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"md-builder/server/runner"
-	"md-builder/server/sshcheck"
 	"md-builder/server/store"
 )
 
-// Per-phase (clone, build) and overall bounds for ad-hoc build tests. They
-// mirror the generous bounds of scheduled jobs; a build test is still an
-// interactive feature, so the overall session is capped.
+// Per-phase (clone/upload, build) and overall bounds for ad-hoc build
+// tests. They mirror the generous bounds of scheduled tasks; a build test
+// is still an interactive feature, so the overall session is capped.
 const (
-	buildTestStageTimeout = 30 * 60 // per phase: clone / build
-	buildTestTotalTimeout = 65 * 60 // whole SSH session
+	buildTestStageTimeout = 30 * 60 // per phase: clone+upload / build (seconds)
 	buildTestDefaultCmd   = "cmake . && cmake --build . -j8"
 	buildTestCommitSHA    = "HEAD"
 )
@@ -41,12 +40,12 @@ type buildTestResult struct {
 	DurationMilliSeconds int64  `json:"durationMilliSeconds"`
 }
 
-// handleBuildTest runs an ad-hoc build test on the environment: it reuses
-// the job runner's script generation (clone the code repository — with the
-// site-configured deploy key/token when needed — at the requested ref, run
-// a build command) but executes it once over SSH without touching the job
-// queue or the test-run database. Intended for trying out builds before
-// wiring them into the md-builder.yaml matrix.
+// handleBuildTest runs an ad-hoc build test on the environment: the server
+// clones the code repository (with the site-configured deploy key/token
+// when needed) at the requested ref, uploads it over SSH and runs the build
+// command — the same primitives the scheduled clone/build tasks use, but
+// synchronous and without touching the task store. Intended for trying out
+// builds before wiring them into the md-builder.yaml matrix.
 func (s *Server) handleBuildTest(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
 	env, err := s.Store.GetEnvironment(user.ID, id)
 	if err != nil {
@@ -79,8 +78,6 @@ func (s *Server) handleBuildTest(w http.ResponseWriter, r *http.Request, user *s
 		return
 	}
 
-	// Ad-hoc entry: clone (with credentials) + the requested build command.
-	// No unit/regression stages; the build command runs under timeout.
 	command := strings.TrimSpace(req.BuildCommand)
 	if command == "" {
 		command = buildTestDefaultCmd
@@ -90,44 +87,67 @@ func (s *Server) handleBuildTest(w http.ResponseWriter, r *http.Request, user *s
 		ref = buildTestCommitSHA
 	}
 
-	entry := &runner.MergedEntry{
-		Tags:    []string{"build-test"},
-		Timeout: buildTestStageTimeout,
-		Build: runner.BuildConfig{
-			Generator: runner.GeneratorScript,
-			Command:   command,
-		},
-	}
-
-	script, err := runner.BuildScript(&runner.ScriptInput{
-		CommitSHA:    ref,
-		CodeRepoURL:  cfg.CodeRepo,
-		EnvName:      env.Name,
-		EnvTags:      env.Tags,
-		Entry:        entry,
-		StreamOutput: true,
-		Creds: &runner.GitCredentials{
-			DeployKey:       cfg.DeployKey,
-			DeployToken:     cfg.DeployToken,
-			DeployTokenUser: cfg.DeployTokenUser,
-		},
-	})
-	if err != nil {
-		log.Printf("build-test: build script: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-		return
+	h := runner.SSHHostFromEnv(env)
+	remoteDir := "~/.md-builder/build-test"
+	creds := &runner.GitCredentials{
+		DeployKey:       cfg.DeployKey,
+		DeployToken:     cfg.DeployToken,
+		DeployTokenUser: cfg.DeployTokenUser,
 	}
 
 	start := time.Now()
-	res := sshcheck.ScriptWithTimeout(env.Host, env.Username, env.PrivateKey, "bash -s", script,
-		time.Duration(buildTestTotalTimeout)*time.Second)
-	elapsed := time.Since(start).Milliseconds()
+	ctx, cancel := context.WithTimeout(r.Context(),
+		time.Duration(buildTestStageTimeout*2)*time.Second)
+	defer cancel()
+
+	// Phase 1: server-side clone + upload (the scheduled clone task's path).
+	if _, err := s.Runner.Clone.CloneAndUpload(ctx, h, cfg.CodeRepo, ref, "", "",
+		creds, remoteDir,
+		time.Duration(buildTestStageTimeout)*time.Second, nil); err != nil {
+		writeJSON(w, http.StatusOK, buildTestResult{
+			Success:              false,
+			Stderr:               "clone/upload failed: " + err.Error(),
+			ExitCode:             -1,
+			DurationMilliSeconds: time.Since(start).Milliseconds(),
+		})
+		return
+	}
+
+	// Phase 2: the build command in the uploaded code directory.
+	script := "#!/usr/bin/env bash\nset -uo pipefail\ncd " + remoteDir + "/code || exit 1\n" +
+		"timeout " + itoa(buildTestStageTimeout) + " bash -c " + runner.ShellQuote(command) + "\nexit $?\n"
+	var stdout, stderr strings.Builder
+	res := s.Runner.SSH.RunScript(ctx, h, "bash -s", script,
+		time.Duration(buildTestStageTimeout)*time.Second, &stdout, &stderr)
 
 	writeJSON(w, http.StatusOK, buildTestResult{
 		Success:              res.ExitCode == 0,
-		Stdout:               res.Stdout,
-		Stderr:               res.Stderr,
+		Stdout:               stdout.String(),
+		Stderr:               stderr.String(),
 		ExitCode:             res.ExitCode,
-		DurationMilliSeconds: elapsed,
+		DurationMilliSeconds: time.Since(start).Milliseconds(),
 	})
+}
+
+// itoa is a tiny helper for embedding constants in scripts.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		b[i] = '-'
+	}
+	return string(b[i:])
 }

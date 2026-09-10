@@ -31,9 +31,10 @@ For private repositories configure **one** of:
   repositories. https URLs are converted to their ssh:// form
   automatically.
 
-Both are used in two places: by the server (to read the test matrix from
-the code repository) and by the generated job scripts on the test
-environments (to clone both repositories). Secrets are write-only: the
-form shows whether one is configured, never the value itself; leave the
-field blank to keep the stored secret, tick the *Remove* checkbox to
-clear it.
+Both are used by the **server only**: to read the test matrix from the
+code repository and to clone both repositories before uploading them to
+the test environments (the environments themselves need no repository
+access — see [Runner and tasks](#/docs/runner-strategy)). Secrets are
+write-only: the form shows whether one is configured, never the value
+itself; leave the field blank to keep the stored secret, tick the
+*Remove* checkbox to clear it.
