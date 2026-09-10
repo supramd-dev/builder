@@ -445,12 +445,11 @@ type RootTaskSummary struct {
 	Subs []Task
 }
 
-// FindRootTasksByCommits returns root tasks for the given environments and
-// commits, keyed by (environment, commit), so the dashboard can overlay
-// live state on cells that have no test run yet. Only "live" roots are
-// returned: pending/running, or failed without any reported run (a done root
-// means the runs were reported; the run cell takes over).
-func (s *Store) FindRootTasksByCommits(envIDs, commitIDs []int64) (map[EnvCommit]RootTaskSummary, error) {
+// FindRootGraphsByCommits returns ALL root tasks (done included) for the
+// given environments and commits, with their sub-tasks, keyed by
+// (environment, commit). The full dashboard uses it to show every graph's
+// stages regardless of whether its runs were already reported.
+func (s *Store) FindRootGraphsByCommits(envIDs, commitIDs []int64) (map[EnvCommit]RootTaskSummary, error) {
 	out := map[EnvCommit]RootTaskSummary{}
 	if len(envIDs) == 0 || len(commitIDs) == 0 {
 		return out, nil
@@ -460,34 +459,49 @@ func (s *Store) FindRootTasksByCommits(envIDs, commitIDs []int64) (map[EnvCommit
 		TaskKindRoot, envIDs, commitIDs).Find(&roots).Error; err != nil {
 		return nil, err
 	}
-	var keep []int64
-	for i := range roots {
-		r := &roots[i]
-		if r.Status == TaskDone {
-			continue // the reported run takes over the cell
-		}
-		key := EnvCommit{Env: r.EnvironmentID, Commit: r.CommitID}
-		out[key] = RootTaskSummary{Root: r}
-		keep = append(keep, r.ID)
+	if len(roots) == 0 {
+		return out, nil
 	}
-	if len(keep) > 0 {
-		var subs []Task
-		if err := s.DB.Where("root_id IN ? AND kind <> ?", keep, TaskKindRoot).Order("id ASC").Find(&subs).Error; err != nil {
-			return nil, err
-		}
-		for i := range subs {
-			for j := range roots {
-				if subs[i].RootID == roots[j].ID {
-					key := EnvCommit{Env: roots[j].EnvironmentID, Commit: roots[j].CommitID}
-					if s, ok := out[key]; ok {
-						s.Subs = append(s.Subs, subs[i])
-						out[key] = s
-					}
+	ids := make([]int64, len(roots))
+	for i := range roots {
+		ids[i] = roots[i].ID
+		key := EnvCommit{Env: roots[i].EnvironmentID, Commit: roots[i].CommitID}
+		out[key] = RootTaskSummary{Root: &roots[i]}
+	}
+	var subs []Task
+	if err := s.DB.Where("root_id IN ? AND kind <> ?", ids, TaskKindRoot).Order("id ASC").Find(&subs).Error; err != nil {
+		return nil, err
+	}
+	for i := range subs {
+		for j := range roots {
+			if subs[i].RootID == roots[j].ID {
+				key := EnvCommit{Env: roots[j].EnvironmentID, Commit: roots[j].CommitID}
+				if s, ok := out[key]; ok {
+					s.Subs = append(s.Subs, subs[i])
+					out[key] = s
 				}
 			}
 		}
 	}
 	return out, nil
+}
+
+// FindRootTasksByCommits returns root tasks for the given environments and
+// commits, keyed by (environment, commit), so the dashboard can overlay
+// live state on cells that have no test run yet. Only "live" roots are
+// returned: pending/running, or failed without any reported run (a done root
+// means the runs were reported; the run cell takes over).
+func (s *Store) FindRootTasksByCommits(envIDs, commitIDs []int64) (map[EnvCommit]RootTaskSummary, error) {
+	all, err := s.FindRootGraphsByCommits(envIDs, commitIDs)
+	if err != nil {
+		return nil, err
+	}
+	for key, summary := range all {
+		if summary.Root.Status == TaskDone {
+			delete(all, key) // the reported run takes over the cell
+		}
+	}
+	return all, nil
 }
 
 // ResetStaleRunning marks any tasks left in "running" after a crash back to

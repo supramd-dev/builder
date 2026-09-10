@@ -3,8 +3,11 @@ import {
   getDashboard,
   type Dashboard,
   type DashboardKind,
+  type FullDashboard,
+  type FullStage,
   type RunCell,
 } from './api'
+import { getFullDashboard } from './api'
 
 interface Props {
   onOpenRun: (runId: number) => void
@@ -17,8 +20,11 @@ interface Props {
 // shows pass/fail counts per run; unit mode shows passed/total; build mode
 // shows the build outcome per environment.
 export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props) {
-  const [kind, setKind] = useState<DashboardKind>('regression')
+  // "full" is the first tab: the complete per-commit, per-environment view
+  // of every pipeline stage. Single kinds follow: build, unit, regression.
+  const [kind, setKind] = useState<DashboardKind>('full')
   const [dash, setDash] = useState<Dashboard | null>(null)
+  const [full, setFull] = useState<FullDashboard | null>(null)
   const [error, setError] = useState('')
   const [loadedKind, setLoadedKind] = useState<DashboardKind | null>(null)
 
@@ -29,8 +35,15 @@ export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props)
   const refresh = useCallback(
     async (k: DashboardKind) => {
       try {
-        const d = await getDashboard(k)
-        setDash(d)
+        if (k === 'full') {
+          const d = await getFullDashboard()
+          setFull(d)
+          setDash(null)
+        } else {
+          const d = await getDashboard(k)
+          setDash(d)
+          setFull(null)
+        }
         setLoadedKind(k)
         setError('')
       } catch (err) {
@@ -47,6 +60,18 @@ export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props)
     refresh(kind)
   }, [kind, refresh])
 
+  const tab = (k: DashboardKind, label: string) => (
+    <button
+      type="button"
+      className={'btn btn-sm dash-tab' + (kind === k ? ' dash-tab-active' : '')}
+      role="tab"
+      aria-selected={kind === k}
+      onClick={() => setKind(k)}
+    >
+      {label}
+    </button>
+  )
+
   return (
     <div>
       <div
@@ -60,48 +85,34 @@ export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props)
       >
         <h2 style={{ marginBottom: 0 }}>Test dashboard</h2>
         <div className="dash-tabs" role="tablist">
-          <button
-            type="button"
-            className={'btn btn-sm dash-tab' + (kind === 'regression' ? ' dash-tab-active' : '')}
-            role="tab"
-            aria-selected={kind === 'regression'}
-            onClick={() => setKind('regression')}
-          >
-            Regression tests
-          </button>
-          <button
-            type="button"
-            className={'btn btn-sm dash-tab' + (kind === 'unit' ? ' dash-tab-active' : '')}
-            role="tab"
-            aria-selected={kind === 'unit'}
-            onClick={() => setKind('unit')}
-          >
-            Unit tests
-          </button>
-          <button
-            type="button"
-            className={'btn btn-sm dash-tab' + (kind === 'build' ? ' dash-tab-active' : '')}
-            role="tab"
-            aria-selected={kind === 'build'}
-            onClick={() => setKind('build')}
-          >
-            Build
-          </button>
+          {tab('full', 'All')}
+          {tab('build', 'Build')}
+          {tab('unit', 'Unit tests')}
+          {tab('regression', 'Regression tests')}
         </div>
       </div>
 
       <p className="text-muted">
-        {kind === 'regression'
-          ? 'Regression test results from the test input repository: one row per recent git push (commit), one column per test environment. Click a result for details.'
-          : kind === 'unit'
-            ? 'Unit tests: one row per recent git push (commit), one column per test environment. Click a result for details.'
-            : 'Build results per environment: one row per recent git push (commit), one column per test environment. Shows whether the code compiles on each environment — click a result for the build log.'}
+        {kind === 'full'
+          ? 'The full test process: one row per recent git push (commit), one column per environment showing the build, unit and regression stages. Click a commit column to open its task graph; click a stage for details.'
+          : kind === 'build'
+            ? 'Build results per environment: one row per recent git push (commit), one column per test environment. Shows whether the code compiles on each environment — click a result for the build log.'
+            : kind === 'unit'
+              ? 'Unit tests: one row per recent git push (commit), one column per test environment. Click a result for details.'
+              : 'Regression test results from the test input repository: one row per recent git push (commit), one column per test environment. Click a result for details.'}
       </p>
 
       {error && <div className="alert alert-danger">{error}</div>}
       {effectiveKind !== kind && <p className="text-muted">Loading…</p>}
 
-      {effectiveKind === kind && dash && (
+      {effectiveKind === kind && kind === 'full' && full && (
+        <FullMatrix
+          full={full}
+          onOpenRun={onOpenRun}
+          onOpenTask={onOpenTask}
+        />
+      )}
+      {effectiveKind === kind && kind !== 'full' && dash && (
         <DashboardMatrix
           dash={dash}
           kind={kind}
@@ -304,4 +315,160 @@ function RunCellView({
 // formatDay renders YYYY-MM-DD from an RFC3339 timestamp.
 function formatDay(ts: string): string {
   return ts.slice(0, 10)
+}
+
+// FullMatrix renders the full-process matrix: one row per commit, one column
+// per environment, and under each environment the build/unit/regression
+// stages (recorded runs or live states). The commit cell links to the
+// dependency graph of the (commit, environment) task.
+function FullMatrix({
+  full,
+  onOpenRun,
+  onOpenTask,
+}: {
+  full: FullDashboard
+  onOpenRun: (runId: number) => void
+  onOpenTask: (taskId: number) => void
+}) {
+  if (full.environments.length === 0) {
+    return (
+      <div className="event">
+        <p className="text-muted" style={{ margin: 0 }}>
+          No test environments yet. Create one in the user center first —
+          each environment becomes a column of the matrix.
+        </p>
+      </div>
+    )
+  }
+  if (full.rows.length === 0) {
+    return (
+      <div className="event">
+        <p className="text-muted" style={{ margin: 0 }}>
+          No git pushes recorded yet. Point a GitLab push webhook at{' '}
+          <code>/api/webhooks/gitlab</code> (see Settings) — each push to the
+          code repository becomes a row of the matrix.
+          {full.repoFilter && (
+            <>
+              {' '}
+              Pushes are currently filtered to <code>{full.repoFilter}</code>.
+            </>
+          )}
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="dash-scroll">
+      <table className="table dash-matrix">
+        <thead>
+          <tr>
+            <th className="dash-corner">Commit \ Environment</th>
+            {full.environments.map((env) => (
+              <th
+                key={env.id}
+                className={'dash-env-head' + (env.enabled ? '' : ' dash-row-disabled')}
+                title={env.description}
+              >
+                {env.name}
+                {!env.enabled && <span className="text-muted"> (off)</span>}
+                {env.tags && (
+                  <span className="dash-env-tags text-muted">{env.tags}</span>
+                )}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {full.rows.map((row) => (
+            <tr key={row.commit.id}>
+              <th className="dash-commit-cell" title={`${row.commit.repo} ${row.commit.sha}`}>
+                <span className="dash-sha">{row.commit.shortSha}</span>
+                <span className="dash-commit-meta text-muted">
+                  {row.commit.author} · {formatDay(row.commit.pushedAt)}
+                </span>
+                {row.commit.message && (
+                  <span className="dash-commit-msg text-muted" title={row.commit.message}>
+                    {row.commit.message}
+                  </span>
+                )}
+              </th>
+              {full.environments.map((env) => {
+                const stages = row.stages[String(env.id)] ?? []
+                const taskId = row.taskIds[String(env.id)]
+                return (
+                  <td key={env.id} className="dash-cell">
+                    {stages.length > 0 || taskId ? (
+                      <div className="dash-full-cell">
+                        {stages.map((st) => (
+                          <FullStageView key={st.kind} stage={st} onOpenRun={onOpenRun} />
+                        ))}
+                        {taskId ? (
+                          <button
+                            type="button"
+                            className="btn btn-sm dash-full-graph"
+                            title="Open the task dependency graph"
+                            onClick={() => onOpenTask(taskId)}
+                          >
+                            graph ⤴
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <span className="text-muted dash-no-run" title="No test run recorded">
+                        —
+                      </span>
+                    )}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// FullStageView renders one stage pill (build/unit/regression) of the full
+// matrix: clickable to the run detail when a run exists, or showing the
+// live task state.
+function FullStageView({
+  stage,
+  onOpenRun,
+}: {
+  stage: FullStage
+  onOpenRun: (runId: number) => void
+}) {
+  const label =
+    stage.kind === 'build' ? 'build' : stage.kind === 'unit' ? 'unit' : 'reg'
+  const failed = stage.status === 'failed'
+  const title =
+    (stage.error || stage.summary || `${label}: ${stage.status}`).slice(0, 200) +
+    (stage.runId ? ' — click for details' : '')
+  if (stage.runId > 0) {
+    return (
+      <button
+        type="button"
+        className={'btn btn-sm dash-full-stage ' + (failed ? ' dash-run-failed' : ' dash-run-passed')}
+        title={title}
+        onClick={() => onOpenRun(stage.runId)}
+      >
+        {failed ? '✗' : '✓'} {label}
+      </button>
+    )
+  }
+  if (stage.status === 'running' || stage.status === 'pending') {
+    return (
+      <span className={'dash-full-stage dash-full-live' + (failed ? ' dash-run-failed' : '')} title={title}>
+        {stage.status === 'running' ? 'running…' : 'queued'} {label}
+      </span>
+    )
+  }
+  // Failed/skipped before reporting (no run row).
+  return (
+    <span className="dash-full-stage dash-full-live dash-run-failed" title={title}>
+      ✗ {label}
+    </span>
+  )
 }

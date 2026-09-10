@@ -22,6 +22,7 @@ type subTaskJSON struct {
 	Status     string  `json:"status"`
 	Error      string  `json:"error"`
 	DependsOn  []int64 `json:"dependsOn"`
+	RunID      int64   `json:"runId,omitempty"` // test stages: the recorded run (for the detail link)
 	StartedAt  string  `json:"startedAt"`
 	FinishedAt string  `json:"finishedAt"`
 }
@@ -135,9 +136,34 @@ func (s *Server) taskDetail(w http.ResponseWriter, id int64) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 			return
 		}
+		// Test stages link to their recorded run (the stage detail view).
+		var buildRuns, unitRuns, regRuns map[store.EnvCommit]store.TestRun
+		if task.CommitID != 0 && task.EnvironmentID != 0 {
+			ec := []int64{task.EnvironmentID}
+			cc := []int64{task.CommitID}
+			buildRuns, _ = s.Store.FindRunsByCommits(store.RunKindBuild, ec, cc)
+			unitRuns, _ = s.Store.FindRunsByCommits(store.RunKindUnit, ec, cc)
+			regRuns, _ = s.Store.FindRunsByCommits(store.RunKindRegression, ec, cc)
+		}
 		detail.SubTasks = make([]subTaskJSON, 0, len(subs))
 		for i := range subs {
-			detail.SubTasks = append(detail.SubTasks, toSubTaskJSON(&subs[i]))
+			sj := toSubTaskJSON(&subs[i])
+			key := store.EnvCommit{Env: subs[i].EnvironmentID, Commit: subs[i].CommitID}
+			switch subs[i].Kind {
+			case store.TaskKindBuild:
+				if r, ok := buildRuns[key]; ok {
+					sj.RunID = r.ID
+				}
+			case store.TaskKindUnit:
+				if r, ok := unitRuns[key]; ok {
+					sj.RunID = r.ID
+				}
+			case store.TaskKindRegression:
+				if r, ok := regRuns[key]; ok {
+					sj.RunID = r.ID
+				}
+			}
+			detail.SubTasks = append(detail.SubTasks, sj)
 		}
 	}
 	writeJSON(w, http.StatusOK, detail)

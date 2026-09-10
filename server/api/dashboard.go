@@ -73,14 +73,20 @@ type dashboardJSON struct {
 	Rows         []dashboardRowJSON `json:"rows"` // one row per commit, newest first
 }
 
-// handleDashboard routes GET /api/dashboard/{kind} (kind: regression|unit|build).
+// handleDashboard routes GET /api/dashboard/{kind}. kind: regression|unit|build
+// (single-kind matrices) or "full" (every commit row carries, per environment,
+// the build/unit/regression stages plus the task graph link).
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	rest := strings.TrimPrefix(r.URL.Path, "/api/dashboard/")
 	kind := strings.Trim(rest, "/")
+	if kind == "full" {
+		s.dashboardFull(w, r)
+		return
+	}
 	if !store.RunKindValid(kind) {
 		writeJSON(w, http.StatusNotFound, map[string]string{
-			"error": "unknown dashboard kind; use regression, unit or build",
+			"error": "unknown dashboard kind; use regression, unit, build or full",
 		})
 		return
 	}
@@ -184,6 +190,203 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+// fullStageJSON is one stage cell of the full matrix: the recorded test run
+// (build/unit/regression) for that (commit, environment), or the live task
+// state (runId 0, taskId set) when the run has not landed yet. A null entry
+// means the commit has no graph on that environment.
+type fullStageJSON struct {
+	Kind       string `json:"kind"` // build | unit | regression
+	RunID      int64  `json:"runId"`
+	TaskID     int64  `json:"taskId,omitempty"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
+	Summary    string `json:"summary,omitempty"`
+	StartedAt  string `json:"startedAt"`
+	FinishedAt string `json:"finishedAt"`
+}
+
+// fullRowJSON is one row of the full matrix: the commit, per environment the
+// pipeline stages in display order (build, unit, regression) and the task
+// graph link (to the dependency-graph page).
+type fullRowJSON struct {
+	Commit  commitJSON                `json:"commit"`
+	Stages  map[int64][]fullStageJSON `json:"stages"`  // environment id → stages
+	TaskIDs map[int64]int64           `json:"taskIds"` // environment id → root task id (graph link)
+}
+
+// fullDashboardJSON is the full matrix response.
+type fullDashboardJSON struct {
+	RepoFilter   string             `json:"repoFilter,omitempty"`
+	Environments []dashboardEnvJSON `json:"environments"`
+	Rows         []fullRowJSON      `json:"rows"`
+}
+
+// dashboardFull serves GET /api/dashboard/full: every commit row carries, for
+// every environment, the state of each pipeline stage — the recorded runs of
+// build/unit/regression, or the live task state while the graph runs.
+func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	nCommits := defaultCommits
+	if v := r.URL.Query().Get("commits"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxCommits {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "commits must be an integer between 1 and 50",
+			})
+			return
+		}
+		nCommits = n
+	}
+
+	repoFilter := ""
+	if cfg, err := s.Store.GetSiteConfig(); err == nil && cfg.CodeRepo != "" {
+		repoFilter = store.RepoPath(cfg.CodeRepo)
+	}
+
+	envs, err := s.Store.ListAllEnvironments()
+	if err != nil {
+		log.Printf("dashboard full: list environments: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	commits, err := s.Store.ListCommits(repoFilter, nCommits)
+	if err != nil {
+		log.Printf("dashboard full: list commits: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	envIDs := make([]int64, len(envs))
+	for i, e := range envs {
+		envIDs[i] = e.ID
+	}
+	commitIDs := make([]int64, len(commits))
+	for i, c := range commits {
+		commitIDs[i] = c.ID
+	}
+	runsByKind := map[string]map[store.EnvCommit]store.TestRun{}
+	for _, kind := range []string{store.RunKindBuild, store.RunKindUnit, store.RunKindRegression} {
+		runs, err := s.Store.FindRunsByCommits(kind, envIDs, commitIDs)
+		if err != nil {
+			log.Printf("dashboard full: find %s runs: %v", kind, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		runsByKind[kind] = runs
+	}
+	graphs, err := s.Store.FindRootGraphsByCommits(envIDs, commitIDs)
+	if err != nil {
+		log.Printf("dashboard full: find root graphs: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	out := fullDashboardJSON{
+		RepoFilter:   repoFilter,
+		Environments: make([]dashboardEnvJSON, 0, len(envs)),
+		Rows:         make([]fullRowJSON, 0, len(commits)),
+	}
+	for i := range envs {
+		env := &envs[i]
+		out.Environments = append(out.Environments, dashboardEnvJSON{
+			ID:          env.ID,
+			Name:        env.Name,
+			Description: env.Description,
+			Tags:        env.Tags,
+			Enabled:     env.Enabled,
+		})
+	}
+
+	for i := range commits {
+		commit := &commits[i]
+		row := fullRowJSON{
+			Commit:  toCommitJSON(commit),
+			Stages:  map[int64][]fullStageJSON{},
+			TaskIDs: map[int64]int64{},
+		}
+		for j := range envs {
+			envID := envs[j].ID
+			key := store.EnvCommit{Env: envID, Commit: commit.ID}
+
+			// A graph exists (or existed) for this (commit, environment):
+			// expose the graph link and overlay live states for stages whose
+			// run has not landed.
+			graph, hasGraph := graphs[key]
+			if hasGraph {
+				row.TaskIDs[envID] = graph.Root.ID
+			}
+
+			for _, kind := range []string{store.RunKindBuild, store.RunKindUnit, store.RunKindRegression} {
+				if run, ok := runsByKind[kind][key]; ok {
+					row.Stages[envID] = append(row.Stages[envID], fullStageJSON{
+						Kind:       kind,
+						RunID:      run.ID,
+						Status:     run.Status,
+						Summary:    run.Summary,
+						StartedAt:  run.StartedAt.UTC().Format(time.RFC3339),
+						FinishedAt: run.FinishedAt.UTC().Format(time.RFC3339),
+					})
+					continue
+				}
+				// No run: show the live sub-task state when the graph is here.
+				if !hasGraph {
+					continue
+				}
+				taskKind := map[string]string{
+					store.RunKindBuild:      store.TaskKindBuild,
+					store.RunKindUnit:       store.TaskKindUnit,
+					store.RunKindRegression: store.TaskKindRegression,
+				}[kind]
+				for i := range graph.Subs {
+					if graph.Subs[i].Kind == taskKind {
+						sub := &graph.Subs[i]
+						st := fullStageJSON{
+							Kind:   kind,
+							TaskID: graph.Root.ID,
+							Status: liveSubStatus(sub),
+						}
+						if st.Status == "" {
+							continue // stage not part of this graph (no run, not queued)
+						}
+						if sub.Status == store.TaskFailed {
+							st.Error = sub.Error
+						}
+						row.Stages[envID] = append(row.Stages[envID], st)
+						break
+					}
+				}
+			}
+		}
+		out.Rows = append(out.Rows, row)
+	}
+
+	writeJSON(w, http.StatusOK, out)
+}
+
+// liveSubStatus renders a not-yet-reported stage's dashboard status from its
+// sub-task: queued/running while pending/running, failed when the stage
+// failed, and "" when the stage is not part of the graph or was skipped
+// without a run (skipped stages do get failed runs from the runner, so this
+// is only the pre-claim window).
+func liveSubStatus(sub *store.Task) string {
+	switch sub.Status {
+	case store.TaskPending:
+		return "pending"
+	case store.TaskRunning:
+		return "running"
+	case store.TaskFailed:
+		return store.StatusFailed
+	case store.TaskSkipped:
+		return store.StatusFailed
+	default:
+		return ""
+	}
 }
 
 // --- POST /api/test-runs (result reporting) ---

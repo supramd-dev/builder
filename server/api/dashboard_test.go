@@ -514,3 +514,241 @@ func TestReportTestRunAndDetail(t *testing.T) {
 		t.Fatalf("GET test-runs: expected 405, got %d", rec.Code)
 	}
 }
+
+// TestDashboardFullMatrix checks GET /api/dashboard/full: one row per commit,
+// per environment the build/unit/regression stages in display order, the
+// recorded runs winning over the live task state, and the root task id
+// exposed for the dependency-graph link.
+func TestDashboardFullMatrix(t *testing.T) {
+	apiServer, env := newDashboardEnv(t)
+
+	// Filter the matrix to the md-code repo (the seed also created a
+	// group/other commit with no runs).
+	cfg, err := apiServer.Store.GetSiteConfig()
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	cfg.CodeRepo = "https://gitlab.com/group/md-code.git"
+	if err := apiServer.Store.SaveSiteConfig(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	// Seeded data: three md-code commits on cpu-node-1/gpu-a100 (alice) and
+	// mpi-cluster (bob); regression runs exist for cpu-node-1 at all three
+	// commits and mpi-cluster at the newest; one unit run at the newest.
+	rec := env.authed(http.MethodGet, "/api/dashboard/full", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full dashboard: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var dash fullDashboardJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if len(dash.Rows) != 3 {
+		t.Fatalf("expected 3 md-code commit rows, got %d", len(dash.Rows))
+	}
+
+	var cpuEnv, mpiEnv store.TestEnvironment
+	apiServer.Store.DB.Where("name = ?", "cpu-node-1").First(&cpuEnv)
+	apiServer.Store.DB.Where("name = ?", "mpi-cluster").First(&mpiEnv)
+
+	// Rows are newest-first; take the newest commit row.
+	row := dash.Rows[0]
+	if row.Commit.SHA != "3333333" {
+		t.Fatalf("newest row: expected 3333333, got %s", row.Commit.SHA)
+	}
+
+	// cpu-node-1 has unit+regression runs recorded: two stages in display
+	// order (build first), each carrying the run id.
+	cpuStages := row.Stages[cpuEnv.ID]
+	if len(cpuStages) != 2 {
+		t.Fatalf("cpu stages: expected 2 (unit+regression runs), got %+v", cpuStages)
+	}
+	if cpuStages[0].Kind != "unit" || cpuStages[0].RunID == 0 || cpuStages[0].Status != "failed" {
+		t.Fatalf("cpu unit stage wrong: %+v", cpuStages[0])
+	}
+	if cpuStages[1].Kind != "regression" || cpuStages[1].RunID == 0 || cpuStages[1].Status != "failed" {
+		t.Fatalf("cpu regression stage wrong: %+v", cpuStages[1])
+	}
+
+	// mpi-cluster has only a regression run: single stage.
+	mpiStages := row.Stages[mpiEnv.ID]
+	if len(mpiStages) != 1 || mpiStages[0].Kind != "regression" || mpiStages[0].RunID == 0 {
+		t.Fatalf("mpi stages wrong: %+v", mpiStages)
+	}
+
+	// gpu-a100 has no runs at all: no stage entries for it.
+	var gpuEnv store.TestEnvironment
+	apiServer.Store.DB.Where("name = ?", "gpu-a100").First(&gpuEnv)
+	if stages := row.Stages[gpuEnv.ID]; len(stages) != 0 {
+		t.Fatalf("gpu stages should be empty, got %+v", stages)
+	}
+
+	// An oldest commit with only the regression run shows exactly one stage.
+	oldRow := dash.Rows[2]
+	if oldRow.Commit.SHA != "1111111" {
+		t.Fatalf("oldest row: expected 1111111, got %s", oldRow.Commit.SHA)
+	}
+	if stages := oldRow.Stages[cpuEnv.ID]; len(stages) != 1 || stages[0].Kind != "regression" {
+		t.Fatalf("oldest cpu stages wrong: %+v", stages)
+	}
+
+	// commits=1 limits the rows; an invalid value is rejected.
+	rec = env.authed(http.MethodGet, "/api/dashboard/full?commits=1", "")
+	dash = fullDashboardJSON{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if len(dash.Rows) != 1 {
+		t.Fatalf("commits=1: expected 1 row, got %d", len(dash.Rows))
+	}
+	rec = env.authed(http.MethodGet, "/api/dashboard/full?commits=nope", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("commits=nope: expected 400, got %d", rec.Code)
+	}
+}
+
+// TestDashboardFullLiveOverlay checks that a running task graph surfaces as
+// live stages (taskId set, runId 0, running status) when the run has not
+// landed, and that the task detail view links stage sub-tasks to their
+// recorded runs (subTaskJSON.runId).
+func TestDashboardFullLiveOverlay(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	seedUser(t, s, "fulluser", "fu@example.com", "pw")
+	envA := seedDispatchEnv(t, s, "cpu-full-a", "cpu", true)
+	envB := seedDispatchEnv(t, s, "cpu-full-b", "cpu", true)
+	commit := &store.Commit{Repo: "group/code", SHA: "f111ca7", PushedAt: time.Now()}
+	if _, err := s.GetOrCreateCommit(commit); err != nil {
+		t.Fatal(err)
+	}
+
+	// A graph on env A with a clone + build sub-task (CreateTaskGraph forces
+	// pending status — the scheduler's transitions are what we overlay): the
+	// full dashboard shows the build stage as live (no build run recorded).
+	rootA := &store.Task{
+		Kind: store.TaskKindRoot, Name: "test f111ca7", CommitID: commit.ID,
+		EnvironmentID: envA.ID, Tags: "cpu", Config: "{}",
+	}
+	subsA := []*store.Task{
+		{Kind: store.TaskKindClone, Name: "clone", Status: store.TaskDone,
+			CommitID: commit.ID, EnvironmentID: envA.ID},
+		{Kind: store.TaskKindBuild, Name: "build", Status: store.TaskRunning,
+			CommitID: commit.ID, EnvironmentID: envA.ID},
+	}
+	if _, err := store.CreateTaskGraph(s, rootA, subsA, [][]int64{
+		{}, {subsA[0].ID},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A pending graph on env B for the same commit: the row must show
+	// per-environment isolation (env B stage pending, not running).
+	rootB := &store.Task{
+		Kind: store.TaskKindRoot, Name: "test f111ca7 b", CommitID: commit.ID,
+		EnvironmentID: envB.ID, Tags: "cpu", Config: "{}",
+	}
+	subsB := []*store.Task{
+		{Kind: store.TaskKindClone, Name: "clone", Status: store.TaskPending,
+			CommitID: commit.ID, EnvironmentID: envB.ID},
+	}
+	if _, err := store.CreateTaskGraph(s, rootB, subsB, [][]int64{
+		{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "fulluser", "pw")
+	authed := func(method, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := authed(http.MethodGet, "/api/dashboard/full")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full dashboard: expected 200, got %d", rec.Code)
+	}
+	var dash fullDashboardJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if len(dash.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(dash.Rows))
+	}
+	row := dash.Rows[0]
+
+	// Both graphs are linked via taskIds.
+	if row.TaskIDs[envA.ID] == 0 || row.TaskIDs[envB.ID] == 0 {
+		t.Fatalf("taskIds wrong: %+v", row.TaskIDs)
+	}
+
+	// Env A: a live build stage (running, taskId set, no run).
+	var aBuild *fullStageJSON
+	for i := range row.Stages[envA.ID] {
+		if row.Stages[envA.ID][i].Kind == "build" {
+			aBuild = &row.Stages[envA.ID][i]
+		}
+	}
+	if aBuild == nil {
+		t.Fatalf("env A build stage missing: %+v", row.Stages[envA.ID])
+	}
+	if aBuild.RunID != 0 || aBuild.TaskID != rootA.ID || aBuild.Status != string(store.TaskPending) {
+		t.Fatalf("env A live build wrong: %+v", aBuild)
+	}
+
+	// Env B: only the unit/regression slots show (clone is not a stage); the
+	// build has no sub-task on env B, so it stays absent.
+	for _, st := range row.Stages[envB.ID] {
+		if st.Kind == "build" {
+			t.Fatalf("env B should have no build stage: %+v", row.Stages[envB.ID])
+		}
+		if st.Status != string(store.TaskPending) {
+			t.Fatalf("env B stage should be pending: %+v", st)
+		}
+	}
+
+	// Task detail: the running build sub-task carries taskId but no runId
+	// (nothing recorded yet); report a build run and the link appears.
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d", rootA.ID))
+	var detail taskDetailJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	var buildSub *subTaskJSON
+	for i := range detail.SubTasks {
+		if detail.SubTasks[i].Kind == store.TaskKindBuild {
+			buildSub = &detail.SubTasks[i]
+		}
+	}
+	if buildSub == nil || buildSub.RunID != 0 {
+		t.Fatalf("build sub-task should have no runId yet: %+v", buildSub)
+	}
+
+	body := fmt.Sprintf(`{"environmentId":%d,"commitId":%d,"kind":"build","status":"passed","summary":"ok"}`,
+		envA.ID, commit.ID)
+	req := httptest.NewRequest(http.MethodPost, "/api/test-runs", strings.NewReader(body))
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("report build run: expected 201, got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d", rootA.ID))
+	detail = taskDetailJSON{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	buildSub = nil
+	for i := range detail.SubTasks {
+		if detail.SubTasks[i].Kind == store.TaskKindBuild {
+			buildSub = &detail.SubTasks[i]
+		}
+	}
+	if buildSub == nil || buildSub.RunID == 0 {
+		t.Fatalf("build sub-task should link the recorded run: %+v", buildSub)
+	}
+}

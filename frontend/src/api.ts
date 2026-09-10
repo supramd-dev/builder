@@ -181,7 +181,7 @@ export async function updateSiteConfig(
 
 // --- Test dashboard ---
 
-export type DashboardKind = 'regression' | 'unit' | 'build'
+export type DashboardKind = 'regression' | 'unit' | 'build' | 'full'
 
 export interface DashboardEnvironment {
   id: number
@@ -260,7 +260,43 @@ export async function getDashboard(
   kind: DashboardKind,
   commits = 10,
 ): Promise<Dashboard> {
+  // The full kind has its own wire shape (see getFullDashboard).
   return api<Dashboard>(`/api/dashboard/${kind}?commits=${commits}`)
+}
+
+// --- Full dashboard (all stages per commit × environment) ---
+
+// FullStage is one stage cell of the full matrix: a recorded run
+// (build/unit/regression) or a live task state (runId 0).
+export interface FullStage {
+  kind: 'build' | 'unit' | 'regression'
+  runId: number
+  taskId?: number
+  status: string
+  error?: string
+  summary?: string
+  startedAt: string
+  finishedAt: string
+}
+
+export interface FullRow {
+  commit: DashboardCommit
+  // environment id → stages in display order (build, unit, regression)
+  stages: Record<string, FullStage[]>
+  // environment id → root task id (the dependency graph link)
+  taskIds: Record<string, number>
+}
+
+export interface FullDashboard {
+  repoFilter?: string
+  environments: DashboardEnvironment[]
+  rows: FullRow[]
+}
+
+export async function getFullDashboard(
+  commits = 10,
+): Promise<FullDashboard> {
+  return api<FullDashboard>(`/api/dashboard/full?commits=${commits}`)
 }
 
 export interface CaseResult {
@@ -301,7 +337,8 @@ export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
 
 export type TaskKind = 'root' | 'clone' | 'build' | 'unit' | 'regression'
 
-// SubTask is one node of a task graph (clone/build/unit/...).
+// SubTask is one node of a task graph (clone/build/unit/...). Test stages
+// carry runId: the recorded test run for the stage-detail link.
 export interface SubTask {
   id: number
   kind: TaskKind
@@ -309,6 +346,7 @@ export interface SubTask {
   status: TaskStatus
   error: string
   dependsOn: number[]
+  runId?: number
   startedAt: string
   finishedAt: string
 }

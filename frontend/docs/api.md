@@ -6,17 +6,50 @@ The dashboard (first tab after login) shows a build.golang.org-style
 matrix: one **row per recent git push** (default 10, capped at 50 via
 `?commits=`, newest first), one **column per test environment**
 (site-wide — all environments configured by any user; disabled ones are
-greyed out). Three kinds are available: **regression**, **unit** and
-**build** — the build kind shows per environment whether the code compiles
-(click through for the build log).
+greyed out). Four views are available via the tabs at the top:
+
+- **All** — the full pipeline matrix (`GET /api/dashboard/full`): each
+  cell shows the three stages in display order (build, unit tests,
+  regression) for that (commit, environment), each with its own status
+  and detail link.
+- **Build** — whether the code compiles per environment (click through
+  for the build log).
+- **Unit tests** / **Regression tests** — the per-case matrices.
 
 Cells with a recorded run show pass/fail counts; clicking one opens the
 run detail with the per-case results (name, status, error value, short
 note) and the one-paragraph summary reported by the worker. Cells
 without a run but with a live task graph show **queued** / **running…**
-(or ✗ when the task failed before reporting) — clicking those opens the
-**task detail** with the pipeline stages and the live log (see
+(or ✗ when the task failed before reporting). Every commit row also
+carries a **graph** link: the dependency graph of that commit's task
+pipeline (clone → build → unit/regression), GitHub-Actions style —
+clicking a stage node jumps to its run detail or the live task log (see
 [Runner and tasks](#/docs/runner-strategy)).
+
+The full matrix response shape:
+
+```json
+{
+  "environments": [{"id": 1, "name": "cpu-node-1", "...": "..."}],
+  "rows": [
+    {
+      "commit": {"sha": "abc123", "...": "..."},
+      "taskIds": {"1": 42},
+      "stages": {
+        "1": [
+          {"kind": "build", "runId": 7, "status": "passed"},
+          {"kind": "unit", "taskId": 42, "status": "running"}
+        ]
+      }
+    }
+  ]
+}
+```
+
+Each stage either carries the recorded `runId` (opens the run detail) or
+the live `taskId` of the task graph while the run has not landed
+(`status` one of `pending`/`running`/`failed`/`done`). `taskIds` maps the
+environment to the root task id for the graph link.
 
 ## Reporting results
 
@@ -91,6 +124,7 @@ created with the `adduser` CLI (see
 | GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `testInputRepo`, `testRepoRef`, credential set-flags) |
 | PUT    | `/api/site-config`              | Update site configuration (deploy key/token: empty = keep, `clearDeploy*` = remove) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
+| GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
 | POST   | `/api/test-runs`                | Report a test run result                      |
 | GET    | `/api/test-runs/{id}`           | One run's detail incl. per-case results       |
 | POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit |

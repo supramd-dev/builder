@@ -10,11 +10,12 @@ import TestRunDetailPage from './TestRunDetailPage'
 import CaseDetailPage from './CaseDetailPage'
 import DocsPage from './DocsPage'
 import TaskDetailPage from './TaskDetailPage'
+import TaskGraphPage from './TaskGraphPage'
 import type { CaseResult } from './api'
 
 // Page is the client-side routing state. The dashboard hierarchy is
-// dashboard → run detail → case detail, each with a back link; a live task
-// graph (no run reported yet) opens the task detail instead.
+// dashboard → task graph → run detail → case detail, each with a back link;
+// the task log view (task-detail) stays reachable from the graph page.
 type Page =
   | { view: 'dashboard' }
   | { view: 'environments' }
@@ -24,6 +25,7 @@ type Page =
   | { view: 'run-detail'; runId: number }
   | { view: 'case-detail'; runId: number; caseResult: CaseResult }
   | { view: 'task-detail'; taskId: number }
+  | { view: 'task-graph'; taskId: number }
 
 function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -103,8 +105,15 @@ function App() {
           page.view === 'dashboard' ? (
             <DashboardPage
               onOpenRun={(runId) => setPage({ view: 'run-detail', runId })}
-              onOpenTask={(taskId) => setPage({ view: 'task-detail', taskId })}
+              onOpenTask={(taskId) => setPage({ view: 'task-graph', taskId })}
               onError={console.warn}
+            />
+          ) : page.view === 'task-graph' ? (
+            <TaskGraphPage
+              taskId={page.taskId}
+              onBack={() => setPage({ view: 'dashboard' })}
+              onOpenRun={(runId) => setPage({ view: 'run-detail', runId })}
+              onOpenLog={(taskId) => setPage({ view: 'task-detail', taskId })}
             />
           ) : page.view === 'task-detail' ? (
             <TaskDetailPage

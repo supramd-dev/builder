@@ -451,6 +451,21 @@ check "dashboard build 200" "$(tail -n1 <<<"$body_code")" "200"
 check "build matrix cell failed" \
   "$(head -n1 <<<"$body_code" | jq -r '.rows[0].cells[0].status')" "failed"
 
+# Full matrix: one row per commit with build/unit/regression stages in
+# display order; the failed build run above must surface as the build stage.
+body_code=$(req GET /api/dashboard/full)
+check "dashboard full 200" "$(tail -n1 <<<"$body_code")" "200"
+check "full matrix has rows" \
+  "$(head -n1 <<<"$body_code" | jq '.rows | length > 0')" "true"
+check "full row stages present" \
+  "$(head -n1 <<<"$body_code" | jq '.rows[0].stages | length > 0')" "true"
+check "full build stage failed" \
+  "$(head -n1 <<<"$body_code" | jq -r '[.rows[0].stages[][] | select(.kind == "build").status] | first // empty')" "failed"
+check "full build stage has run" \
+  "$(head -n1 <<<"$body_code" | jq '[.rows[0].stages[][] | select(.kind == "build").runId] | first > 0')" "true"
+check "full environments listed" \
+  "$(head -n1 <<<"$body_code" | jq '.environments | length > 0')" "true"
+
 # Run detail carries the case list and commit context.
 body_code=$(req GET "/api/test-runs/$RUN_ID")
 check "run detail 200" "$(tail -n1 <<<"$body_code")" "200"

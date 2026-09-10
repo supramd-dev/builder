@@ -648,6 +648,43 @@ footer .text-muted {
   min-width: 4.5rem;
 }
 
+/* Full dashboard: a column of stage pills (build / unit / regression) plus
+   the graph link, stacked vertically inside one matrix cell. */
+.dash-full-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.2rem;
+  min-width: 6.5rem;
+}
+
+.dash-full-cell .dash-full-stage {
+  min-width: 6.5rem;
+}
+
+.btn.dash-full-stage {
+  font-size: 0.8rem;
+  padding: 0.1rem 0.4rem;
+}
+
+.dash-full-stage.dash-full-live {
+  display: inline-block;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.dash-full-stage.dash-full-live.dash-run-failed {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.btn.dash-full-graph {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.4rem;
+  color: var(--link);
+  border-style: dashed;
+}
+
 /* Run detail: the one-paragraph conclusion reported by the worker. */
 .dash-run-summary {
   margin: 0 0 0.5rem 0;
@@ -915,6 +952,111 @@ code {
 
 .task-badge-skipped {
   font-style: italic;
+}
+
+/* --- task dependency graph (GitHub-Actions-style) --- */
+
+.graph-scroll {
+  overflow: auto;
+  margin-bottom: 0.75rem;
+}
+
+.graph-canvas {
+  position: relative;
+}
+
+.graph-edges {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.graph-edge {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.5;
+}
+
+.graph-edge-done {
+  stroke: var(--muted);
+}
+
+.graph-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.15rem;
+  padding: 0 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg, #fff);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.graph-node-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.graph-node-status {
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.graph-node-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-node-kind {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.graph-node-done {
+  border-color: var(--success);
+}
+
+.graph-node-done .graph-node-status {
+  color: var(--success);
+}
+
+.graph-node-failed {
+  border-color: var(--danger);
+}
+
+.graph-node-failed .graph-node-status {
+  color: var(--danger);
+}
+
+.graph-node-skipped .graph-node-status {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.graph-node-running .graph-node-status {
+  color: var(--link);
+}
+
+.graph-node-root {
+  background: var(--muted-bg, #f6f8fa);
+}
+
+.graph-node:hover {
+  filter: brightness(0.97);
+}
+
+.graph-hint {
+  font-size: 0.85rem;
 }
 
 .task-log {

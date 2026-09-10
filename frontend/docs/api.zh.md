@@ -5,15 +5,44 @@
 仪表板(登录后的第一个页面)呈现 build.golang.org 风格的矩阵:**每个
 最近的 git 推送一行**(默认 10 行,`?commits=` 上限 50,最新在前),
 **每个测试环境一列**(站点级 —— 所有用户配置的环境;停用的置灰)。
-提供三种类别:**regression(回归)**、**unit(单元)** 和 **build
-(构建)** —— 构建类别显示代码在每个环境上能否编译(点击查看构建
-日志)。
+顶部页签提供四种视图:
+
+- **All(全量)** —— 完整管线矩阵(`GET /api/dashboard/full`):每个
+  单元格按展示顺序显示该 (commit, 环境) 下的三个阶段(构建、单元
+  测试、回归),各自带状态与详情链接。
+- **Build(构建)** —— 代码在每个环境上能否编译(点击查看构建日志)。
+- **Unit tests(单元)/ Regression tests(回归)** —— 逐用例矩阵。
 
 有已记录运行的单元格显示通过/失败计数;点击打开运行详情,包含逐用例
 结果(名称、状态、误差值、简短备注)和 worker 报告的一段式摘要。没有
 运行但存在活跃任务图的单元格显示 **queued** / **running…**(任务在报告
-前失败则为 ✗)—— 点击这些单元格打开**任务详情**,查看管线阶段和实时
-日志(见 [Runner 与任务](#/docs/runner-strategy))。
+前失败则为 ✗)。每个 commit 行还带 **graph** 链接:该 commit 任务管线
+(clone → build → 单元/回归)的依赖图,GitHub Actions 风格 —— 点击阶段
+节点跳转到运行详情或实时任务日志(见 [Runner 与任务](#/docs/runner-strategy))。
+
+全量矩阵响应形状:
+
+```json
+{
+  "environments": [{"id": 1, "name": "cpu-node-1", "...": "..."}],
+  "rows": [
+    {
+      "commit": {"sha": "abc123", "...": "..."},
+      "taskIds": {"1": 42},
+      "stages": {
+        "1": [
+          {"kind": "build", "runId": 7, "status": "passed"},
+          {"kind": "unit", "taskId": 42, "status": "running"}
+        ]
+      }
+    }
+  ]
+}
+```
+
+每个阶段要么携带已记录的 `runId`(打开运行详情),要么在运行尚未落库时
+携带任务图的实时 `taskId`(`status` 为 `pending`/`running`/`failed`/
+`done` 之一)。`taskIds` 将环境映射到根任务 ID,用于图链接。
 
 ## 报告结果
 
@@ -82,6 +111,7 @@
 | GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`testInputRepo`、`testRepoRef`、凭据设置标志) |
 | PUT    | `/api/site-config`              | 更新站点配置(deploy key/token:留空保留,`clearDeploy*` 删除) |
 | GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
+| GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
 | POST   | `/api/test-runs`                | 报告测试运行结果                              |
 | GET    | `/api/test-runs/{id}`           | 单次运行详情,含逐用例结果                    |
 | POST   | `/api/jobs`                     | 手动重新派发某提交的任务图                    |
