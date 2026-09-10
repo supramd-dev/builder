@@ -198,11 +198,11 @@ function positions(
   root: TaskDetail | null,
 ): Map<number | 'root', { x: number; y: number }> {
   const pos = new Map<number | 'root', { x: number; y: number }>()
-  // The root is a leftmost virtual column, vertically centered on the
-  // middle layer so its edge fan-out is balanced.
+  // The root sits in a leftmost virtual column, on the same horizontal
+  // line as the first node of the first layer (clone) — the pipeline's
+  // entry point reads as one row.
   if (root) {
-    const maxRows = Math.max(1, ...layers.map((l) => l.length))
-    pos.set('root', { x: 0, y: ((maxRows - 1) * (NODE_H + GAP_Y)) / 2 })
+    pos.set('root', { x: 0, y: 0 })
   }
   const stride = NODE_H + GAP_Y
   // Sub-tasks start at x offset 1 column when the root column is present.
@@ -224,7 +224,8 @@ function edges(
 ): { d: string; done: boolean }[] {
   const out: { d: string; done: boolean }[] = []
   const mid = NODE_W / 2
-  const rootPos = root ? { x: 0, y: (NODE_H + GAP_Y) / 2 } : undefined
+  // Root's position mirrors positions(): first row of the leftmost column.
+  const rootPos = root ? { x: 0, y: 0 } : undefined
   for (const s of subs) {
     const to = pos.get(s.id)
     if (!to) continue

@@ -178,11 +178,14 @@ hwIDAQAB
 	cpu, gpu, mpi := envs[0].ID, envs[1].ID, envs[2].ID
 	c1, c2, c3, c4, c5 := commits[0].ID, commits[1].ID, commits[2].ID, commits[3].ID, commits[4].ID
 
-	// Oldest commit (a111111): green on CPU (full pipeline, matching the
-	// seeded task graph) and a green regression+build on GPU.
+	// Oldest commit (a111111): fully green on CPU and GPU. The MPI cluster
+	// was registered after this push, so it has no runs and no task graph
+	// for it — the dashboards show an em dash in that cell (and no graph
+	// link), the "environment never tested this push" case.
 	report(cpu, c1, store.RunKindRegression, "all 3 regression cases within tolerance", 95*time.Hour, reg("passed", "passed", "passed"), "")
 	report(gpu, c1, store.RunKindRegression, "all 3 regression cases within tolerance", 95*time.Hour, reg("passed", "passed", "passed"), "")
 	report(cpu, c1, store.RunKindUnit, "all 4 unit tests passed", 95*time.Hour, unit("passed", "passed", "passed", "passed"), "")
+	report(gpu, c1, store.RunKindUnit, "all 4 unit tests passed", 95*time.Hour, unit("passed", "passed", "passed", "passed"), "")
 	report(cpu, c1, store.RunKindBuild, "build ok (cmake+ninja, 41s)", 96*time.Hour, nil, "")
 	report(gpu, c1, store.RunKindBuild, "build ok with CUDA arch sm_80 (8m12s)", 96*time.Hour, nil, "")
 
@@ -192,6 +195,7 @@ hwIDAQAB
 	report(cpu, c2, store.RunKindRegression, "all 3 regression cases within tolerance", 71*time.Hour, reg("passed", "passed", "passed"), "")
 	report(mpi, c2, store.RunKindRegression, "2 of 3 regression cases within tolerance", 70*time.Hour, reg("passed", "failed", "passed"), "")
 	report(cpu, c2, store.RunKindUnit, "3 of 4 unit tests passed", 71*time.Hour, unit("passed", "passed", "failed", "passed"), "")
+	report(mpi, c2, store.RunKindUnit, "all 4 unit tests passed", 70*time.Hour, unit("passed", "passed", "passed", "passed"), "")
 	report(cpu, c2, store.RunKindBuild, "build ok (cmake+ninja, 39s)", 72*time.Hour, nil, "")
 	report(mpi, c2, store.RunKindBuild, "build ok (cmake+make -j64, 1m03s)", 72*time.Hour, nil, "")
 	// The GPU build failed, so its build run and the two skipped-stage runs
@@ -201,19 +205,27 @@ hwIDAQAB
 	report(gpu, c2, store.RunKindUnit, skipped, 71*time.Hour, nil, store.StatusFailed)
 	report(gpu, c2, store.RunKindRegression, skipped, 71*time.Hour, nil, store.StatusFailed)
 
-	// c333333: neighbor-list tuning breaks water on GPU; MPI build fails.
+	// c333333: neighbor-list tuning breaks water on GPU; MPI build fails (so
+	// MPI unit/regression are skipped runs, recorded here just like the
+	// runner's recordSkippedRuns).
 	report(cpu, c3, store.RunKindRegression, "all 3 regression cases within tolerance", 47*time.Hour, reg("passed", "passed", "passed"), "")
 	report(gpu, c3, store.RunKindRegression, "2 of 3 regression cases within tolerance", 47*time.Hour, reg("passed", "failed", "passed"), "")
 	report(cpu, c3, store.RunKindUnit, "all 4 unit tests passed", 47*time.Hour, unit("passed", "passed", "passed", "passed"), "")
+	report(gpu, c3, store.RunKindUnit, "all 4 unit tests passed", 47*time.Hour, unit("passed", "passed", "passed", "passed"), "")
 	report(cpu, c3, store.RunKindBuild, "build ok (cmake+ninja, 40s)", 48*time.Hour, nil, "")
 	report(gpu, c3, store.RunKindBuild, "build ok with CUDA arch sm_80 (8m30s)", 48*time.Hour, nil, "")
-	report(mpi, c3, store.RunKindBuild, "build failed: CMake Error at src/CMakeLists.txt:87 (target_link_libraries): Cannot find package MPI", 48*time.Hour, nil, store.StatusFailed)
+	mpiBuildFail := "build failed: CMake Error at src/CMakeLists.txt:87 (target_link_libraries): Cannot find package MPI"
+	report(mpi, c3, store.RunKindBuild, mpiBuildFail, 48*time.Hour, nil, store.StatusFailed)
+	mpiSkipped := "skipped: build (ninja) failed: CMake Error at src/CMakeLists.txt:87 (target_link_libraries): Cannot find package MPI"
+	report(mpi, c3, store.RunKindUnit, mpiSkipped, 47*time.Hour, nil, store.StatusFailed)
+	report(mpi, c3, store.RunKindRegression, mpiSkipped, 47*time.Hour, nil, store.StatusFailed)
 
 	// d444444: broad-green commit after the refactor (except one MPI case).
 	report(cpu, c4, store.RunKindRegression, "all 3 regression cases within tolerance", 23*time.Hour, reg("passed", "passed", "passed"), "")
 	report(gpu, c4, store.RunKindRegression, "all 3 regression cases within tolerance", 23*time.Hour, reg("passed", "passed", "passed"), "")
 	report(mpi, c4, store.RunKindRegression, "2 of 3 regression cases within tolerance", 22*time.Hour, reg("passed", "passed", "failed"), "")
 	report(cpu, c4, store.RunKindUnit, "all 4 unit tests passed", 23*time.Hour, unit("passed", "passed", "passed", "passed"), "")
+	report(gpu, c4, store.RunKindUnit, "all 4 unit tests passed", 23*time.Hour, unit("passed", "passed", "passed", "passed"), "")
 	report(mpi, c4, store.RunKindUnit, "3 of 4 unit tests passed", 22*time.Hour, unit("passed", "failed", "passed", "passed"), "")
 	report(cpu, c4, store.RunKindBuild, "build ok (cmake+ninja, 38s)", 24*time.Hour, nil, "")
 	report(gpu, c4, store.RunKindBuild, "build ok with CUDA arch sm_80 (7m58s)", 24*time.Hour, nil, "")
@@ -300,43 +312,67 @@ func seedGraphs(s *store.Store, force bool, commits []*store.Commit, envs []*sto
 	if err := s.DB.Find(&runs).Error; err != nil {
 		return err
 	}
-	runStatus := map[store.EnvCommit]map[string]string{}
+	type runState struct {
+		status  string
+		summary string
+	}
+	runStateOf := map[store.EnvCommit]map[string]runState{}
 	for _, r := range runs {
 		key := store.EnvCommit{Env: r.EnvironmentID, Commit: r.CommitID}
-		if runStatus[key] == nil {
-			runStatus[key] = map[string]string{}
+		if runStateOf[key] == nil {
+			runStateOf[key] = map[string]runState{}
 		}
-		runStatus[key][r.Kind] = r.Status
+		st := r.Status
+		// A failed run whose summary starts with "skipped:" is the runner's
+		// recordSkippedRuns artifact: the stage itself was skipped (see
+		// SkipDependents), so the graph node shows skipped, not failed.
+		if st == store.StatusFailed && strings.HasPrefix(r.Summary, "skipped:") {
+			st = "skipped"
+		}
+		runStateOf[key][r.Kind] = runState{status: st, summary: r.Summary}
 	}
 
 	for _, env := range envs {
 		for _, commit := range commits {
 			key := store.EnvCommit{Env: env.ID, Commit: commit.ID}
-			statuses := runStatus[key]
-			spec := &graphSpec{
-				cloneStatus: store.TaskDone,
+			stageRuns := runStateOf[key]
+			if len(stageRuns) == 0 {
+				// No runs at all on this environment: nothing was ever tested
+				// for this push there (e.g. the environment was registered
+				// later). Skip the graph so the dashboards show the em dash —
+				// a graph without any run would render as blank nodes.
+				continue
 			}
-			// Derive stage outcomes from the runs: a failed run makes the
-			// stage failed, a passed run makes it done; a stage without a
-			// run has no node in the graph (the real graph contains exactly
-			// the configured stages).
+			spec := &graphSpec{cloneStatus: store.TaskDone}
+			// Every graph carries all four nodes. A stage's status comes
+			// from its run: passed → done, failed → failed, skipped (or no
+			// run at all) → skipped. A stage without its own run never
+			// executed — it is downstream of a failure, exactly the runner's
+			// SkipDependents/recordSkippedRuns outcome.
 			for _, pair := range []struct {
 				kind   string
-				status **string
+				status *string
 			}{
 				{store.RunKindBuild, &spec.buildStatus},
 				{store.RunKindUnit, &spec.unitStatus},
 				{store.RunKindRegression, &spec.regStatus},
 			} {
-				runSt, ok := statuses[pair.kind]
-				if !ok {
-					*pair.status = nil
-				} else if runSt == store.StatusFailed {
-					s := store.TaskFailed
-					*pair.status = &s
-				} else {
-					s := store.TaskDone
-					*pair.status = &s
+				switch runSt := stageRuns[pair.kind].status; {
+				case runSt == "skipped", runSt == "":
+					*pair.status = store.TaskSkipped
+				case runSt == store.StatusFailed:
+					*pair.status = store.TaskFailed
+					// The failed build's error text (the CMake error) feeds
+					// the node's error and log, like the runner's fail path.
+					if pair.kind == store.RunKindBuild {
+						spec.buildErr = stageRuns[pair.kind].summary
+						spec.buildSummary = stageRuns[pair.kind].summary
+					}
+				default: // passed
+					*pair.status = store.TaskDone
+					if pair.kind == store.RunKindBuild {
+						spec.buildSummary = stageRuns[pair.kind].summary
+					}
 				}
 			}
 			if err := seedGraph(s, env, commit, spec); err != nil {
@@ -347,32 +383,25 @@ func seedGraphs(s *store.Store, force bool, commits []*store.Commit, envs []*sto
 	return nil
 }
 
-// graphSpec describes one seeded graph's stage outcomes. A nil stage status
-// means the stage is not part of the graph (no run was reported for it).
+// graphSpec describes one seeded graph's stage outcomes. Every stage has a
+// status: the graph always carries all four nodes.
 type graphSpec struct {
 	cloneStatus   string
-	buildStatus   *string
-	unitStatus    *string
-	regStatus     *string
+	buildStatus   string
+	unitStatus    string
+	regStatus     string
 	buildSummary  string
 	buildErr      string
 	cloneDuration time.Duration
 }
 
-// stageStatus maps a run status to the sub-task status recorded by the
-// runner: done for a passed run, failed for a failed one.
-func stageStatus(runStatus string) string {
-	if runStatus == store.TaskFailed {
-		return store.TaskFailed
-	}
-	return store.TaskDone
-}
-
 // rootStatus derives the root's terminal state from its stages (mirrors the
-// runner: failed when any stage failed, done when everything finished).
+// runner: failed when any stage failed or was skipped, done otherwise).
 func rootStatus(spec *graphSpec) string {
-	if spec.buildStatus != nil && *spec.buildStatus == store.TaskFailed {
-		return store.TaskFailed
+	for _, st := range []string{spec.cloneStatus, spec.buildStatus, spec.unitStatus, spec.regStatus} {
+		if st == store.TaskFailed || st == store.TaskSkipped {
+			return store.TaskFailed
+		}
 	}
 	return store.TaskDone
 }
@@ -395,46 +424,35 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 		CommitID: commit.ID, EnvironmentID: env.ID, Tags: env.Tags,
 		Config: `{"build":{"generator":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
 	}
-	// clone and build are always part of the graph; a test stage only when
-	// its run exists (the real graph contains exactly the configured stages).
+	// The graph always carries all four nodes: clone ← root, build ← clone,
+	// unit/regression ← build.
 	clone := &store.Task{Kind: store.TaskKindClone, Name: "clone repositories",
 		CommitID: commit.ID, EnvironmentID: env.ID}
 	build := &store.Task{Kind: store.TaskKindBuild, Name: "build (ninja)",
 		CommitID: commit.ID, EnvironmentID: env.ID}
-	subs := []*store.Task{clone, build}
+	unitT := &store.Task{Kind: store.TaskKindUnit, Name: "unit tests",
+		CommitID: commit.ID, EnvironmentID: env.ID}
+	regT := &store.Task{Kind: store.TaskKindRegression, Name: "regression tests",
+		CommitID: commit.ID, EnvironmentID: env.ID}
+	subs := []*store.Task{clone, build, unitT, regT}
 	deps := [][]int64{
 		{store.TaskRootPlaceholder}, // clone ← root (container, not a gate)
 		{store.TaskSubPlaceholderBase + 0},
-	}
-	if spec.unitStatus != nil {
-		subs = append(subs, &store.Task{Kind: store.TaskKindUnit, Name: "unit tests",
-			CommitID: commit.ID, EnvironmentID: env.ID})
-		deps = append(deps, []int64{store.TaskSubPlaceholderBase + 1})
-	}
-	if spec.regStatus != nil {
-		subs = append(subs, &store.Task{Kind: store.TaskKindRegression, Name: "regression tests",
-			CommitID: commit.ID, EnvironmentID: env.ID})
-		deps = append(deps, []int64{store.TaskSubPlaceholderBase + 1})
+		{store.TaskSubPlaceholderBase + 1},
+		{store.TaskSubPlaceholderBase + 1},
 	}
 	stored, err := store.CreateTaskGraph(s, root, subs, deps)
 	if err != nil {
 		return err
 	}
 
-	// Statuses, timestamps and (for the tests) run summary lines. The
-	// CreateTaskGraph call forces pending; overwrite with the demo outcome.
+	// Statuses, timestamps and log chunks. The CreateTaskGraph call forces
+	// pending; overwrite with the demo outcome.
 	start := time.Now().Add(-26 * time.Hour)
 	stamps := func(t *store.Task, dur time.Duration) {
 		t.StartedAt = &start
 		fin := start.Add(dur)
 		t.FinishedAt = &fin
-	}
-	// stored[0] is the root, stored[1] clone, stored[2] build; the test
-	// stages follow in the order they were appended above. The build stage
-	// always exists (every cell has a build run) — guard anyway.
-	buildStatus := store.TaskDone
-	if spec.buildStatus != nil {
-		buildStatus = *spec.buildStatus
 	}
 	statuses := map[*store.Task]struct {
 		status string
@@ -442,24 +460,10 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 		dur    time.Duration
 	}{
 		stored[0]: {rootStatus(spec), spec.buildErr, 15 * time.Minute},
-		stored[1]: {store.TaskDone, "", spec.cloneDuration},
-		stored[2]: {stageStatus(buildStatus), spec.buildErr, 5 * time.Minute},
-	}
-	next := 3
-	if spec.unitStatus != nil {
-		statuses[stored[next]] = struct {
-			status string
-			errMsg string
-			dur    time.Duration
-		}{stageStatus(*spec.unitStatus), "", 3 * time.Minute}
-		next++
-	}
-	if spec.regStatus != nil {
-		statuses[stored[next]] = struct {
-			status string
-			errMsg string
-			dur    time.Duration
-		}{stageStatus(*spec.regStatus), "", 6 * time.Minute}
+		stored[1]: {spec.cloneStatus, "", spec.cloneDuration},
+		stored[2]: {spec.buildStatus, spec.buildErr, 5 * time.Minute},
+		stored[3]: {spec.unitStatus, "", 3 * time.Minute},
+		stored[4]: {spec.regStatus, "", 6 * time.Minute},
 	}
 	for t, st := range statuses {
 		t.Status = st.status
@@ -473,36 +477,33 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 
 	// Per-stage logs (matching the statuses) for the log viewer. Skip logs
 	// read as one line, exactly like the runner's skip path.
+	const unitSkipReason = "skipped: upstream task build (ninja) failed"
 	logs := map[int64][]string{
 		stored[1].ID: {fmt.Sprintf("Cloning into '%s'...\n", commit.Repo),
 			fmt.Sprintf("* branch main -> FETCH_HEAD\nHEAD is now at %s %s\n", commit.SHA[:7], commit.Message)},
 		stored[2].ID: {"-- The C compiler identification is GNU 13.2.0\n-- The CXX compiler identification is GNU 13.2.0\n",
 			"[42/42] Building CXX object src/CMakeFiles/md.dir/integrate/verlet.cpp.o\n"},
+		stored[3].ID: {"Test project /home/md/build\n    Start 1: TestForce::compute\n1/4 Test #1: TestForce::compute ........ Passed\n"},
+		stored[4].ID: {"Test project /home/md/build\n    Start 1: lj-argon-nve\n1/3 Test #1: lj-argon-nve ........ Passed\n"},
 	}
-	next = 3
-	if spec.unitStatus != nil {
-		logs[stored[next].ID] = []string{"Test project /home/md/build\n    Start 1: TestForce::compute\n1/4 Test #1: TestForce::compute ........ Passed\n"}
-		if *spec.unitStatus == store.TaskSkipped {
-			logs[stored[next].ID] = []string{"skipped: build stage failed\n"}
-		}
-		if *spec.unitStatus == store.TaskDone {
-			logs[stored[next].ID] = append(logs[stored[next].ID], "MD-BUILDER-SUMMARY: all 4 unit tests passed\n")
-		}
-		next++
-	}
-	if spec.regStatus != nil {
-		logs[stored[next].ID] = []string{"Test project /home/md/build\n    Start 1: lj-argon-nve\n1/3 Test #1: lj-argon-nve ........ Passed\n"}
-		if *spec.regStatus == store.TaskSkipped {
-			logs[stored[next].ID] = []string{"skipped: build stage failed\n"}
-		}
-		if *spec.regStatus == store.TaskDone {
-			logs[stored[next].ID] = append(logs[stored[next].ID], "MD-BUILDER-SUMMARY: all 3 regression cases within tolerance\n")
-		}
-	}
-	if spec.buildStatus != nil && *spec.buildStatus == store.TaskFailed {
+	switch spec.buildStatus {
+	case store.TaskFailed:
 		logs[stored[2].ID] = append(logs[stored[2].ID],
 			"CMake Error at src/CMakeLists.txt:87\n"+spec.buildSummary+"\n")
-	} else if spec.buildStatus == nil || *spec.buildStatus == store.TaskDone {
+	case store.TaskSkipped:
+		logs[stored[2].ID] = []string{"skipped: upstream task clone repositories failed\n"}
+	}
+	if spec.unitStatus == store.TaskSkipped {
+		logs[stored[3].ID] = []string{unitSkipReason + "\n"}
+	} else if spec.unitStatus == store.TaskDone {
+		logs[stored[3].ID] = append(logs[stored[3].ID], "MD-BUILDER-SUMMARY: all 4 unit tests passed\n")
+	}
+	if spec.regStatus == store.TaskSkipped {
+		logs[stored[4].ID] = []string{unitSkipReason + "\n"}
+	} else if spec.regStatus == store.TaskDone {
+		logs[stored[4].ID] = append(logs[stored[4].ID], "MD-BUILDER-SUMMARY: all 3 regression cases within tolerance\n")
+	}
+	if spec.buildStatus == store.TaskDone {
 		logs[stored[2].ID] = append(logs[stored[2].ID], "MD-BUILDER-SUMMARY: "+spec.buildSummary+"\n")
 	}
 	for taskID, chunks := range logs {

@@ -205,7 +205,10 @@ export interface DashboardCommit {
 export interface RunCell {
   runId: number
   taskId?: number
-  status: 'passed' | 'failed' | 'running' | 'pending'
+  // "skipped" marks the runner's recordSkippedRuns artifact: the stage
+  // never ran because an upstream task failed (stored status is failed,
+  // summary starts with "skipped:").
+  status: 'passed' | 'failed' | 'running' | 'pending' | 'skipped'
   total: number
   passed: number
   failed: number
@@ -310,7 +313,10 @@ export interface CaseResult {
 export interface TestRunDetail {
   id: number
   kind: DashboardKind
-  status: 'passed' | 'failed'
+  // "skipped" marks the runner's recordSkippedRuns artifact: the stage
+  // never ran because an upstream task failed (stored status is failed,
+  // summary starts with "skipped:").
+  status: 'passed' | 'failed' | 'skipped'
   summary: string
   total: number
   passed: number

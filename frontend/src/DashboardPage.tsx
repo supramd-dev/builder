@@ -283,6 +283,23 @@ function RunCellView({
     )
   }
   const failed = cell.status === 'failed'
+  const skipped = cell.status === 'skipped'
+  if (skipped) {
+    return (
+      <button
+        type="button"
+        className="btn btn-sm dash-run dash-run-skipped"
+        title={
+          (cell.error ||
+            'Skipped: an upstream task failed before this stage could run') +
+          ' — click for details'
+        }
+        onClick={onOpen}
+      >
+        ⤼ skipped
+      </button>
+    )
+  }
   // Build runs have no case counts: the glyph alone carries the outcome.
   const label =
     kind === 'build'
@@ -437,7 +454,8 @@ function FullMatrix({
 
 // FullStageView renders one stage pill (build/unit/regression) of the full
 // matrix: clickable to the run detail when a run exists, or showing the
-// live task state.
+// live task state. A skipped stage (upstream failure, no run of its own)
+// renders amber "⤼ skipped" — distinct from a red hard failure.
 function FullStageView({
   stage,
   onOpenRun,
@@ -448,18 +466,24 @@ function FullStageView({
   const label =
     stage.kind === 'build' ? 'build' : stage.kind === 'unit' ? 'unit' : 'reg'
   const failed = stage.status === 'failed'
+  const skipped = stage.status === 'skipped'
   const title =
     (stage.error || stage.summary || `${label}: ${stage.status}`).slice(0, 200) +
     (stage.runId ? ' — click for details' : '')
   if (stage.runId > 0) {
+    const cls = failed
+      ? ' dash-run-failed'
+      : stage.status === 'skipped'
+        ? ' dash-run-skipped'
+        : ' dash-run-passed'
     return (
       <button
         type="button"
-        className={'btn btn-sm dash-full-stage ' + (failed ? ' dash-run-failed' : ' dash-run-passed')}
+        className={'btn btn-sm dash-full-stage' + cls}
         title={title}
         onClick={() => onOpenRun(stage.runId)}
       >
-        {failed ? '✗' : '✓'} {label}
+        {failed ? '✗' : skipped ? '⤼' : '✓'} {label}
       </button>
     )
   }
@@ -470,7 +494,14 @@ function FullStageView({
       </span>
     )
   }
-  // Failed/skipped before reporting (no run row).
+  if (skipped) {
+    return (
+      <span className="dash-full-stage dash-full-live dash-full-skipped" title={title}>
+        ⤼ skipped
+      </span>
+    )
+  }
+  // Failed before reporting (no run row).
   return (
     <span className="dash-full-stage dash-full-live dash-run-failed" title={title}>
       ✗ {label}

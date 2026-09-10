@@ -58,6 +58,7 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
   }
 
   const failed = run.status === 'failed'
+  const skipped = run.status === 'skipped'
   const kindLabel =
     run.kind === 'regression'
       ? 'Regression tests'
@@ -71,10 +72,17 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
 
       <h2>
         {kindLabel} —{' '}
-        <span className={failed ? 'text-danger' : 'text-success'}>
-          {failed ? '✗ failed' : '✓ passed'}
+        <span className={failed ? 'text-danger' : skipped ? 'text-warn' : 'text-success'}>
+          {failed ? '✗ failed' : skipped ? '⤼ skipped' : '✓ passed'}
         </span>
       </h2>
+      {skipped && (
+        <p className="dash-skip-note">
+          This stage was skipped: an upstream task failed before it could run,
+          so no tests were executed. See the summary below for the upstream
+          failure.
+        </p>
+      )}
 
       <div className="event">
         {run.summary && <p className="dash-run-summary">{run.summary}</p>}
@@ -105,11 +113,17 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
           <div>
             <dt>Results</dt>
             <dd>
-              <span className={failed ? 'text-danger' : 'text-success'}>
-                {run.passed}/{run.total} passed
-              </span>
-              {run.failed > 0 && (
-                <span className="text-danger"> ({run.failed} failed)</span>
+              {skipped ? (
+                <span className="text-warn">not executed (upstream failure)</span>
+              ) : (
+                <>
+                  <span className={failed ? 'text-danger' : 'text-success'}>
+                    {run.passed}/{run.total} passed
+                  </span>
+                  {run.failed > 0 && (
+                    <span className="text-danger"> ({run.failed} failed)</span>
+                  )}
+                </>
               )}
             </dd>
           </div>

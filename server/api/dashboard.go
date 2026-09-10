@@ -178,7 +178,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 			env := &envs[j]
 			key := store.EnvCommit{Env: env.ID, Commit: commit.ID}
 			if run, ok := runs[key]; ok {
-				row.Cells[j] = toRunCellJSON(&run)
+				row.Cells[j] = toRunCellJSON(&run, runStatusForDisplay(&run))
 				continue
 			}
 			// No run yet: overlay the root task state when a live graph exists.
@@ -327,7 +327,7 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 					row.Stages[envID] = append(row.Stages[envID], fullStageJSON{
 						Kind:       kind,
 						RunID:      run.ID,
-						Status:     run.Status,
+						Status:     runStatusForDisplay(&run),
 						Summary:    run.Summary,
 						StartedAt:  run.StartedAt.UTC().Format(time.RFC3339),
 						FinishedAt: run.FinishedAt.UTC().Format(time.RFC3339),
@@ -369,20 +369,33 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// runStatusForDisplay translates a stored run status for the dashboards: a
+// failed run whose summary starts with "skipped:" is the runner's
+// recordSkippedRuns artifact — the stage never ran because an upstream task
+// failed — so it surfaces as "skipped" instead of a hard failure.
+func runStatusForDisplay(run *store.TestRun) string {
+	if run.Status == store.StatusFailed && strings.HasPrefix(run.Summary, "skipped:") {
+		return "skipped"
+	}
+	return run.Status
+}
+
 // liveSubStatus renders a not-yet-reported stage's dashboard status from its
-// sub-task: queued/running while pending/running, failed when the stage
-// failed or was skipped (skipped stages do get failed runs from the real
-// runner, so a skipped state without a run is only the pre-claim window),
-// and "" when the stage finished but no run was reported — the cell then
-// stays empty instead of showing a misleading failure.
+// sub-task: queued/running while pending/running, failed/skipped verbatim
+// (skipped = an upstream stage failed before this one could run; skipped
+// stages that already got their recordSkippedRuns row surface through the
+// run path instead), and "" when the stage finished but no run was reported
+// — the cell then stays empty instead of showing a misleading failure.
 func liveSubStatus(sub *store.Task) string {
 	switch sub.Status {
 	case store.TaskPending:
 		return "pending"
 	case store.TaskRunning:
 		return "running"
-	case store.TaskFailed, store.TaskSkipped:
+	case store.TaskFailed:
 		return store.StatusFailed
+	case store.TaskSkipped:
+		return "skipped"
 	default:
 		// done: a finished stage without a reported run — neither success
 		// nor failure is known, so the cell shows nothing for this stage.
@@ -556,6 +569,12 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	// Keep the detail view consistent with the dashboard: a failed run whose
+	// summary starts with "skipped:" is the runner's recordSkippedRuns
+	// artifact — the stage never ran, an upstream stage failed.
+	if run.Status == store.StatusFailed && strings.HasPrefix(run.Summary, "skipped:") {
+		run.Status = "skipped"
+	}
 	env, err := s.Store.GetEnvironmentAny(run.EnvironmentID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -660,10 +679,13 @@ func toCommitJSON(c *store.Commit) commitJSON {
 	}
 }
 
-func toRunCellJSON(run *store.TestRun) *runCellJSON {
+// toRunCellJSON renders a recorded run as a matrix cell. status is the
+// display status (runStatusForDisplay), which may differ from the stored one
+// for the skipped-artifact runs.
+func toRunCellJSON(run *store.TestRun, status string) *runCellJSON {
 	return &runCellJSON{
 		RunID:      run.ID,
-		Status:     run.Status,
+		Status:     status,
 		Total:      run.Total,
 		Passed:     run.Passed,
 		Failed:     run.Failed,

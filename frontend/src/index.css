@@ -31,6 +31,7 @@
 
   --success: #28a745;
   --danger: #dc3545;
+  --warn: #b7791f;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -50,6 +51,7 @@
 
     --success: #2bb34b;
     --danger: #ff3e3e;
+    --warn: #e2a33d;
   }
 }
 
@@ -223,6 +225,21 @@ a.nav-link, a.brand, a.btn {
 
 .text-danger {
   color: var(--danger) !important;
+}
+
+.text-warn {
+  color: var(--warn) !important;
+}
+
+/* Run detail: the explanation shown when a stage was skipped because an
+   upstream task failed. */
+.dash-skip-note {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin: 0 0 0.75rem 0;
 }
 
 /* --- Tables --- */
@@ -560,6 +577,11 @@ footer .text-muted {
 }
 
 /* Column headers: environment names, with tags underneath. */
+.dash-matrix thead th {
+  text-align: center;
+  vertical-align: bottom;
+}
+
 .dash-env-head {
   min-width: 6rem;
 }
@@ -643,6 +665,18 @@ footer .text-muted {
   filter: brightness(1.1);
 }
 
+/* Skipped stage pill: amber, distinct from a red hard failure — the stage
+   never ran because an upstream stage failed. */
+.dash-run-skipped {
+  background: var(--warn);
+  border-color: var(--btn-default-border);
+  color: #fff;
+}
+
+.dash-run-skipped:hover {
+  filter: brightness(1.1);
+}
+
 .dash-no-run {
   display: inline-block;
   min-width: 4.5rem;
@@ -680,6 +714,11 @@ footer .text-muted {
 
 .dash-full-stage.dash-full-live.dash-run-failed {
   color: var(--danger);
+  font-weight: 600;
+}
+
+.dash-full-stage.dash-full-live.dash-full-skipped {
+  color: var(--warn);
   font-weight: 600;
 }
 
@@ -955,7 +994,9 @@ code {
 }
 
 .task-badge-skipped {
-  font-style: italic;
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #fff;
 }
 
 /* --- task dependency graph (GitHub-Actions-style) --- */
@@ -1042,9 +1083,13 @@ code {
   color: var(--danger);
 }
 
+.graph-node-skipped {
+  border-color: var(--warn);
+  border-style: dashed;
+}
+
 .graph-node-skipped .graph-node-status {
-  color: var(--muted);
-  font-style: italic;
+  color: var(--warn);
 }
 
 .graph-node-running .graph-node-status {
