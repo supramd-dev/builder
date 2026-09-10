@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -419,6 +420,96 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=x", stored[1].ID))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad after: expected 400, got %d", rec.Code)
+	}
+}
+
+// TestDashboardBuildKind checks the third dashboard kind: build runs are
+// reported, listed on /api/dashboard/build and rejected for unknown kinds.
+func TestDashboardBuildKind(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	seedUser(t, s, "builduser", "bu@example.com", "pw")
+	env := seedDispatchEnv(t, s, "cpu-build", "cpu", true)
+	commit := &store.Commit{Repo: "group/code", SHA: "build99", PushedAt: time.Now()}
+	if _, err := s.GetOrCreateCommit(commit); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "builduser", "pw")
+	authed := func(method, target string, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, target, rd)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Empty matrix first.
+	rec := authed(http.MethodGet, "/api/dashboard/build", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("build dashboard: expected 200, got %d", rec.Code)
+	}
+
+	// Report a passed build run (simplified path: no cases).
+	body := fmt.Sprintf(`{"environmentId":%d,"commitId":%d,"kind":"build","status":"passed","summary":"build ok"}`,
+		env.ID, commit.ID)
+	rec = authed(http.MethodPost, "/api/test-runs", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("report build run: expected 201, got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// The build matrix shows the run; other kinds stay empty.
+	rec = authed(http.MethodGet, "/api/dashboard/build", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("build dashboard: expected 200, got %d", rec.Code)
+	}
+	var dash dashboardJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if len(dash.Rows) != 1 || dash.Rows[0].Cells[0] == nil {
+		t.Fatalf("build matrix wrong: %+v", dash.Rows)
+	}
+	if dash.Rows[0].Cells[0].RunID == 0 || dash.Rows[0].Cells[0].Status != store.StatusPassed {
+		t.Fatalf("build cell wrong: %+v", dash.Rows[0].Cells[0])
+	}
+
+	// A failed build with a compiler error in the summary.
+	body = fmt.Sprintf(`{"environmentId":%d,"commitId":%d,"kind":"build","status":"failed","summary":"CMake Error: bad flag"}`,
+		env.ID, commit.ID)
+	rec = authed(http.MethodPost, "/api/test-runs", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("replace build run: expected 201, got %d", rec.Code)
+	}
+	rec = authed(http.MethodGet, "/api/dashboard/build", "")
+	dash = dashboardJSON{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if dash.Rows[0].Cells[0].Status != store.StatusFailed {
+		t.Fatalf("failed build cell wrong: %+v", dash.Rows[0].Cells[0])
+	}
+
+	// kind=build accepted on test-runs; an unknown kind is still rejected.
+	body = fmt.Sprintf(`{"environmentId":%d,"commitId":%d,"kind":"perf"}`, env.ID, commit.ID)
+	rec = authed(http.MethodPost, "/api/test-runs", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown kind: expected 400, got %d", rec.Code)
+	}
+
+	// The unit dashboard is unaffected by the build runs (no unit runs).
+	rec = authed(http.MethodGet, "/api/dashboard/unit", "")
+	dash = dashboardJSON{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if dash.Rows[0].Cells[0] != nil {
+		t.Fatalf("unit cell should be empty: %+v", dash.Rows[0].Cells[0])
 	}
 }
 

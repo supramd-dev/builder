@@ -73,14 +73,14 @@ type dashboardJSON struct {
 	Rows         []dashboardRowJSON `json:"rows"` // one row per commit, newest first
 }
 
-// handleDashboard routes GET /api/dashboard/{kind} (kind: regression|unit).
+// handleDashboard routes GET /api/dashboard/{kind} (kind: regression|unit|build).
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	rest := strings.TrimPrefix(r.URL.Path, "/api/dashboard/")
 	kind := strings.Trim(rest, "/")
-	if kind != store.RunKindRegression && kind != store.RunKindUnit {
+	if !store.RunKindValid(kind) {
 		writeJSON(w, http.StatusNotFound, map[string]string{
-			"error": "unknown dashboard kind; use regression or unit",
+			"error": "unknown dashboard kind; use regression, unit or build",
 		})
 		return
 	}
@@ -196,13 +196,17 @@ type caseInput struct {
 	Message    string  `json:"message"`    // short note / failure reason
 }
 
-// runInputJSON is the request body of POST /api/test-runs.
+// runInputJSON is the request body of POST /api/test-runs. When cases are
+// present the run status is derived from them; without cases the explicit
+// status/summary are stored directly (the build runs' simplified path).
 type runInputJSON struct {
 	EnvironmentID int64       `json:"environmentId"`
 	CommitID      int64       `json:"commitId"`
 	CommitSHA     string      `json:"commitSha"` // alternative to commitId: repo+sha lookup
 	CommitRepo    string      `json:"commitRepo"`
-	Kind          string      `json:"kind"` // "regression" or "unit"
+	Kind          string      `json:"kind"`    // "regression", "unit" or "build"
+	Status        string      `json:"status"`  // used only when cases is empty
+	Summary       string      `json:"summary"` // used only when cases is empty
 	Cases         []caseInput `json:"cases"`
 	StartedAt     string      `json:"startedAt"`  // optional RFC3339
 	FinishedAt    string      `json:"finishedAt"` // optional RFC3339
@@ -279,6 +283,8 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 		EnvironmentID: in.EnvironmentID,
 		CommitID:      commitID,
 		Kind:          in.Kind,
+		Status:        in.Status,
+		Summary:       in.Summary,
 	}
 	for i := range in.Cases {
 		input.Cases = append(input.Cases, store.TestCaseResult{
@@ -305,7 +311,7 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrInvalidRunKind):
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be regression or unit"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be regression, unit or build"})
 		case errors.Is(err, store.ErrInvalidCaseStatus):
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "case status must be passed or failed"})
 		default:

@@ -436,6 +436,21 @@ check "dashboard unknown kind 404" "$(tail -n1 <<<"$body_code")" "404"
 body_code=$(req GET "/api/dashboard/regression?commits=0")
 check "dashboard commits=0 400" "$(tail -n1 <<<"$body_code")" "400"
 
+# The build kind: report a build result and read it back on its own matrix.
+body_code=$(req POST /api/test-runs "$(jq -n --argjson env "$ENV_ID" --argjson commit "$COMMIT_ID" '{
+  environmentId: $env,
+  commitId: $commit,
+  kind: "build",
+  status: "failed",
+  summary: "CMake Error: unknown compiler flag"
+}')")
+check "report build run 201" "$(tail -n1 <<<"$body_code")" "201"
+
+body_code=$(req GET /api/dashboard/build)
+check "dashboard build 200" "$(tail -n1 <<<"$body_code")" "200"
+check "build matrix cell failed" \
+  "$(head -n1 <<<"$body_code" | jq -r '.rows[0].cells[0].status')" "failed"
+
 # Run detail carries the case list and commit context.
 body_code=$(req GET "/api/test-runs/$RUN_ID")
 check "run detail 200" "$(tail -n1 <<<"$body_code")" "200"

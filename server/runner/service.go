@@ -131,7 +131,8 @@ func (s *Service) runClaimed(ctx context.Context, task *store.Task) {
 }
 
 // recordSkippedRuns writes failed TestRun rows for skipped unit/regression
-// sub-tasks so the dashboard shows ✗ instead of a blank cell.
+// sub-tasks so the dashboard shows ✗ instead of a blank cell. (A skipped
+// build needs no row: the failed build itself records its own run.)
 func (s *Service) recordSkippedRuns(failed *store.Task) {
 	subs, err := s.Store.ListSubTasks(failed.RootID)
 	if err != nil {

@@ -7,10 +7,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// Test run kinds.
+// Test run kinds. "build" records the outcome of the build stage on an
+// environment (the dashboard shows it as a third matrix kind); a build run
+// has no per-case results — its summary is the compiler/command output tail.
 const (
 	RunKindRegression = "regression"
 	RunKindUnit       = "unit"
+	RunKindBuild      = "build"
 )
 
 // Test case / run statuses.
@@ -65,8 +68,9 @@ type RunInput struct {
 	FinishedAt    time.Time
 }
 
-// ErrInvalidRunKind is returned when a run kind is not "regression" or "unit".
-var ErrInvalidRunKind = errors.New("store: run kind must be regression or unit")
+// ErrInvalidRunKind is returned when a run kind is not one of the supported
+// kinds (regression / unit / build).
+var ErrInvalidRunKind = errors.New("store: run kind must be regression, unit or build")
 
 // ErrInvalidCaseStatus is returned when a case status is not passed/failed.
 var ErrInvalidCaseStatus = errors.New("store: case status must be passed or failed")
@@ -76,7 +80,7 @@ var ErrInvalidCaseStatus = errors.New("store: case status must be passed or fail
 // transaction. The counts and status are derived from the cases: a run
 // passes when every case passes.
 func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
-	if in.Kind != RunKindRegression && in.Kind != RunKindUnit {
+	if !RunKindValid(in.Kind) {
 		return nil, ErrInvalidRunKind
 	}
 	for i := range in.Cases {
@@ -167,7 +171,7 @@ func (s *Store) GetTestRun(id int64) (*TestRun, error) {
 
 // RunKindValid returns whether kind is a supported test kind.
 func RunKindValid(kind string) bool {
-	return kind == RunKindRegression || kind == RunKindUnit
+	return kind == RunKindRegression || kind == RunKindUnit || kind == RunKindBuild
 }
 
 // ListCaseResults returns the cases of a run in submission order.

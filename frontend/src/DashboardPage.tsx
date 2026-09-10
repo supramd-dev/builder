@@ -14,7 +14,8 @@ interface Props {
 
 // DashboardPage renders the test result matrix: one row per test
 // environment, one column per recent git push (commit). Regression mode
-// shows pass/fail counts per run; unit mode shows passed/total.
+// shows pass/fail counts per run; unit mode shows passed/total; build mode
+// shows the build outcome per environment.
 export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props) {
   const [kind, setKind] = useState<DashboardKind>('regression')
   const [dash, setDash] = useState<Dashboard | null>(null)
@@ -77,13 +78,24 @@ export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props)
           >
             Unit tests
           </button>
+          <button
+            type="button"
+            className={'btn btn-sm dash-tab' + (kind === 'build' ? ' dash-tab-active' : '')}
+            role="tab"
+            aria-selected={kind === 'build'}
+            onClick={() => setKind('build')}
+          >
+            Build
+          </button>
         </div>
       </div>
 
       <p className="text-muted">
         {kind === 'regression'
           ? 'Regression test results from the test input repository: one row per recent git push (commit), one column per test environment. Click a result for details.'
-          : 'Unit tests: one row per recent git push (commit), one column per test environment. Click a result for details.'}
+          : kind === 'unit'
+            ? 'Unit tests: one row per recent git push (commit), one column per test environment. Click a result for details.'
+            : 'Build results per environment: one row per recent git push (commit), one column per test environment. Shows whether the code compiles on each environment — click a result for the build log.'}
       </p>
 
       {error && <div className="alert alert-danger">{error}</div>}
@@ -260,13 +272,21 @@ function RunCellView({
     )
   }
   const failed = cell.status === 'failed'
+  // Build runs have no case counts: the glyph alone carries the outcome.
   const label =
-    kind === 'regression'
-      ? `${failed ? '✗' : '✓'} ${cell.passed}/${cell.total}`
-      : `${cell.passed}/${cell.total}`
-  const title = `${cell.passed}/${cell.total} passed${
-    cell.failed > 0 ? `, ${cell.failed} failed` : ''
-  } — click for details`
+    kind === 'build'
+      ? failed
+        ? '✗ build'
+        : '✓ build'
+      : kind === 'regression'
+        ? `${failed ? '✗' : '✓'} ${cell.passed}/${cell.total}`
+        : `${cell.passed}/${cell.total}`
+  const title =
+    kind === 'build'
+      ? `Build ${failed ? 'failed' : 'succeeded'} — click for details`
+      : `${cell.passed}/${cell.total} passed${
+          cell.failed > 0 ? `, ${cell.failed} failed` : ''
+        } — click for details`
   return (
     <button
       type="button"

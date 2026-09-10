@@ -181,7 +181,7 @@ export async function updateSiteConfig(
 
 // --- Test dashboard ---
 
-export type DashboardKind = 'regression' | 'unit'
+export type DashboardKind = 'regression' | 'unit' | 'build'
 
 export interface DashboardEnvironment {
   id: number

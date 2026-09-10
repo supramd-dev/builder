@@ -192,6 +192,13 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 	if got.Status != store.TaskDone {
 		t.Fatalf("build should be done: %+v", got)
 	}
+	// The build outcome is recorded as a "build" test run for the dashboard.
+	buildRuns, _ := s.FindRunsByCommits(store.RunKindBuild,
+		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
+	bRun, ok := buildRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
+	if !ok || bRun.Status != store.StatusPassed {
+		t.Errorf("build run wrong: %+v", bRun)
+	}
 
 	// 3. unit + regression (both claimable, build done)
 	for _, want := range []string{store.TaskKindUnit, store.TaskKindRegression} {
@@ -284,6 +291,55 @@ func TestExecuteCloneFailureSkipsDownstream(t *testing.T) {
 	unit, ok := runs[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
 	if !ok || unit.Status != store.StatusFailed || !strings.Contains(unit.Summary, "skipped") {
 		t.Errorf("skipped unit run wrong: %+v", unit)
+	}
+}
+
+// TestExecuteBuildFailureRecordsFailedBuildRun makes the build fail and
+// asserts the failed build run lands (dashboard ✗) while the skipped test
+// stages still get their own rows.
+func TestExecuteBuildFailureRecordsFailedBuildRun(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
+	exec.outcome["cmake -DEXEC=1"] = 1
+	exec.output["cmake -DEXEC=1"] = "CMake Error at CMakeLists.txt:9 (message):\n  bad toolchain\n"
+
+	ctx := context.Background()
+	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
+		t.Fatal(err)
+	}
+	build, err := s.ClaimReadyTask()
+	if err != nil || build == nil || build.Kind != store.TaskKindBuild {
+		t.Fatalf("claim build: %v %v", build, err)
+	}
+	if err := svc.ExecuteTask(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := s.GetTask(build.ID)
+	if got.Status != store.TaskFailed {
+		t.Fatalf("build should be failed: %+v", got)
+	}
+
+	// The failed build recorded a failed "build" run with the compiler error.
+	envs := []int64{build.EnvironmentID}
+	commits := []int64{build.CommitID}
+	buildRuns, _ := s.FindRunsByCommits(store.RunKindBuild, envs, commits)
+	bRun, ok := buildRuns[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]
+	if !ok || bRun.Status != store.StatusFailed {
+		t.Fatalf("failed build run wrong: %+v", bRun)
+	}
+	if !strings.Contains(bRun.Summary, "CMake Error") {
+		t.Errorf("build summary should carry the compiler error: %q", bRun.Summary)
+	}
+
+	// Scheduler post-processing: the test stages are skipped with rows.
+	if err := s.SkipDependents(got.RootID, got.ID, "skipped: upstream task "+got.Name+" failed"); err != nil {
+		t.Fatal(err)
+	}
+	svc.recordSkippedRuns(got)
+	unitRuns, _ := s.FindRunsByCommits(store.RunKindUnit, envs, commits)
+	if unitRun, ok := unitRuns[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]; !ok ||
+		unitRun.Status != store.StatusFailed || !strings.Contains(unitRun.Summary, "skipped") {
+		t.Errorf("skipped unit run after build failure wrong: %+v", unitRun)
 	}
 }
 

@@ -156,7 +156,9 @@ func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 }
 
 // executeBuild implements the build sub-task: generate the build script and
-// run it in the code directory on the remote host.
+// run it in the code directory on the remote host. The outcome is recorded
+// as a "build" test run so the dashboard can show per-environment build
+// results next to the unit/regression kinds.
 func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	rc, ok := s.loadRootContext(task)
 	if !ok {
@@ -179,6 +181,20 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 
 	h := envToSSHHost(rc.env)
 	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
+	logw.Flush() // the build run's summary is derived from the persisted log
+
+	// Record the dashboard build run from the log tail (no per-case results).
+	output := s.readLogTail(task.ID)
+	status := store.StatusFailed
+	if res.ExitCode == 0 {
+		status = store.StatusPassed
+	}
+	summary := ExtractSummary(output, res.ExitCode)
+	if res.ExitCode < 0 {
+		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
+	}
+	s.recordStageRun(task, rc, status, summary)
+
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
 }
 

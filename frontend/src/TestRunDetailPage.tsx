@@ -58,7 +58,12 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
   }
 
   const failed = run.status === 'failed'
-  const kindLabel = run.kind === 'regression' ? 'Regression tests' : 'Unit tests'
+  const kindLabel =
+    run.kind === 'regression'
+      ? 'Regression tests'
+      : run.kind === 'build'
+        ? 'Build'
+        : 'Unit tests'
 
   return (
     <div>
