@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Clock, LoaderCircle } from 'lucide-react'
 import {
   getDashboard,
   type Dashboard,
@@ -245,17 +246,19 @@ function RunCellView({
       </span>
     )
   }
-  // Live task overlay (runId 0): the run has not been reported yet.
+  // Live task overlay (runId 0): the run has not been reported yet. Rendered
+  // as buttons: running in the accent color with a spinner, queued in gray
+  // with a clock; both click through to the task detail (live log view).
   if (cell.runId === 0) {
     if (cell.status === 'running') {
       return (
         <button
           type="button"
-          className="btn btn-sm dash-run dash-run-live"
+          className="btn btn-sm dash-run dash-run-live dash-run-running"
           title="Task graph running — click to follow the log"
           onClick={onOpen}
         >
-          running…
+          <LoaderCircle size={12} className="spin" /> running
         </button>
       )
     }
@@ -263,11 +266,11 @@ function RunCellView({
       return (
         <button
           type="button"
-          className="btn btn-sm dash-run dash-run-live"
+          className="btn btn-sm dash-run dash-run-live dash-run-queued"
           title="Task queued — click for details"
           onClick={onOpen}
         >
-          queued
+          <Clock size={12} /> queued
         </button>
       )
     }
@@ -419,7 +422,12 @@ function FullMatrix({
                       <div className="dash-full-cell">
                         <span className="dash-full-stages">
                           {stages.map((st) => (
-                            <FullStageView key={st.kind} stage={st} onOpenRun={onOpenRun} />
+                            <FullStageView
+                              key={st.kind}
+                              stage={st}
+                              onOpenRun={onOpenRun}
+                              onOpenStage={onOpenTask}
+                            />
                           ))}
                         </span>
                         {taskId ? (
@@ -453,15 +461,18 @@ function FullMatrix({
 }
 
 // FullStageView renders one stage pill (build/unit/regression) of the full
-// matrix: clickable to the run detail when a run exists, or showing the
-// live task state. A skipped stage (upstream failure, no run of its own)
-// renders amber "⤼ skipped" — distinct from a red hard failure.
+// matrix: clickable to the run detail when a run exists, or — for the live
+// running/queued states — to the task detail (pipeline log). A skipped stage
+// (upstream failure, no run of its own) renders amber "⤼ skipped" — distinct
+// from a red hard failure.
 function FullStageView({
   stage,
   onOpenRun,
+  onOpenStage,
 }: {
   stage: FullStage
   onOpenRun: (runId: number) => void
+  onOpenStage: (taskId: number) => void
 }) {
   const label =
     stage.kind === 'build' ? 'build' : stage.kind === 'unit' ? 'unit' : 'reg'
@@ -488,10 +499,19 @@ function FullStageView({
     )
   }
   if (stage.status === 'running' || stage.status === 'pending') {
+    const running = stage.status === 'running'
     return (
-      <span className={'dash-full-stage dash-full-live' + (failed ? ' dash-run-failed' : '')} title={title}>
-        {stage.status === 'running' ? 'running…' : 'queued'} {label}
-      </span>
+      <button
+        type="button"
+        className={
+          'btn btn-sm dash-full-stage dash-run ' +
+          (running ? 'dash-run-running' : 'dash-run-queued')
+        }
+        title={running ? 'Stage running — click to follow the log' : 'Stage queued — click for details'}
+        onClick={() => stage.taskId && onOpenStage(stage.taskId)}
+      >
+        {running ? <LoaderCircle size={11} className="spin" /> : <Clock size={11} />} {label}
+      </button>
     )
   }
   if (skipped) {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Clock, LoaderCircle } from 'lucide-react'
 import {
   getTask,
   getTaskLogs,
@@ -163,7 +164,15 @@ function SubTaskList({
               onClick={() => onSelect(sub.id)}
               title={sub.error || sub.name}
             >
-              <span className="task-step-status">{statusGlyph(sub.status)}</span>
+              <span className="task-step-status">
+                {sub.status === 'running' ? (
+                  <LoaderCircle size={13} className="spin" />
+                ) : sub.status === 'pending' ? (
+                  <Clock size={13} />
+                ) : (
+                  statusGlyph(sub.status)
+                )}
+              </span>
               <span className="task-step-name">{sub.name}</span>
               <span className={'text-muted task-step-kind task-kind-' + sub.kind}>
                 {sub.kind}

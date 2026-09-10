@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Clock, LoaderCircle } from 'lucide-react'
 import { getTask, type SubTask, type TaskDetail } from './api'
 
 interface Props {
@@ -144,11 +145,18 @@ export default function TaskGraphPage({ taskId, onBack, onOpenRun, onOpenLog }: 
                 title={runId ? 'Open the test details' : node.error || 'Open the task log'}
               >
                 <span className="graph-node-head">
-                  <span className="graph-node-status">{statusGlyph(status)}</span>
+                  <span className="graph-node-status">
+                    {statusIcon(status) ?? statusGlyph(status)}
+                  </span>
                   <span className="graph-node-name">{isRoot ? 'task' : node.name}</span>
                 </span>
-                <span className={'graph-node-kind task-kind-' + (!isRoot ? node.kind : 'root')}>
-                  {isRoot ? 'root' : node.kind}
+                <span className="graph-node-sub">
+                  <span className={'graph-node-kind task-kind-' + (!isRoot ? node.kind : 'root')}>
+                    {isRoot ? 'root' : node.kind}
+                  </span>
+                  {(status === 'pending' || status === 'running') && (
+                    <span className={'graph-node-state text-' + status}>{status}</span>
+                  )}
                 </span>
               </button>
             )
@@ -261,4 +269,16 @@ function statusGlyph(status: string): string {
     default:
       return '·'
   }
+}
+
+// statusIcon renders the live-state icons: a spinner for running nodes, a
+// clock for pending ones (the terminal states keep the text glyphs above).
+function statusIcon(status: string) {
+  if (status === 'running') {
+    return <LoaderCircle size={13} className="spin" />
+  }
+  if (status === 'pending') {
+    return <Clock size={13} />
+  }
+  return null
 }

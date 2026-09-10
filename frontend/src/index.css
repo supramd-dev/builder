@@ -595,13 +595,50 @@ footer .text-muted {
 /* Live job overlay cells: queued / running states, muted; the failure
    variant reuses the failure color as plain text. */
 .dash-run-live {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
   min-width: 4.5rem;
 }
 
 .dash-run-live.dash-run-failed {
   color: var(--danger);
   font-weight: 600;
+}
+
+/* Live-state pills: running in the accent color, queued in gray. */
+.dash-run-running {
+  background: var(--btn-primary-bg);
+  border-color: var(--btn-primary-border);
+  color: #fff;
+}
+
+.dash-run-running:hover {
+  background: var(--btn-primary-hover);
+  filter: none;
+}
+
+.dash-run-queued {
+  background: var(--btn-default-bg);
+  border-color: var(--btn-default-border);
+  color: var(--text);
+  opacity: 0.85;
+}
+
+/* Spinner animation for the running icons (dashboard pills, graph nodes,
+   task detail steps). */
+.spin {
+  animation: spin 1.2s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* Row headers: commit cells — short sha, author · date, commit title. */
@@ -710,6 +747,18 @@ footer .text-muted {
   display: inline-block;
   font-size: 0.72rem;
   color: var(--muted);
+}
+
+/* Full-matrix live stage pills reuse dash-run-running / dash-run-queued;
+   keep the compact pill sizing. */
+.btn.dash-full-stage.dash-run-running,
+.btn.dash-full-stage.dash-run-queued {
+  font-size: 0.72rem;
+  padding: 0 0.3rem;
+  line-height: 1.4;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
 }
 
 .dash-full-stage.dash-full-live.dash-run-failed {
@@ -1067,6 +1116,39 @@ code {
   color: var(--muted);
 }
 
+/* Second row of a graph node: the kind label plus, for live states, the
+   state word next to it (running in the accent color, pending muted). */
+.graph-node-sub {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.graph-node-state {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.graph-node-state.text-running {
+  color: var(--link);
+}
+
+.graph-node-state.text-pending {
+  color: var(--muted);
+}
+
+.graph-node-running .graph-node-status {
+  color: var(--link);
+}
+
+.graph-node-pending .graph-node-status {
+  color: var(--muted);
+}
+
 .graph-node-done {
   border-color: var(--success);
 }
@@ -1090,10 +1172,6 @@ code {
 
 .graph-node-skipped .graph-node-status {
   color: var(--warn);
-}
-
-.graph-node-running .graph-node-status {
-  color: var(--link);
 }
 
 .graph-node-root {
