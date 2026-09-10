@@ -196,6 +196,7 @@ export interface DashboardCommit {
   sha: string
   shortSha: string
   repo: string
+  repoUrl?: string
   ref: string
   author: string
   message: string
@@ -362,6 +363,7 @@ export interface TaskCommit {
   sha: string
   shortSha: string
   repo: string
+  repoUrl?: string
   ref: string
   author: string
   message: string

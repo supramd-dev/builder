@@ -35,6 +35,7 @@ type commitJSON struct {
 	SHA      string `json:"sha"`
 	ShortSHA string `json:"shortSha"`
 	Repo     string `json:"repo"`
+	RepoURL  string `json:"repoUrl,omitempty"` // web URL of the repository, when derivable
 	Ref      string `json:"ref"`
 	Author   string `json:"author"`
 	Message  string `json:"message"`
@@ -171,7 +172,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 	for i := range commits {
 		commit := &commits[i]
 		row := dashboardRowJSON{
-			Commit: toCommitJSON(commit),
+			Commit: s.toCommitJSON(commit),
 			Cells:  make([]*runCellJSON, len(envs)),
 		}
 		for j := range envs {
@@ -309,7 +310,7 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 	for i := range commits {
 		commit := &commits[i]
 		row := fullRowJSON{
-			Commit:  toCommitJSON(commit),
+			Commit:  s.toCommitJSON(commit),
 			Stages:  map[int64][]fullStageJSON{},
 			TaskIDs: map[int64]int64{},
 		}
@@ -669,17 +670,50 @@ func shortSHA(sha string) string {
 	return sha
 }
 
-func toCommitJSON(c *store.Commit) commitJSON {
+func (s *Server) toCommitJSON(c *store.Commit) commitJSON {
 	return commitJSON{
 		ID:       c.ID,
 		SHA:      c.SHA,
 		ShortSHA: shortSHA(c.SHA),
 		Repo:     c.Repo,
+		RepoURL:  s.repoWebURL(c.Repo),
 		Ref:      c.Ref,
 		Author:   c.Author,
 		Message:  c.Message,
 		PushedAt: c.PushedAt.UTC().Format(time.RFC3339),
 	}
+}
+
+// repoWebURL turns a repository location — the site config's codeRepo or a
+// webhook's path_with_namespace — into the web URL hosting it, so dashboard
+// commit cells can link to the actual repository. Falls back to "" when the
+// host is unknown (a bare "group/project" path).
+func (s *Server) repoWebURL(repo string) string {
+	loc := strings.TrimSpace(repo)
+	if loc == "" {
+		return ""
+	}
+	// A full http(s) URL: drop a trailing .git and use it as-is.
+	if strings.HasPrefix(loc, "http://") || strings.HasPrefix(loc, "https://") {
+		return strings.TrimSuffix(strings.TrimSuffix(loc, "/"), ".git")
+	}
+	// Otherwise resolve the host from the site config's codeRepo, if it
+	// names the same repository. The webhook stores the bare
+	// "group/project" path (RepoPath of a URL), so compare the config's
+	// path both against loc itself and against RepoPath(loc).
+	if cfg, err := s.Store.GetSiteConfig(); err == nil && cfg.CodeRepo != "" {
+		cfgPath := store.RepoPath(cfg.CodeRepo)
+		if cfgPath == loc || cfgPath == store.RepoPath(loc) {
+			return strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(cfg.CodeRepo), "/"), ".git")
+		}
+	}
+	// Try to at least keep an scp-style host: git@host:group/project.
+	if i := strings.IndexByte(loc, '@'); i >= 0 {
+		if j := strings.IndexByte(loc[i:], ':'); j > 0 {
+			return "https://" + loc[i+1:i+j] + "/" + strings.TrimSuffix(loc[i+j+1:], ".git")
+		}
+	}
+	return ""
 }
 
 // toRunCellJSON renders a recorded run as a matrix cell. status is the
@@ -731,6 +765,11 @@ func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON
 		cell.Status = "pending"
 	case store.TaskRunning:
 		cell.Status = "running"
+	case store.TaskSkipped:
+		// The stage never ran: an upstream task failed (the runner's
+		// skip-dependents path). Displayed like a run-level skipped.
+		cell.Status = "skipped"
+		cell.Error = errMsg
 	default: // stage/root failed (or finished without a report)
 		cell.Status = store.StatusFailed
 		cell.Error = errMsg

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Clock, LoaderCircle } from 'lucide-react'
+import { LoaderCircle } from 'lucide-react'
 import {
   getTask,
   getTaskLogs,
@@ -7,15 +7,17 @@ import {
   type TaskDetail,
   type TaskStatus,
 } from './api'
+import { TaskStatusText, commitUrl } from './StatusViews'
 
 interface Props {
   taskId: number
   onBack: () => void
 }
 
-// TaskDetailPage renders one task graph: the root's status and context, the
-// sub-task pipeline (clone → build → tests) with each stage's state, and the
-// selected sub-task's log, following a running task incrementally.
+// TaskDetailPage renders one task's pipeline log in the sr.ht build style:
+// the title (task number, commit, environment), a summary line (author,
+// ref, tags), the job status in color, the pipeline step list and the
+// selected step's log, following a running task incrementally.
 export default function TaskDetailPage({ taskId, onBack }: Props) {
   const [task, setTask] = useState<TaskDetail | null>(null)
   const [error, setError] = useState('')
@@ -51,30 +53,6 @@ export default function TaskDetailPage({ taskId, onBack }: Props) {
     }
   }, [taskId])
 
-  if (error) {
-    return (
-      <div>
-        <p>
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault()
-              onBack()
-            }}
-          >
-            ← Back to dashboard
-          </a>
-        </p>
-        <div className="alert alert-danger">{error}</div>
-      </div>
-    )
-  }
-  if (!task) {
-    return <p className="text-muted">Loading…</p>
-  }
-
-  const live = task.status === 'pending' || task.status === 'running'
-
   return (
     <div>
       <p>
@@ -89,47 +67,69 @@ export default function TaskDetailPage({ taskId, onBack }: Props) {
         </a>
       </p>
 
-      <h2>
-        Task #{task.id} <TaskStatusBadge status={task.status} />
-      </h2>
+      {error ? (
+        <div className="alert alert-danger">{error}</div>
+      ) : !task ? (
+        <p className="text-muted">Loading…</p>
+      ) : (
+        <TaskDetail task={task} selected={selected} onSelect={setSelected} />
+      )}
+    </div>
+  )
+}
 
-      <dl className="task-meta">
-        <dt>Commit</dt>
-        <dd>
-          {task.commit ? (
-            <>
-              <code>{task.commit.shortSha}</code>
-              {task.commit.message && <span className="text-muted"> — {task.commit.message}</span>}
-              <span className="text-muted"> · {task.commit.author}</span>
-            </>
-          ) : (
-            <span className="text-muted">#{task.commitId}</span>
-          )}
-        </dd>
-        <dt>Environment</dt>
-        <dd>
-          {task.environment ? (
-            <>
-              {task.environment.name}
-              {task.tags && <span className="text-muted"> · tags: {task.tags}</span>}
-            </>
-          ) : (
-            <span className="text-muted">#{task.environmentId}</span>
-          )}
-        </dd>
-        {task.error && (
+function TaskDetail({
+  task,
+  selected,
+  onSelect,
+}: {
+  task: TaskDetail
+  selected: number | null
+  onSelect: (id: number) => void
+}) {
+  const live = task.status === 'pending' || task.status === 'running'
+  return (
+    <div>
+      {/* Title: task number, commit link, environment. */}
+      <h2 className="task-title">
+        Task #{task.id}
+        {task.commit && (
           <>
-            <dt>Error</dt>
-            <dd className="task-error">{task.error}</dd>
+            {' · '}
+            {commitUrl(task.commit.repoUrl, task.commit.sha) ? (
+              <a
+                href={commitUrl(task.commit.repoUrl, task.commit.sha)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <code>{task.commit.shortSha}</code>
+              </a>
+            ) : (
+              <code>{task.commit.shortSha}</code>
+            )}
+            {task.commit.message && <span className="text-muted"> — {task.commit.message}</span>}
           </>
         )}
-      </dl>
+        {task.environment && <span className="text-muted"> on {task.environment.name}</span>}
+      </h2>
+
+      {/* Summary: author, ref, tags — then the job status in color. */}
+      <div className="task-summary text-muted">
+        {task.commit && (
+          <>
+            {task.commit.author} pushed to <code>{task.commit.ref}</code> ·{' '}
+          </>
+        )}
+        {task.tags && <>tags: {task.tags} · </>}
+        <TaskStatusText status={task.status} />
+      </div>
+      {task.error && <p className="task-error">{task.error}</p>}
 
       {task.subTasks && task.subTasks.length > 0 && (
         <SubTaskList
           subs={task.subTasks}
           selected={selected}
-          onSelect={setSelected}
+          onSelect={onSelect}
         />
       )}
 
@@ -138,8 +138,8 @@ export default function TaskDetailPage({ taskId, onBack }: Props) {
   )
 }
 
-// SubTaskList renders the graph's stages as a vertical step list in
-// dependency (creation) order.
+// SubTaskList renders the graph's stages as a compact step list in
+// dependency (creation) order: glyph + name + kind + status word.
 function SubTaskList({
   subs,
   selected,
@@ -151,33 +151,35 @@ function SubTaskList({
 }) {
   return (
     <section>
-      <h3 style={{ marginBottom: '0.5rem' }}>Pipeline</h3>
+      <h3 className="task-section-title">Pipeline</h3>
       <ol className="task-steps">
         {subs.map((sub) => (
           <li key={sub.id}>
             <button
               type="button"
               className={
-                'btn btn-sm task-step' +
+                'task-step' +
                 (selected === sub.id ? ' task-step-selected' : '')
               }
               onClick={() => onSelect(sub.id)}
               title={sub.error || sub.name}
             >
-              <span className="task-step-status">
+              <span className={
+                'task-step-status ' +
+                (sub.status === 'done' ? 'text-success'
+                  : sub.status === 'failed' ? 'text-danger'
+                    : sub.status === 'skipped' ? 'text-warn'
+                      : sub.status === 'running' ? 'text-run' : 'text-muted')
+              }>
                 {sub.status === 'running' ? (
                   <LoaderCircle size={13} className="spin" />
-                ) : sub.status === 'pending' ? (
-                  <Clock size={13} />
                 ) : (
                   statusGlyph(sub.status)
                 )}
               </span>
               <span className="task-step-name">{sub.name}</span>
-              <span className={'text-muted task-step-kind task-kind-' + sub.kind}>
-                {sub.kind}
-              </span>
-              <TaskStatusBadge status={sub.status} />
+              <span className="text-muted task-step-kind">{sub.kind}</span>
+              <TaskStatusText status={sub.status} />
             </button>
           </li>
         ))}
@@ -240,7 +242,7 @@ function TaskLogView({ taskId, live }: { taskId: number; live: boolean }) {
 
   return (
     <section>
-      <h3 style={{ marginBottom: '0.5rem' }}>
+      <h3 className="task-section-title">
         Log {live && <span className="text-muted">(following…)</span>}
       </h3>
       <pre
@@ -258,10 +260,6 @@ function TaskLogView({ taskId, live }: { taskId: number; live: boolean }) {
   )
 }
 
-function TaskStatusBadge({ status }: { status: TaskStatus }) {
-  return <span className={'task-badge task-badge-' + status}>{status}</span>
-}
-
 function statusGlyph(status: TaskStatus): string {
   switch (status) {
     case 'done':
@@ -270,8 +268,6 @@ function statusGlyph(status: TaskStatus): string {
       return '✗'
     case 'skipped':
       return '⤼'
-    case 'running':
-      return '▶'
     default:
       return '·'
   }

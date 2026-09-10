@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Clock, LoaderCircle } from 'lucide-react'
+import { LoaderCircle } from 'lucide-react'
 import { getTask, type SubTask, type TaskDetail } from './api'
+import { TaskStatusText, commitUrl } from './StatusViews'
 
 interface Props {
   taskId: number
@@ -14,15 +15,16 @@ interface Props {
 }
 
 // NODE_W/NODE_H size the graph nodes; GAP_X/GAP_Y the layer spacing.
-const NODE_W = 190
-const NODE_H = 58
-const GAP_X = 64
-const GAP_Y = 26
+const NODE_W = 180
+const NODE_H = 44
+const GAP_X = 56
+const GAP_Y = 22
 
-// TaskGraphPage renders a task graph as a GitHub-Actions-style dependency
-// graph: the root on the left, the sub-tasks layered by dependency depth,
-// edges drawn between the columns. Clicking a node opens its detail:
-// the stage's live log (every node) or the recorded run (test stages).
+// TaskGraphPage renders a task graph in the sr.ht build style: a title, a
+// short summary (commit, environment), the pipeline status, then the
+// dependency graph itself — the root on the left, the sub-tasks layered by
+// dependency depth, edges drawn between the columns. Clicking a node opens
+// its detail (the stage's live log or the recorded run).
 export default function TaskGraphPage({ taskId, onBack, onOpenRun, onOpenLog }: Props) {
   const [task, setTask] = useState<TaskDetail | null>(null)
   const [error, setError] = useState('')
@@ -51,28 +53,40 @@ export default function TaskGraphPage({ taskId, onBack, onOpenRun, onOpenLog }: 
     }
   }, [taskId])
 
-  if (error) {
-    return (
-      <div>
-        <p>
-          <a
-            href="#"
-            onClick={(e) => {
-              e.preventDefault()
-              onBack()
-            }}
-          >
-            ← Back to dashboard
-          </a>
-        </p>
-        <div className="alert alert-danger">{error}</div>
-      </div>
-    )
-  }
-  if (!task) {
-    return <p className="text-muted">Loading…</p>
-  }
+  return (
+    <div>
+      <p>
+        <a
+          href="#"
+          onClick={(e) => {
+            e.preventDefault()
+            onBack()
+          }}
+        >
+          ← Back to dashboard
+        </a>
+      </p>
 
+      {error ? (
+        <div className="alert alert-danger">{error}</div>
+      ) : !task ? (
+        <p className="text-muted">Loading…</p>
+      ) : (
+        <TaskGraph task={task} onOpenRun={onOpenRun} onOpenLog={onOpenLog} />
+      )}
+    </div>
+  )
+}
+
+function TaskGraph({
+  task,
+  onOpenRun,
+  onOpenLog,
+}: {
+  task: TaskDetail
+  onOpenRun: (runId: number) => void
+  onOpenLog: (taskId: number) => void
+}) {
   const root = task.kind === 'root' ? task : null
   const subs = task.subTasks ?? []
   const layers = layerGraph(subs)
@@ -89,24 +103,48 @@ export default function TaskGraphPage({ taskId, onBack, onOpenRun, onOpenLog }: 
 
   return (
     <div>
-      <p>
-        <a
-          href="#"
-          onClick={(e) => {
-            e.preventDefault()
-            onBack()
-          }}
-        >
-          ← Back to dashboard
-        </a>
-      </p>
-
-      <h2>
-        Task #{task.id} · {task.commit ? <code>{task.commit.shortSha}</code> : `#${task.commitId}`}
+      {/* Title: task number, commit, environment, status. */}
+      <h2 className="task-title">
+        Task #{task.id}
+        {task.commit && (
+          <>
+            {' · '}
+            {commitUrl(task.commit.repoUrl, task.commit.sha) ? (
+              <a
+                href={commitUrl(task.commit.repoUrl, task.commit.sha)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <code>{task.commit.shortSha}</code>
+              </a>
+            ) : (
+              <code>{task.commit.shortSha}</code>
+            )}
+            {task.commit.message && <span className="text-muted"> — {task.commit.message}</span>}
+          </>
+        )}
         {task.environment && <span className="text-muted"> on {task.environment.name}</span>}
       </h2>
+
+      {/* Summary: commit author/ref, environment tags, error when failed. */}
+      <div className="task-summary text-muted">
+        {task.commit && (
+          <>
+            {task.commit.author} pushed to <code>{task.commit.ref}</code> ·{' '}
+          </>
+        )}
+        {task.environment && (
+          <>
+            {task.environment.name}
+            {task.tags && <> · tags: {task.tags}</>}
+          </>
+        )}
+        {' · '}
+        <TaskStatusText status={task.status} />
+      </div>
       {task.error && <p className="task-error">{task.error}</p>}
 
+      {/* The dependency graph. */}
       <div className="graph-scroll">
         <div
           className="graph-canvas"
@@ -146,14 +184,13 @@ export default function TaskGraphPage({ taskId, onBack, onOpenRun, onOpenLog }: 
               >
                 <span className="graph-node-head">
                   <span className="graph-node-status">
-                    {statusIcon(status) ?? statusGlyph(status)}
+                    {status === 'running' ? (
+                      <LoaderCircle size={13} className="spin" />
+                    ) : (
+                      nodeGlyph(status)
+                    )}
                   </span>
                   <span className="graph-node-name">{isRoot ? 'task' : node.name}</span>
-                </span>
-                <span className="graph-node-sub">
-                  <span className={'graph-node-kind task-kind-' + (!isRoot ? node.kind : 'root')}>
-                    {isRoot ? 'root' : node.kind}
-                  </span>
                   {(status === 'pending' || status === 'running') && (
                     <span className={'graph-node-state text-' + status}>{status}</span>
                   )}
@@ -256,7 +293,7 @@ function edges(
   return out
 }
 
-function statusGlyph(status: string): string {
+function nodeGlyph(status: string): string {
   switch (status) {
     case 'done':
       return '✓'
@@ -264,21 +301,7 @@ function statusGlyph(status: string): string {
       return '✗'
     case 'skipped':
       return '⤼'
-    case 'running':
-      return '▶'
     default:
       return '·'
   }
-}
-
-// statusIcon renders the live-state icons: a spinner for running nodes, a
-// clock for pending ones (the terminal states keep the text glyphs above).
-function statusIcon(status: string) {
-  if (status === 'running') {
-    return <LoaderCircle size={13} className="spin" />
-  }
-  if (status === 'pending') {
-    return <Clock size={13} />
-  }
-  return null
 }

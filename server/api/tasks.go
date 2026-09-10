@@ -114,7 +114,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, id int64) {
 
 	// Commit / environment context (null when the row was deleted).
 	if commit, err := s.Store.GetCommitByID(task.CommitID); err == nil {
-		cj := toCommitJSON(commit)
+		cj := s.toCommitJSON(commit)
 		detail.Commit = &cj
 	}
 	if env, err := s.Store.GetEnvironmentAny(task.EnvironmentID); err == nil {

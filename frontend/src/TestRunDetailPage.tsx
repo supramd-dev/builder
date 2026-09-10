@@ -12,9 +12,9 @@ interface Props {
   onError: (message: string) => void
 }
 
-// TestRunDetailPage shows one test run: the environment, the commit, the
-// pass/fail summary and the per-case results (name, status, error, note).
-// Each case links to a detail page (currently a placeholder).
+// TestRunDetailPage shows one test run in the sr.ht build style: the title
+// (kind, status in color), a summary block (environment, commit, results,
+// time), the run's one-paragraph conclusion and the per-case results.
 export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }: Props) {
   const [run, setRun] = useState<TestRunDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -59,23 +59,50 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
 
   const failed = run.status === 'failed'
   const skipped = run.status === 'skipped'
+  const statusCls = failed ? 'text-danger' : skipped ? 'text-warn' : 'text-success'
+  const statusText = failed ? '✗ failed' : skipped ? '⤼ skipped' : '✓ passed'
   const kindLabel =
-    run.kind === 'regression'
-      ? 'Regression tests'
-      : run.kind === 'build'
-        ? 'Build'
-        : 'Unit tests'
+    run.kind === 'regression' ? 'Regression tests' : run.kind === 'build' ? 'Build' : 'Unit tests'
 
   return (
     <div>
       <BackLink onBack={onBack} />
 
-      <h2>
-        {kindLabel} —{' '}
-        <span className={failed ? 'text-danger' : skipped ? 'text-warn' : 'text-success'}>
-          {failed ? '✗ failed' : skipped ? '⤼ skipped' : '✓ passed'}
-        </span>
+      {/* Title: kind + status in color. */}
+      <h2 className="task-title">
+        {kindLabel} · <span className={statusCls}>{statusText}</span>
+        {run.commitShortSha && (
+          <>
+            {' · '}
+            <code>{run.commitShortSha}</code>
+          </>
+        )}
+        {run.environmentName && <span className="text-muted"> on {run.environmentName}</span>}
       </h2>
+
+      {/* Summary: commit, author, results, time. */}
+      <div className="task-summary text-muted">
+        {run.commitMessage && <>{run.commitMessage} · </>}
+        {run.commitAuthor && <>{run.commitAuthor} · </>}
+        {skipped ? (
+          <span className="text-warn">not executed (upstream failure)</span>
+        ) : (
+          <>
+            <span className={failed ? 'text-danger' : 'text-success'}>
+              {run.passed}/{run.total} passed
+            </span>
+            {run.failed > 0 && <span className="text-danger"> ({run.failed} failed)</span>}
+          </>
+        )}
+        {run.startedAt && (
+          <>
+            {' · '}
+            {formatTime(run.startedAt)}
+            {run.finishedAt ? ` → ${formatTime(run.finishedAt)}` : ''}
+          </>
+        )}
+      </div>
+
       {skipped && (
         <p className="dash-skip-note">
           This stage was skipped: an upstream task failed before it could run,
@@ -84,62 +111,9 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
         </p>
       )}
 
-      <div className="event">
-        {run.summary && <p className="dash-run-summary">{run.summary}</p>}
-        <dl className="dash-summary">
-          <div>
-            <dt>Environment</dt>
-            <dd>{run.environmentName ?? <span className="text-muted">(deleted)</span>}</dd>
-          </div>
-          <div>
-            <dt>Commit</dt>
-            <dd>
-              {run.commitShortSha ? (
-                <>
-                  <code>{run.commitShortSha}</code>
-                  {run.commitMessage && (
-                    <span className="text-muted"> — {run.commitMessage}</span>
-                  )}
-                </>
-              ) : (
-                <span className="text-muted">(unknown)</span>
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt>Author</dt>
-            <dd>{run.commitAuthor ?? <span className="text-muted">—</span>}</dd>
-          </div>
-          <div>
-            <dt>Results</dt>
-            <dd>
-              {skipped ? (
-                <span className="text-warn">not executed (upstream failure)</span>
-              ) : (
-                <>
-                  <span className={failed ? 'text-danger' : 'text-success'}>
-                    {run.passed}/{run.total} passed
-                  </span>
-                  {run.failed > 0 && (
-                    <span className="text-danger"> ({run.failed} failed)</span>
-                  )}
-                </>
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt>Time</dt>
-            <dd className="text-muted">
-              {run.startedAt ? formatTime(run.startedAt) : '—'}
-              {run.finishedAt && run.startedAt
-                ? ` → ${formatTime(run.finishedAt)}`
-                : ''}
-            </dd>
-          </div>
-        </dl>
-      </div>
+      {run.summary && <pre className="dash-run-summary">{run.summary}</pre>}
 
-      <h3>Test cases</h3>
+      <h3 className="task-section-title">Test cases</h3>
       {run.cases.length === 0 ? (
         <p className="text-muted">
           No per-case results were reported for this run — see the summary

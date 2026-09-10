@@ -231,6 +231,10 @@ a.nav-link, a.brand, a.btn {
   color: var(--warn) !important;
 }
 
+.text-run {
+  color: var(--link) !important;
+}
+
 /* Run detail: the explanation shown when a stage was skipped because an
    upstream task failed. */
 .dash-skip-note {
@@ -542,7 +546,7 @@ footer .text-muted {
 
 /* --- Test dashboard matrix --- */
 
-/* Tabs to switch between the regression and unit dashboards. */
+/* Tabs to switch between the full / build / unit / regression dashboards. */
 .dash-tabs {
   display: inline-flex;
   gap: 0.25rem;
@@ -565,101 +569,48 @@ footer .text-muted {
   overflow-x: auto;
 }
 
+/* Compact matrix: one row per commit, tight vertical padding. */
 .dash-matrix {
   margin-bottom: 1rem;
+  font-size: 0.875rem;
 }
 
 .dash-matrix thead th {
-  border: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   background: var(--bg-alt);
+  text-align: left;
   vertical-align: bottom;
-  padding: 0.25rem 0.5rem;
-}
-
-/* Column headers: environment names, with tags underneath. */
-.dash-matrix thead th {
-  text-align: center;
-  vertical-align: bottom;
+  padding: 0.2rem 0.5rem;
 }
 
 .dash-env-head {
-  min-width: 6rem;
+  min-width: 5rem;
+  white-space: nowrap;
 }
 
-.dash-env-tags {
-  display: block;
-  font-size: 0.75rem;
-  font-weight: 400;
-}
-
-/* Live job overlay cells: queued / running states, muted; the failure
-   variant reuses the failure color as plain text. */
-.dash-run-live {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.3rem;
-  min-width: 4.5rem;
-}
-
-.dash-run-live.dash-run-failed {
-  color: var(--danger);
-  font-weight: 600;
-}
-
-/* Live-state pills: running in the accent color, queued in gray. */
-.dash-run-running {
-  background: var(--btn-primary-bg);
-  border-color: var(--btn-primary-border);
-  color: #fff;
-}
-
-.dash-run-running:hover {
-  background: var(--btn-primary-hover);
-  filter: none;
-}
-
-.dash-run-queued {
-  background: var(--btn-default-bg);
-  border-color: var(--btn-default-border);
-  color: var(--text);
-  opacity: 0.85;
-}
-
-/* Spinner animation for the running icons (dashboard pills, graph nodes,
-   task detail steps). */
-.spin {
-  animation: spin 1.2s linear infinite;
-}
-
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-/* Row headers: commit cells — short sha, author · date, commit title. */
-.dash-matrix tbody th.dash-commit-cell {
-  border: 1px solid var(--border);
-  background: var(--bg-alt);
+/* Row header: the commit cell — linked sha, author, date on one line,
+   the message truncated beneath. */
+.dash-matrix tbody td.dash-commit-cell {
+  border-bottom: 1px solid var(--border-light);
   text-align: left;
-  padding: 0.25rem 0.5rem;
-  font-weight: 500;
-  min-width: 8rem;
-  max-width: 16rem;
+  padding: 0.15rem 0.5rem;
+  white-space: nowrap;
+  max-width: 22rem;
+}
+
+.dash-commit-cell .dash-commit-line1 {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  min-width: 0;
 }
 
 .dash-commit-cell .dash-sha {
-  display: block;
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
 }
 
-.dash-commit-cell .dash-commit-meta {
-  display: block;
+.dash-commit-cell .dash-commit-date {
   font-size: 0.8rem;
 }
 
@@ -669,159 +620,95 @@ footer .text-muted {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 16rem;
+  max-width: 22rem;
 }
 
 .dash-cell {
-  text-align: center;
-  padding: 0.2rem 0.4rem;
-}
-
-/* A run cell button: green when passed, red when failed. */
-.btn.dash-run {
-  min-width: 4.5rem;
-}
-
-.dash-run-passed {
-  background: var(--success);
-  border-color: var(--btn-default-border);
-  color: #fff;
-}
-
-.dash-run-passed:hover {
-  filter: brightness(1.1);
-}
-
-.dash-run-failed {
-  background: var(--danger);
-  border-color: var(--btn-default-border);
-  color: #fff;
-}
-
-.dash-run-failed:hover {
-  filter: brightness(1.1);
-}
-
-/* Skipped stage pill: amber, distinct from a red hard failure — the stage
-   never ran because an upstream stage failed. */
-.dash-run-skipped {
-  background: var(--warn);
-  border-color: var(--btn-default-border);
-  color: #fff;
-}
-
-.dash-run-skipped:hover {
-  filter: brightness(1.1);
+  text-align: left;
+  padding: 0.15rem 0.5rem;
+  border-bottom: 1px solid var(--border-light);
+  white-space: nowrap;
 }
 
 .dash-no-run {
   display: inline-block;
-  min-width: 4.5rem;
+  min-width: 1.5rem;
 }
 
-/* Full dashboard: one compact row of stage pills (build / unit / regression)
-   with the graph link centered beneath, inside one matrix cell. */
-.dash-full-cell {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.15rem;
-  min-width: 8.5rem;
-}
-
-.dash-full-stages {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 0.25rem;
-  white-space: nowrap;
-}
-
-.btn.dash-full-stage {
-  font-size: 0.72rem;
-  padding: 0 0.3rem;
-  line-height: 1.4;
-}
-
-.dash-full-stage.dash-full-live {
-  display: inline-block;
-  font-size: 0.72rem;
-  color: var(--muted);
-}
-
-/* Full-matrix live stage pills reuse dash-run-running / dash-run-queued;
-   keep the compact pill sizing. */
-.btn.dash-full-stage.dash-run-running,
-.btn.dash-full-stage.dash-run-queued {
-  font-size: 0.72rem;
-  padding: 0 0.3rem;
-  line-height: 1.4;
+/* Stage statuses: plain colored text, no pills, no borders. */
+.dash-st {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
-.dash-full-stage.dash-full-live.dash-run-failed {
+a.dash-st {
+  text-decoration: none;
+}
+
+a.dash-st:hover {
+  text-decoration: underline;
+}
+
+.dash-st-ok {
+  color: var(--success);
+}
+
+.dash-st-fail {
   color: var(--danger);
-  font-weight: 600;
 }
 
-.dash-full-stage.dash-full-live.dash-full-skipped {
+.dash-st-skip {
   color: var(--warn);
-  font-weight: 600;
 }
 
-/* The graph link: plain centered text, not a button. */
-a.dash-full-graph {
-  font-size: 0.72rem;
+.dash-st-run {
   color: var(--link);
+}
+
+.dash-st-pending {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* Full-matrix cell: the three stage statuses side by side (labeled), the
+   graph link after them. */
+.dash-full-cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.dash-full-stage {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+}
+
+.dash-full-kind {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.78rem;
+}
+
+a.dash-full-graph {
+  color: var(--link);
+  font-size: 0.78rem;
 }
 
 /* Run detail: the one-paragraph conclusion reported by the worker. */
 .dash-run-summary {
-  margin: 0 0 0.5rem 0;
+  margin: 0 0 0.75rem 0;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-alt);
+  border: 1px solid var(--border-light);
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   white-space: pre-wrap;
-}
-
-/* Environment tag badges in the user center list. */
-.env-tags {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 0.2rem;
-}
-
-.env-tag {
-  display: inline-block;
-  font-size: 0.75rem;
-  padding: 0 0.3rem;
-  border: 1px solid var(--border);
-  background: var(--bg-alt);
-  color: var(--muted);
-  border-radius: 0;
-}
-
-/* Run detail: definition list of the summary fields. */
-.dash-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0 2rem;
-  margin: 0;
-}
-
-.dash-summary > div {
-  min-width: 10rem;
-  margin-bottom: 0.5rem;
-}
-
-.dash-summary dt {
-  font-weight: 600;
-}
-
-.dash-summary dd {
-  margin: 0;
+  word-break: break-word;
 }
 
 /* Clickable case rows in the run detail table. */
@@ -962,21 +849,38 @@ code {
   margin-left: 1rem;
 }
 
-/* Task detail: root metadata, pipeline step list and the log panel. */
-.task-meta {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  column-gap: 1rem;
-  row-gap: 0.25rem;
-  margin: 0 0 1rem 0;
+/* Task pages (graph / detail / run detail), sr.ht build style: a title
+   line, a gray summary line, the job status in color, then the content. */
+.task-title {
+  margin-bottom: 0.25rem;
 }
 
-.task-meta dt {
+.task-title code {
+  font-size: 0.9em;
+}
+
+.task-summary {
+  margin: 0 0 0.75rem 0;
+  font-size: 0.875rem;
+}
+
+.task-status-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 600;
+  color: var(--muted) !important;
+}
+
+.task-status-text.text-success,
+.task-status-text.text-danger,
+.task-status-text.text-warn,
+.task-status-text.text-run {
   font-weight: 600;
 }
 
-.task-meta dd {
-  margin: 0;
+.task-section-title {
+  margin-bottom: 0.5rem;
 }
 
 .task-error {
@@ -990,18 +894,38 @@ code {
   margin: 0 0 1rem 0;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.15rem;
+  font-size: 0.875rem;
 }
 
 .task-steps li {
   margin: 0;
 }
 
+/* A pipeline step row: a flat text button (sr.ht style), highlighted when
+   its log is the one shown below. */
 .task-step {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
   text-align: left;
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  padding: 0.1rem 0.5rem;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.task-step:hover {
+  background: var(--bg-alt);
+}
+
+.task-step-selected,
+.task-step-selected:hover {
+  border-left-color: var(--btn-primary-bg);
+  background: var(--bg-alt);
 }
 
 .task-step-status {
@@ -1014,38 +938,6 @@ code {
 
 .task-step-kind {
   font-size: 0.8rem;
-}
-
-.task-badge {
-  display: inline-block;
-  padding: 0.05rem 0.45rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  border: 1px solid var(--border);
-  color: var(--muted);
-}
-
-.task-badge-done {
-  background: var(--success);
-  border-color: var(--success);
-  color: #fff;
-}
-
-.task-badge-failed {
-  background: var(--danger);
-  border-color: var(--danger);
-  color: #fff;
-}
-
-.task-badge-running {
-  color: var(--link);
-  border-color: var(--link);
-}
-
-.task-badge-skipped {
-  background: var(--warn);
-  border-color: var(--warn);
-  color: #fff;
 }
 
 /* --- task dependency graph (GitHub-Actions-style) --- */
@@ -1078,23 +970,21 @@ code {
 .graph-node {
   position: absolute;
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 0.15rem;
-  padding: 0 0.75rem;
+  align-items: center;
+  padding: 0 0.6rem;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0;
   background: var(--bg, #fff);
   cursor: pointer;
   text-align: left;
   font: inherit;
+  font-size: 0.875rem;
 }
 
 .graph-node-head {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
   width: 100%;
   min-width: 0;
 }
@@ -1102,6 +992,8 @@ code {
 .graph-node-status {
   font-weight: 700;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
 }
 
 .graph-node-name {
@@ -1116,21 +1008,11 @@ code {
   color: var(--muted);
 }
 
-/* Second row of a graph node: the kind label plus, for live states, the
-   state word next to it (running in the accent color, pending muted). */
-.graph-node-sub {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  width: 100%;
-  min-width: 0;
-}
-
+/* The state word on a node (running / pending), after the name. */
 .graph-node-state {
   font-size: 0.72rem;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
+  margin-left: auto;
 }
 
 .graph-node-state.text-running {
@@ -1175,11 +1057,11 @@ code {
 }
 
 .graph-node-root {
-  background: var(--muted-bg, #f6f8fa);
+  background: var(--bg-alt);
 }
 
 .graph-node:hover {
-  filter: brightness(0.97);
+  background: var(--bg-alt);
 }
 
 .graph-hint {
