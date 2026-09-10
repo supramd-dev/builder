@@ -19,6 +19,20 @@ go run ./server adduser -username alice -email alice@example.com -dsn 'postgres:
 Sessions are stored in the database as random 64-char hex tokens and
 expire after 7 days. Passwords are hashed with bcrypt (cost 12).
 
+## Demo data
+
+To explore the dashboards without a real git host or SSH nodes, seed the
+database with demo data (user `demo` / `demo-pass-123`, three fake
+environments, five pushes, regression/unit/build runs and two finished
+task graphs with logs):
+
+```sh
+make seed-demo          # or: go run ./server seed
+make seed-demo FORCE=1  # rebuild the demo task graphs
+```
+
+Then (re)start the server and log in as `demo`.
+
 ## Database selection
 
 The DSN is taken from the `MD_BUILDER_DSN` environment variable if set,

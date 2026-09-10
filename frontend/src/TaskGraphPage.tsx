@@ -75,7 +75,7 @@ export default function TaskGraphPage({ taskId, onBack, onOpenRun, onOpenLog }: 
   const root = task.kind === 'root' ? task : null
   const subs = task.subTasks ?? []
   const layers = layerGraph(subs)
-  const pos = positions(layers)
+  const pos = positions(layers, root)
 
   // The root column exists only for a root detail view.
   const rows: { id: number | 'root'; node: TaskDetail | SubTask }[] = []
@@ -120,7 +120,8 @@ export default function TaskGraphPage({ taskId, onBack, onOpenRun, onOpenLog }: 
             ))}
           </svg>
           {rows.map(({ id, node }) => {
-            const p = pos.get(id)!
+            const p = pos.get(id)
+            if (!p) return null
             const isRoot = id === 'root'
             const status = node.status
             const runId = !isRoot && 'runId' in node ? node.runId : undefined
@@ -192,18 +193,22 @@ function layerGraph(subs: SubTask[]): SubTask[][] {
 
 // positions computes each node's pixel position: x by layer, y centered
 // within its layer.
-function positions(layers: SubTask[][]): Map<number | 'root', { x: number; y: number }> {
+function positions(
+  layers: SubTask[][],
+  root: TaskDetail | null,
+): Map<number | 'root', { x: number; y: number }> {
   const pos = new Map<number | 'root', { x: number; y: number }>()
-  // The root is a virtual leftmost layer.
+  // The root is a leftmost virtual column, vertically centered on the
+  // middle layer so its edge fan-out is balanced.
+  if (root) {
+    const maxRows = Math.max(1, ...layers.map((l) => l.length))
+    pos.set('root', { x: 0, y: ((maxRows - 1) * (NODE_H + GAP_Y)) / 2 })
+  }
   const stride = NODE_H + GAP_Y
+  // Sub-tasks start at x offset 1 column when the root column is present.
   layers.forEach((layer, li) => {
-    const totalH = layer.length * stride
-    const yBase = 0
     layer.forEach((s, i) => {
-      // Center each layer vertically around the canvas middle.
-      const y = yBase + Math.max(0, i) * stride
-      pos.set(s.id, { x: li * (NODE_W + GAP_X), y })
-      void totalH
+      pos.set(s.id, { x: (li + (root ? 1 : 0)) * (NODE_W + GAP_X), y: i * stride })
     })
   })
   return pos

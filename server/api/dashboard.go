@@ -371,20 +371,21 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 
 // liveSubStatus renders a not-yet-reported stage's dashboard status from its
 // sub-task: queued/running while pending/running, failed when the stage
-// failed, and "" when the stage is not part of the graph or was skipped
-// without a run (skipped stages do get failed runs from the runner, so this
-// is only the pre-claim window).
+// failed or was skipped (skipped stages do get failed runs from the real
+// runner, so a skipped state without a run is only the pre-claim window),
+// and "" when the stage finished but no run was reported — the cell then
+// stays empty instead of showing a misleading failure.
 func liveSubStatus(sub *store.Task) string {
 	switch sub.Status {
 	case store.TaskPending:
 		return "pending"
 	case store.TaskRunning:
 		return "running"
-	case store.TaskFailed:
-		return store.StatusFailed
-	case store.TaskSkipped:
+	case store.TaskFailed, store.TaskSkipped:
 		return store.StatusFailed
 	default:
+		// done: a finished stage without a reported run — neither success
+		// nor failure is known, so the cell shows nothing for this stage.
 		return ""
 	}
 }

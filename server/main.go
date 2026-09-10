@@ -1,6 +1,7 @@
 // md-builder is the backend server for the md-builder scientific computing
 // test platform. It hosts the frontend assets, serves the JSON API, and
-// provides CLI subcommands (adduser) for user management.
+// provides CLI subcommands (adduser, seed) for user management and demo
+// data.
 package main
 
 import (
@@ -48,9 +49,12 @@ func resolveDistDir() string {
 }
 
 func main() {
-	// Subcommand dispatch: md-builder adduser ...
+	// Subcommand dispatch: md-builder adduser|seed ...
 	if len(os.Args) > 1 && os.Args[1] == "adduser" {
 		os.Exit(adduserSubcommand())
+	}
+	if len(os.Args) > 1 && os.Args[1] == "seed" {
+		os.Exit(seedSubcommand())
 	}
 
 	s, err := store.Open(defaultDSN())

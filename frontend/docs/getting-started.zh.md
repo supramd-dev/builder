@@ -19,6 +19,19 @@ go run ./server adduser -username alice -email alice@example.com -dsn 'postgres:
 会话以 64 位随机十六进制 token 的形式存放在数据库中,7 天后过期。
 密码使用 bcrypt(代价 12)哈希存储。
 
+## 演示数据
+
+在没有真实 git 服务或 SSH 节点时,可以先灌入演示数据,再浏览各个
+仪表板(用户 `demo` / `demo-pass-123`,三个模拟环境、五次推送、
+回归/单元/构建运行报告,以及两个带日志的已完成任务图):
+
+```sh
+make seed-demo          # 或:go run ./server seed
+make seed-demo FORCE=1  # 重建演示任务图
+```
+
+然后(重新)启动服务器,用 `demo` 登录。
+
 ## 数据库选择
 
 DSN 优先取自环境变量 `MD_BUILDER_DSN`,未设置时默认使用本地 SQLite

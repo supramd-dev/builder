@@ -648,28 +648,33 @@ footer .text-muted {
   min-width: 4.5rem;
 }
 
-/* Full dashboard: a column of stage pills (build / unit / regression) plus
-   the graph link, stacked vertically inside one matrix cell. */
+/* Full dashboard: one compact row of stage pills (build / unit / regression)
+   with the graph link centered beneath, inside one matrix cell. */
 .dash-full-cell {
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  gap: 0.2rem;
-  min-width: 6.5rem;
+  align-items: center;
+  gap: 0.15rem;
+  min-width: 8.5rem;
 }
 
-.dash-full-cell .dash-full-stage {
-  min-width: 6.5rem;
+.dash-full-stages {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
 }
 
 .btn.dash-full-stage {
-  font-size: 0.8rem;
-  padding: 0.1rem 0.4rem;
+  font-size: 0.72rem;
+  padding: 0 0.3rem;
+  line-height: 1.4;
 }
 
 .dash-full-stage.dash-full-live {
   display: inline-block;
-  font-size: 0.8rem;
+  font-size: 0.72rem;
   color: var(--muted);
 }
 
@@ -678,11 +683,10 @@ footer .text-muted {
   font-weight: 600;
 }
 
-.btn.dash-full-graph {
-  font-size: 0.75rem;
-  padding: 0.1rem 0.4rem;
+/* The graph link: plain centered text, not a button. */
+a.dash-full-graph {
+  font-size: 0.72rem;
   color: var(--link);
-  border-style: dashed;
 }
 
 /* Run detail: the one-paragraph conclusion reported by the worker. */

@@ -400,18 +400,23 @@ function FullMatrix({
                   <td key={env.id} className="dash-cell">
                     {stages.length > 0 || taskId ? (
                       <div className="dash-full-cell">
-                        {stages.map((st) => (
-                          <FullStageView key={st.kind} stage={st} onOpenRun={onOpenRun} />
-                        ))}
+                        <span className="dash-full-stages">
+                          {stages.map((st) => (
+                            <FullStageView key={st.kind} stage={st} onOpenRun={onOpenRun} />
+                          ))}
+                        </span>
                         {taskId ? (
-                          <button
-                            type="button"
-                            className="btn btn-sm dash-full-graph"
+                          <a
+                            href="#"
+                            className="dash-full-graph"
                             title="Open the task dependency graph"
-                            onClick={() => onOpenTask(taskId)}
+                            onClick={(e) => {
+                              e.preventDefault()
+                              onOpenTask(taskId)
+                            }}
                           >
-                            graph ⤴
-                          </button>
+                            graph
+                          </a>
                         ) : null}
                       </div>
                     ) : (
