@@ -6,7 +6,9 @@ The dashboard (first tab after login) shows a build.golang.org-style
 matrix: one **row per recent git push** (default 10, capped at 50 via
 `?commits=`, newest first), one **column per test environment**
 (site-wide — all environments configured by any user; disabled ones are
-greyed out). Two kinds are available: **regression** and **unit** tests.
+greyed out). Three kinds are available: **regression**, **unit** and
+**build** — the build kind shows per environment whether the code compiles
+(click through for the build log).
 
 Cells with a recorded run show pass/fail counts; clicking one opens the
 run detail with the per-case results (name, status, error value, short
@@ -39,8 +41,8 @@ Results are reported with `POST /api/test-runs`:
 - `startedAt` / `finishedAt` are optional (RFC 3339).
 - When `cases` are present the run status and counts are derived from
   them. With no cases, an explicit `"status"` (`passed` | `failed`) and
-  a `"summary"` are stored directly — this is the worker's simplified
-  report path.
+  a `"summary"` are stored directly — this is the simplified report path
+  (used by build runs, which have no per-case results).
 - Reporting again for the same (environment, commit, kind) replaces the
   stored result — the API is idempotent, so a flaky reporter can retry
   safely.
@@ -88,7 +90,7 @@ created with the `adduser` CLI (see
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
 | GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `testInputRepo`, `testRepoRef`, credential set-flags) |
 | PUT    | `/api/site-config`              | Update site configuration (deploy key/token: empty = keep, `clearDeploy*` = remove) |
-| GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` |
+| GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
 | POST   | `/api/test-runs`                | Report a test run result                      |
 | GET    | `/api/test-runs/{id}`           | One run's detail incl. per-case results       |
 | POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit |

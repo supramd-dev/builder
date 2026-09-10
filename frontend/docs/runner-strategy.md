@@ -55,7 +55,8 @@ root (test <sha> on <environment>)
   to the environment over SSH (`bash -s`) and runs cmake (or the custom
   build command) in the code directory, bounded by the configured timeout
   via the remote `timeout` command (details in
-  [The test matrix](#/docs/test-matrix)).
+  [The test matrix](#/docs/test-matrix)). The outcome is recorded as a
+  "build" test run, shown on the dashboard's build matrix.
 - **unit / regression**: the same, running the stage command in the code
   directory. The stage's full output streams into the task log; a stage
   may print a line `MD-BUILDER-SUMMARY: <text>` to declare its own

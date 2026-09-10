@@ -1,39 +1,113 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Markdown } from './markdown'
 
 // The documentation lives in standalone .md files under frontend/docs and
-// is embedded into the bundle at build time via Vite's ?raw import.
+// is embedded into the bundle at build time via Vite's ?raw import. Each
+// section exists in English and Chinese (<id>.md / <id>.zh.md).
 import overview from '../docs/overview.md?raw'
+import overviewZh from '../docs/overview.zh.md?raw'
 import gettingStarted from '../docs/getting-started.md?raw'
+import gettingStartedZh from '../docs/getting-started.zh.md?raw'
 import siteConfiguration from '../docs/site-configuration.md?raw'
+import siteConfigurationZh from '../docs/site-configuration.zh.md?raw'
 import environments from '../docs/environments.md?raw'
+import environmentsZh from '../docs/environments.zh.md?raw'
 import testMatrix from '../docs/test-matrix.md?raw'
+import testMatrixZh from '../docs/test-matrix.zh.md?raw'
 import runnerStrategy from '../docs/runner-strategy.md?raw'
+import runnerStrategyZh from '../docs/runner-strategy.zh.md?raw'
 import webhooks from '../docs/webhooks.md?raw'
+import webhooksZh from '../docs/webhooks.zh.md?raw'
 import api from '../docs/api.md?raw'
+import apiZh from '../docs/api.zh.md?raw'
+
+// UI strings for the docs chrome (TOC, pager, language switch).
+const STRINGS = {
+  en: {
+    contents: 'Contents',
+    labels: {
+      overview: 'Overview',
+      'getting-started': 'Getting started',
+      'site-configuration': 'Site configuration',
+      environments: 'Test environments',
+      'test-matrix': 'Test matrix (YAML)',
+      'runner-strategy': 'Runner and tasks',
+      webhooks: 'GitLab webhooks',
+      dashboard: 'Dashboard & API',
+    } as Record<string, string>,
+  },
+  zh: {
+    contents: '目录',
+    labels: {
+      overview: '概述',
+      'getting-started': '快速上手',
+      'site-configuration': '站点配置',
+      environments: '测试环境',
+      'test-matrix': '测试矩阵(YAML)',
+      'runner-strategy': 'Runner 与任务',
+      webhooks: 'GitLab webhooks',
+      dashboard: '仪表板与 API',
+    } as Record<string, string>,
+  },
+} as const
+
+type Lang = keyof typeof STRINGS
 
 // DOCS is the ordered table of contents; ids anchor the section headers.
-const DOCS: { id: string; label: string; source: string }[] = [
-  { id: 'overview', label: 'Overview', source: overview },
-  { id: 'getting-started', label: 'Getting started', source: gettingStarted },
-  { id: 'site-configuration', label: 'Site configuration', source: siteConfiguration },
-  { id: 'environments', label: 'Test environments', source: environments },
-  { id: 'test-matrix', label: 'Test matrix (YAML)', source: testMatrix },
-  { id: 'runner-strategy', label: 'Runner and tasks', source: runnerStrategy },
-  { id: 'webhooks', label: 'GitLab webhooks', source: webhooks },
-  { id: 'dashboard', label: 'Dashboard & API', source: api },
+const DOCS: { id: string; source: Record<Lang, string> }[] = [
+  { id: 'overview', source: { en: overview, zh: overviewZh } },
+  { id: 'getting-started', source: { en: gettingStarted, zh: gettingStartedZh } },
+  { id: 'site-configuration', source: { en: siteConfiguration, zh: siteConfigurationZh } },
+  { id: 'environments', source: { en: environments, zh: environmentsZh } },
+  { id: 'test-matrix', source: { en: testMatrix, zh: testMatrixZh } },
+  { id: 'runner-strategy', source: { en: runnerStrategy, zh: runnerStrategyZh } },
+  { id: 'webhooks', source: { en: webhooks, zh: webhooksZh } },
+  { id: 'dashboard', source: { en: api, zh: apiZh } },
 ]
 
+// initialLang picks the browser language when it is Chinese, English
+// otherwise (all docs are authored in English).
+function initialLang(): Lang {
+  if (typeof navigator !== 'undefined' && /^zh/i.test(navigator.language)) {
+    return 'zh'
+  }
+  return 'en'
+}
+
 // DocsPage renders the platform documentation with a table of contents
-// linking to each section.
+// linking to each section and an EN/中文 language switch (persisted in
+// localStorage).
 export default function DocsPage() {
+  const [lang, setLang] = useState<Lang>(initialLang)
   const [active, setActive] = useState(DOCS[0].id)
   const current = DOCS.find((d) => d.id === active) ?? DOCS[0]
+  const t = STRINGS[lang]
+
+  // Remember the choice across visits.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('md-builder-docs-lang')
+      if (saved === 'en' || saved === 'zh') setLang(saved)
+    } catch {
+      // localStorage unavailable (private mode): keep the default.
+    }
+  }, [])
+
+  function switchLang(next: Lang) {
+    setLang(next)
+    try {
+      localStorage.setItem('md-builder-docs-lang', next)
+    } catch {
+      // Ignore persistence errors.
+    }
+  }
+
+  const label = (id: string) => t.labels[id] ?? id
 
   return (
     <div className="docs-page">
       <div className="docs-toc">
-        <h3>Contents</h3>
+        <h3>{t.contents}</h3>
         <nav>
           {DOCS.map((d) => (
             <a
@@ -45,13 +119,29 @@ export default function DocsPage() {
                 setActive(d.id)
               }}
             >
-              {d.label}
+              {label(d.id)}
             </a>
           ))}
         </nav>
+        <div className="docs-lang" role="group" aria-label="Language">
+          <button
+            type="button"
+            className={'btn btn-sm docs-lang-btn' + (lang === 'en' ? ' docs-lang-active' : '')}
+            onClick={() => switchLang('en')}
+          >
+            EN
+          </button>
+          <button
+            type="button"
+            className={'btn btn-sm docs-lang-btn' + (lang === 'zh' ? ' docs-lang-active' : '')}
+            onClick={() => switchLang('zh')}
+          >
+            中文
+          </button>
+        </div>
       </div>
-      <div className="docs-body" id={current.id}>
-        <Markdown source={current.source} />
+      <div className="docs-body" id={current.id} lang={lang === 'zh' ? 'zh-CN' : 'en'}>
+        <Markdown source={current.source[lang]} />
         <div className="docs-pager">
           {DOCS.map((d, i) =>
             d.id === current.id ? (
@@ -64,7 +154,7 @@ export default function DocsPage() {
                       setActive(DOCS[i - 1].id)
                     }}
                   >
-                    ← {DOCS[i - 1].label}
+                    ← {label(DOCS[i - 1].id)}
                   </a>
                 )}
                 {i > 0 && i < DOCS.length - 1 && ' · '}
@@ -76,7 +166,7 @@ export default function DocsPage() {
                       setActive(DOCS[i + 1].id)
                     }}
                   >
-                    {DOCS[i + 1].label} →
+                    {label(DOCS[i + 1].id)} →
                   </a>
                 )}
               </span>

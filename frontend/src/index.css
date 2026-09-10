@@ -750,6 +750,24 @@ code {
   font-size: 0.875rem;
 }
 
+/* Docs language switch: EN / 中文 toggle under the TOC. */
+.docs-lang {
+  display: inline-flex;
+  gap: 0.25rem;
+  margin-top: 1rem;
+}
+
+.docs-lang-btn {
+  min-width: 3rem;
+  font-size: 0.8rem;
+}
+
+.docs-lang-active {
+  border-color: var(--link);
+  color: var(--link);
+  font-weight: 600;
+}
+
 .docs-body {
   flex: 1;
   min-width: 0;
