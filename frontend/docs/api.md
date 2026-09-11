@@ -20,11 +20,18 @@ Cells with a recorded run show pass/fail counts; clicking one opens the
 run detail with the per-case results (name, status, error value, short
 note) and the one-paragraph summary reported by the worker. Cells
 without a run but with a live task graph show **queued** / **running…**
-(or ✗ when the task failed before reporting). Every commit row also
-carries a **graph** link: the dependency graph of that commit's task
-pipeline (clone → build → unit/regression), GitHub-Actions style —
+(or ✗ when the task failed before reporting); a stage that is not part
+of the graph at all shows "—" (it was never requested). Every commit row
+also carries a **graph** link: the dependency graph of that commit's
+task pipeline (clone → build → unit/regression), GitHub-Actions style —
 clicking a stage node jumps to its run detail or the live task log (see
 [Runner and tasks](#/docs/runner-strategy)).
+
+Manually dispatched graphs carry a small **M** badge in their cells and
+a "manual" label on the task pages. Rows of manual dispatches that were
+re-run (a newer attempt of the same commit exists) are kept but greyed
+out with a **superseded** tag — only the newest attempt of a commit is
+live.
 
 The full matrix response shape:
 
@@ -100,6 +107,34 @@ overrides the declared language:
 Only bash, sh, python and python3 are accepted. Commands time out after
 60s, scripts after 10 minutes. Disabled environments reject both.
 
+## Manual test dispatch
+
+The **Run command** page also dispatches user-configured tests as
+scheduled task graphs (the *Manual test* tab) — the same mechanism the
+webhooks use, but with the stage commands taken from the form instead of
+`md-builder.yaml` (details in [Runner and tasks](#/docs/runner-strategy)):
+
+```
+POST /api/jobs/manual
+{
+  "repo": "https://gitlab.example.com/group/code",   // optional: site default
+  "ref": "master",                                    // optional: HEAD
+  "buildCommand": "cmake . && cmake --build . -j8",   // optional: CMake default
+  "unitCommand": "ctest -L unit",                     // optional: stage skipped
+  "regressionCommand": "python3 run.py",              // optional: stage skipped
+  "environmentIds": [1, 2]
+}
+```
+
+- At least one stage command and one environment are required.
+- The ref is resolved to a concrete commit (`git ls-remote`) with the
+  site's deploy key / deploy token; the response is
+  `{"roots": [{"taskId": 42, "environmentId": 1}, …]}` — one root task
+  per environment, ordered like the request.
+- Graphs are marked `trigger: 1` (manual); every dispatch records a
+  fresh commit row, so re-running the same ref adds a new matrix row and
+  supersedes the older ones.
+
 ## API endpoints
 
 All endpoints require a session (cookie) unless noted. Users are
@@ -127,7 +162,8 @@ created with the `adduser` CLI (see
 | GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
 | POST   | `/api/test-runs`                | Report a test run result                      |
 | GET    | `/api/test-runs/{id}`           | One run's detail incl. per-case results       |
-| POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit |
+| POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit (webhook-style, reads the YAML) |
+| POST   | `/api/jobs/manual`              | Dispatch a user-configured test (repo, ref, stage commands, environments; no YAML) |
 | GET    | `/api/jobs`                     | Recent task graphs (`?limit=`, monitoring; legacy job shape) |
 | GET    | `/api/tasks/{id}`               | One task; a root carries its sub-task list and commit/environment context |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | The task's log chunks after the given sequence (incremental, live-following) |

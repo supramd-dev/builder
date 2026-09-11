@@ -1,7 +1,8 @@
 # 测试环境
 
 在 **User center** 中注册运行测试的机器:名称、SSH 主机、SSH 用户名和
-SSH 私钥。用 **Test** 验证连通性,用 **Run command** 交互式地尝试命令。
+SSH 私钥。用 **Test** 验证连通性,用 **Run command** 交互式地尝试命令,
+或在机器上派发一次手动测试(见 [Runner 与任务](#/docs/runner-strategy))。
 
 服务器通过 SSH 连接环境以上传源码(一个 tar 流,解压到
 `~/.md-builder/tasks/<sha12>`)并运行构建/测试脚本 —— 见

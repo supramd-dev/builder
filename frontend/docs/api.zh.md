@@ -16,9 +16,15 @@
 有已记录运行的单元格显示通过/失败计数;点击打开运行详情,包含逐用例
 结果(名称、状态、误差值、简短备注)和 worker 报告的一段式摘要。没有
 运行但存在活跃任务图的单元格显示 **queued** / **running…**(任务在报告
-前失败则为 ✗)。每个 commit 行还带 **graph** 链接:该 commit 任务管线
+前失败则为 ✗);完全不属于图的阶段显示"—"(它从未被请求执行)。每个
+commit 行还带 **graph** 链接:该 commit 任务管线
 (clone → build → 单元/回归)的依赖图,GitHub Actions 风格 —— 点击阶段
 节点跳转到运行详情或实时任务日志(见 [Runner 与任务](#/docs/runner-strategy))。
+
+手动派发的图在单元格上带一个小的 **M** 徽标,在任务页面上显示
+"manual" 标签。被重跑过的手动派发行(同一提交存在更新的尝试)会保留
+但置灰并带 **superseded**(已过期)标签 —— 同一提交只有最新一次尝试
+是生效的。
 
 全量矩阵响应形状:
 
@@ -88,6 +94,32 @@
 仅接受 bash、sh、python 和 python3。命令 60 秒超时,脚本 10 分钟。
 停用的环境拒绝两者。
 
+## 手动测试派发
+
+**Run command** 页面还可以把用户自定义的测试作为受调度的任务图派发
+(*Manual test* 标签)—— 与 webhook 相同的机制,只是各阶段命令来自
+表单而不是 `md-builder.yaml`(细节见 [Runner 与任务](#/docs/runner-strategy)):
+
+```
+POST /api/jobs/manual
+{
+  "repo": "https://gitlab.example.com/group/code",   // 可选:默认站点配置
+  "ref": "master",                                    // 可选:HEAD
+  "buildCommand": "cmake . && cmake --build . -j8",   // 可选:CMake 默认值
+  "unitCommand": "ctest -L unit",                     // 可选:阶段跳过
+  "regressionCommand": "python3 run.py",              // 可选:阶段跳过
+  "environmentIds": [1, 2]
+}
+```
+
+- 至少需要一个阶段命令和一个环境。
+- ref 会用站点的 deploy key / deploy token 解析为具体提交
+  (`git ls-remote`);响应为
+  `{"roots": [{"taskId": 42, "environmentId": 1}, …]}` —— 每个环境一个
+  root 任务,顺序与请求一致。
+- 图会标记 `trigger: 1`(手动);每次派发都记录一条新的 commit 行,
+  因此重跑同一 ref 会新增矩阵行,旧行标记为 superseded。
+
 ## API 端点
 
 除非另行说明,所有端点都需要会话(cookie)。用户通过 `adduser` CLI
@@ -114,7 +146,8 @@
 | GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
 | POST   | `/api/test-runs`                | 报告测试运行结果                              |
 | GET    | `/api/test-runs/{id}`           | 单次运行详情,含逐用例结果                    |
-| POST   | `/api/jobs`                     | 手动重新派发某提交的任务图                    |
+| POST   | `/api/jobs`                     | 手动重新派发某提交的任务图(webhook 方式,读取 YAML) |
+| POST   | `/api/jobs/manual`              | 派发自定义测试(仓库、ref、阶段命令、环境;无需 YAML) |
 | GET    | `/api/jobs`                     | 最近的任务图(`?limit=`;监控;旧 job 形状)    |
 | GET    | `/api/tasks/{id}`               | 单个任务;root 附带子任务列表与提交/环境上下文 |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | 给定序号之后的任务日志块(增量,实时跟随)   |

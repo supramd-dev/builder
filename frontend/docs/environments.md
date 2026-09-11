@@ -2,7 +2,9 @@
 
 Register the machines that run the tests in the **User center**: name,
 SSH host, SSH username and an SSH private key. Use **Test** to verify
-connectivity, **Run command** to try commands interactively.
+connectivity, **Run command** to try commands interactively or dispatch
+a manual test on the machine (see
+[Runner and tasks](#/docs/runner-strategy)).
 
 The server connects over SSH to upload the sources (a tar stream extracted
 into `~/.md-builder/tasks/<sha12>`) and to run the build/test scripts — see

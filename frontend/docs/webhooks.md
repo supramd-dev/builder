@@ -45,5 +45,12 @@ POST /api/jobs {"commitId": 7}
 POST /api/jobs {"commitSha": "abc123", "commitRepo": "group/code"}
 ```
 
+This re-reads the `md-builder.yaml` at that commit; the graphs are marked
+as webhook-triggered, like the original push. To instead run a test with
+**your own stage commands** (no YAML, any repository, any ref), use the
+manual dispatch on the **Run command** page or
+`POST /api/jobs/manual` — each manual dispatch gets its own matrix row
+(see [Runner and tasks](#/docs/runner-strategy)).
+
 `GET /api/jobs?limit=20` lists recent graphs for monitoring (status,
 attempts, error).

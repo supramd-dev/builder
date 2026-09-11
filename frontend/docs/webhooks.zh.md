@@ -40,4 +40,10 @@ POST /api/jobs {"commitId": 7}
 POST /api/jobs {"commitSha": "abc123", "commitRepo": "group/code"}
 ```
 
+这会重新读取该提交上的 `md-builder.yaml`;图与原始推送一样标记为
+webhook 触发。如果想用**自己指定的阶段命令**运行测试(不需要 YAML,
+任意仓库、任意 ref),请使用 **Run command** 页面的手动派发或
+`POST /api/jobs/manual` —— 每次手动派发都有自己的矩阵行(见
+[Runner 与任务](#/docs/runner-strategy))。
+
 `GET /api/jobs?limit=20` 列出最近的图用于监控(状态、attempts、错误)。
