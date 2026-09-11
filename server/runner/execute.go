@@ -43,12 +43,11 @@ func (s *Service) ExecuteTask(ctx context.Context, task *store.Task) error {
 // rootContext gathers what every sub-task needs: the root's entry snapshot,
 // the environment and the site config credentials.
 type rootContext struct {
-	root     *store.Task
-	entry    *MergedEntry
-	sha      string
-	inputRef string
-	env      *store.TestEnvironment
-	cfg      *store.SiteConfig
+	root  *store.Task
+	entry *MergedEntry
+	sha   string
+	env   *store.TestEnvironment
+	cfg   *store.SiteConfig
 }
 
 // loadRootContext loads the sub-task's root snapshot, environment and site
@@ -67,7 +66,6 @@ func (s *Service) loadRootContext(task *store.Task) (*rootContext, bool) {
 		return nil, false
 	}
 	rc.entry = &rootCfg.Entry
-	rc.inputRef = rootCfg.TestInputRef
 	rc.sha = s.Store.CommitSHA(root.CommitID)
 	if rc.sha == "" {
 		s.failTask(task, "commit lookup failed")
@@ -110,14 +108,14 @@ func (rc *rootContext) scriptInput(task *store.Task, stageCommand string, timeou
 	}
 }
 
-// remoteCodeDir is the remote path of the code checkout (clone extracts
-// "code" and "tests" side by side under the task dir).
+// remoteCodeDir is the remote path of the code checkout (clone extracts it
+// under the task dir).
 func (rc *rootContext) remoteCodeDir() string {
 	return RemoteTaskDir(rc.sha) + "/code"
 }
 
-// executeClone implements the clone sub-task: server-side clone of both
-// repositories, tar stream upload to the remote workspace.
+// executeClone implements the clone sub-task: server-side clone of the code
+// repository, tar stream upload to the remote workspace.
 func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 	rc, ok := s.loadRootContext(task)
 	if !ok {
@@ -131,7 +129,6 @@ func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 		return
 	}
 
-	testInputRef := rc.inputRef
 	fmt.Fprintf(logw, "cloning %s at %s on the server\n", rc.cfg.CodeRepo, rc.sha)
 
 	h := envToSSHHost(rc.env)
@@ -139,7 +136,6 @@ func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 	uploaded, err := s.Clone.CloneAndUpload(
 		ctx, h,
 		rc.cfg.CodeRepo, rc.sha,
-		rc.cfg.TestInputRepo, testInputRef,
 		rc.creds(), remoteDir,
 		slackTimeout(cloneTimeoutSecs, stageTimeoutSlack),
 		logw,

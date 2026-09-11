@@ -19,8 +19,8 @@ Each environment needs:
   python, …), installed however the machine's admins prefer.
 
 The environment needs **no git** and no access to the repositories: the
-server clones the code and the test inputs itself and ships the working
-trees over.
+server clones the code repository itself and ships the working tree
+over.
 
 ## Tags
 

@@ -187,10 +187,7 @@ func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnviron
 	if err != nil {
 		return nil, err
 	}
-	entryJSON, err := json.Marshal(RootConfig{
-		Entry:        entry,
-		TestInputRef: cfg.TestRepoRef,
-	})
+	entryJSON, err := json.Marshal(RootConfig{Entry: entry})
 	if err != nil {
 		return nil, err
 	}
@@ -262,10 +259,7 @@ func (s *Service) createGraph(commit *store.Commit, entry *MergedEntry, env *sto
 		return err
 	}
 
-	entryJSON, err := json.Marshal(RootConfig{
-		Entry:        *entry,
-		TestInputRef: cfg.TestRepoRef,
-	})
+	entryJSON, err := json.Marshal(RootConfig{Entry: *entry})
 	if err != nil {
 		return err
 	}

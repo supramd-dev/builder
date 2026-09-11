@@ -7,9 +7,9 @@ column per environment).
 
 The workflow in short:
 
-1. **Configure the site** (Settings): the code repository, the test input
-   repository and the ref to test against — plus optional credentials for
-   private repositories.
+1. **Configure the site** (Settings): the code repository under test —
+   plus optional credentials for private repositories. Test inputs live
+   inside the code repository itself.
 2. **Register environments** (User center): the remote hosts that will run
    the tests, each labeled with tags.
 3. **Add a test matrix** (md-builder.yaml at the root of the code

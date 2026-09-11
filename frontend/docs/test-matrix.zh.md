@@ -92,12 +92,11 @@ matrix:
 每个匹配的条目会成为一条任务图(见
 [Runner 与任务](#/docs/runner-strategy)),各阶段按序运行:
 
-1. **clone**:*服务器* 克隆测试输入仓库(使用配置的 ref)和被推送提交上
-   的代码仓库,把两个工作树打包为 tarball 并解压到环境上的
-   ~/.md-builder/tasks/<sha12>。
+1. **clone**:*服务器* 克隆被推送提交上的代码仓库,把工作树打包为
+   tarball 并解压到环境上的 ~/.md-builder/tasks/<sha12>/code。
 2. **build**:生成的脚本导出 MD_COMMIT、MD_ENV_NAME、MD_ENV_TAGS、
-   MD_CODE_DIR(`…/code`)、MD_TEST_INPUT_DIR(`…/tests`)以及 yaml 的
-   env 变量,然后在代码目录中运行构建阶段。
+   MD_CODE_DIR(`…/code`)以及 yaml 的 env 变量,然后在代码目录中运行
+   构建阶段。
 3. 若构建(或克隆)失败,依赖它的测试阶段会被标记为 skipped,仪表板
    显示 ✗。
 4. **unit / regression**:阶段命令在代码目录中运行,各自受超时约束;完整

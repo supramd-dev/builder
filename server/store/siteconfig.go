@@ -13,16 +13,10 @@ type SiteConfig struct {
 
 	// CodeRepo is the location of the code repository under test, e.g.
 	// "https://gitlab.com/group/code" or "gitlab.com:group/code". It is
-	// deliberately not tied to a specific problem domain.
+	// deliberately not tied to a specific problem domain. Test inputs are
+	// expected to live inside the code repository itself (or to be fetched
+	// by it), so there is no separate test-input repository.
 	CodeRepo string
-
-	// TestInputRepo is the location of the test input repository — the
-	// inputs used to exercise the code under test.
-	TestInputRepo string
-
-	// TestRepoRef is the branch name or commit id of the test input
-	// repository to run tests against.
-	TestRepoRef string
 
 	// DeployKey optionally holds a PEM-encoded SSH private key of a GitLab
 	// deploy key, used to clone the repositories over SSH (and to convert

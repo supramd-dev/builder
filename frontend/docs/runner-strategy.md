@@ -76,10 +76,10 @@ root (test <sha> on <environment>)
 ## Per sub-task
 
 - **clone**: the *server* clones the code repository at the pushed commit
-  and the test input repository, packs both into a tarball and streams it
-  to the environment over SSH (`tar -xzf -` into
-  `~/.md-builder/tasks/<sha12>`). The remote host needs **no git and no
-  repository access**.
+  (test inputs live inside it, or the code fetches them itself), packs it
+  into a tarball and streams it to the environment over SSH
+  (`tar -xzf -` into `~/.md-builder/tasks/<sha12>/code`). The remote host
+  needs **no git and no repository access**.
 - **build**: a bash script generated from the config snapshot is streamed
   to the environment over SSH (`bash -s`) and runs cmake (or the custom
   build command) in the code directory, bounded by the configured timeout
@@ -94,8 +94,7 @@ root (test <sha> on <environment>)
   [Dashboard and reporting](#/docs/dashboard)).
 
 The script exports `MD_COMMIT`, `MD_ENV_NAME`, `MD_ENV_TAGS`,
-`MD_CODE_DIR` (`…/tasks/<sha12>/code`), `MD_TEST_INPUT_DIR`
-(`…/tasks/<sha12>/tests`) and the entry's `env` map.
+`MD_CODE_DIR` (`…/tasks/<sha12>/code`) and the entry's `env` map.
 
 ## Logs
 

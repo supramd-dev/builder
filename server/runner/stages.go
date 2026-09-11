@@ -33,11 +33,9 @@ type StageConfig struct {
 	Env     map[string]string `json:"env,omitempty"`
 }
 
-// RootConfig is the root task's Config snapshot: the merged matrix entry
-// plus the dispatch-time test-input ref (the clone task checks it out).
+// RootConfig is the root task's Config snapshot: the merged matrix entry.
 type RootConfig struct {
-	Entry        MergedEntry `json:"entry"`
-	TestInputRef string      `json:"testInputRef"`
+	Entry MergedEntry `json:"entry"`
 }
 
 // marshalJSON is the shared JSON encoder for config snapshots.

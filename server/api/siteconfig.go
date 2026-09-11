@@ -13,8 +13,6 @@ import (
 // reported, never the values themselves.
 type siteConfigJSON struct {
 	CodeRepo        string `json:"codeRepo"`
-	TestInputRepo   string `json:"testInputRepo"`
-	TestRepoRef     string `json:"testRepoRef"`
 	DeployKeySet    bool   `json:"deployKeySet"`
 	DeployTokenSet  bool   `json:"deployTokenSet"`
 	DeployTokenUser string `json:"deployTokenUser"`
@@ -26,8 +24,6 @@ type siteConfigJSON struct {
 // value keeps the stored one; the explicit Clear* flags remove it.
 type siteConfigInput struct {
 	CodeRepo         string `json:"codeRepo"`
-	TestInputRepo    string `json:"testInputRepo"`
-	TestRepoRef      string `json:"testRepoRef"`
 	DeployKey        string `json:"deployKey"`       // empty = keep current
 	DeployToken      string `json:"deployToken"`     // empty = keep current
 	DeployTokenUser  string `json:"deployTokenUser"` // not a secret, replaced as given
@@ -78,8 +74,6 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.CodeRepo = strings.TrimSpace(in.CodeRepo)
-	cfg.TestInputRepo = strings.TrimSpace(in.TestInputRepo)
-	cfg.TestRepoRef = strings.TrimSpace(in.TestRepoRef)
 	// Credentials: empty = keep, Clear* = remove, otherwise replace. The
 	// deploy key keeps its trailing newline: OpenSSH-format keys are
 	// rejected by the ssh CLI ("invalid format") without one.
@@ -109,12 +103,6 @@ func validateSiteConfigInput(in *siteConfigInput) string {
 	if strings.TrimSpace(in.CodeRepo) == "" {
 		return "code repository is required"
 	}
-	if strings.TrimSpace(in.TestInputRepo) == "" {
-		return "test input repository is required"
-	}
-	if strings.TrimSpace(in.TestRepoRef) == "" {
-		return "branch or commit id is required"
-	}
 	if key := strings.TrimSpace(in.DeployKey); key != "" && !isPEMKey(key) {
 		return "deploy key must be a PEM-encoded SSH key"
 	}
@@ -124,8 +112,6 @@ func validateSiteConfigInput(in *siteConfigInput) string {
 func toSiteConfigJSON(cfg *store.SiteConfig) siteConfigJSON {
 	return siteConfigJSON{
 		CodeRepo:        cfg.CodeRepo,
-		TestInputRepo:   cfg.TestInputRepo,
-		TestRepoRef:     cfg.TestRepoRef,
 		DeployKeySet:    strings.TrimSpace(cfg.DeployKey) != "",
 		DeployTokenSet:  strings.TrimSpace(cfg.DeployToken) != "",
 		DeployTokenUser: cfg.DeployTokenUser,

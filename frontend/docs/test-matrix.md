@@ -97,14 +97,12 @@ Invalid YAML fails dispatch: the push is recorded and
 Each matched entry becomes a task graph (see
 [Runner and tasks](#/docs/runner-strategy)); the stages run in order:
 
-1. **clone**: the *server* clones the test input repository (at the
-   configured ref) and the code repository at the pushed commit, packs
-   both working trees into a tarball and extracts it on the environment
-   into ~/.md-builder/tasks/<sha12>.
+1. **clone**: the *server* clones the code repository at the pushed
+   commit, packs the working tree into a tarball and extracts it on the
+   environment into ~/.md-builder/tasks/<sha12>/code.
 2. **build**: a generated script exports MD_COMMIT, MD_ENV_NAME,
-   MD_ENV_TAGS, MD_CODE_DIR (`…/code`), MD_TEST_INPUT_DIR (`…/tests`)
-   plus the yaml env variables, then runs the build stage in the code
-   directory.
+   MD_ENV_TAGS, MD_CODE_DIR (`…/code`) plus the yaml env variables, then
+   runs the build stage in the code directory.
 3. If the build (or the clone) fails, the dependent test stages are
    marked skipped and the dashboard shows ✗.
 4. **unit / regression**: the stage command runs in the code directory,

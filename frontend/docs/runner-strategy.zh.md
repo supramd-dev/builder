@@ -62,9 +62,10 @@ root (test <sha> on <environment>)
 
 ## 每个子任务
 
-- **clone**:*服务器* 克隆被推送提交上的代码仓库和测试输入仓库,打包为
-  tarball 并经 SSH 流式传到环境(解压为 `~/.md-builder/tasks/<sha12>`)。
-  远程主机**不需要 git,也不需要任何仓库访问权限**。
+- **clone**:*服务器* 克隆被推送提交上的代码仓库(测试输入内置于其中,
+  或由代码自行获取),打包为 tarball 并经 SSH 流式传到环境(解压为
+  `~/.md-builder/tasks/<sha12>/code`)。远程主机**不需要 git,也不需要
+  任何仓库访问权限**。
 - **build**:根据配置快照生成的 bash 脚本经 SSH 流式送到环境
   (`bash -s`),在代码目录中运行 cmake(或自定义构建命令),由远程
   `timeout` 命令按配置的超时约束(细节见
@@ -76,8 +77,7 @@ root (test <sha> on <environment>)
   运行(见[仪表板与报告](#/docs/dashboard))。
 
 脚本会导出 `MD_COMMIT`、`MD_ENV_NAME`、`MD_ENV_TAGS`、`MD_CODE_DIR`
-(`…/tasks/<sha12>/code`)、`MD_TEST_INPUT_DIR`(`…/tasks/<sha12>/tests`)
-以及条目的 `env` 映射。
+(`…/tasks/<sha12>/code`)以及条目的 `env` 映射。
 
 ## 日志
 

@@ -44,7 +44,7 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 ## 首次运行清单
 
 1. 用 `adduser` 创建用户并登录。
-2. **Settings**:配置代码仓库、测试输入仓库以及用于测试的 ref(见
+2. **Settings**:配置被测试的代码仓库(见
    [站点配置](#/docs/site-configuration));仓库为私有
    时,配置 deploy key 或 deploy token。
 3. **User center**:注册至少一个测试环境并打上标签(见

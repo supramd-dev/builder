@@ -13,10 +13,12 @@ import (
 	"time"
 )
 
-// This file implements the server-side clone: the code and test-input
-// repositories are cloned on the server (with the site-configured deploy
-// key/token) and uploaded to the remote environment as a gzipped tar
-// stream. The remote environment needs no git and no repository access.
+// This file implements the server-side clone: the code repository is
+// cloned on the server (with the site-configured deploy key/token) and
+// uploaded to the remote environment as a gzipped tar stream. The remote
+// environment needs no git and no repository access. Test inputs are
+// expected to live inside the code repository itself (or to be fetched
+// by it), so there is no separate test-input clone.
 
 // CloneRepo clones repoURL at ref into destDir. ref may be a branch, tag or
 // commit SHA. creds may be nil (public repositories). git's progress output
@@ -162,11 +164,10 @@ func TarDir(ctx context.Context, dir string, w io.Writer) error {
 	return gzw.Close()
 }
 
-// CloneAndUpload is the whole clone sub-task data path: clone both
-// repositories into a temp dir, tar it and stream it into destDir on the
-// remote host. testInputRepo may be empty (only the code repo is uploaded).
-// Progress goes to logw. Returns the number of bytes uploaded.
-func CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef, testInputRepo, testInputRef string, creds *GitCredentials, remoteWorkDir string, timeout time.Duration, logw io.Writer) (int64, error) {
+// CloneAndUpload is the whole clone sub-task data path: clone the code
+// repository into a temp dir, tar it and stream it into destDir on the
+// remote host. Progress goes to logw. Returns the number of bytes uploaded.
+func CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef string, creds *GitCredentials, remoteWorkDir string, timeout time.Duration, logw io.Writer) (int64, error) {
 	tmp, err := os.MkdirTemp("", "md-builder-clone-*")
 	if err != nil {
 		return 0, fmt.Errorf("create temp dir: %w", err)
@@ -176,17 +177,6 @@ func CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef, testIn
 	codeDir := filepath.Join(tmp, "code")
 	if err := CloneRepo(ctx, codeRepoURL, codeRef, codeDir, creds, logw); err != nil {
 		return 0, err
-	}
-	if strings.TrimSpace(testInputRepo) != "" {
-		testsDir := filepath.Join(tmp, "tests")
-		ref := strings.TrimSpace(testInputRef)
-		if ref == "" {
-			ref = "HEAD"
-		}
-		fmt.Fprintf(logwOrDiscard(logw), "cloning test input %s at %s\n", testInputRepo, ref)
-		if err := CloneRepo(ctx, testInputRepo, ref, testsDir, creds, logw); err != nil {
-			return 0, fmt.Errorf("clone test input repository %s: %w", testInputRepo, err)
-		}
 	}
 
 	if deadline, ok := ctx.Deadline(); ok {

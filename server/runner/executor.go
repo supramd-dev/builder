@@ -27,9 +27,9 @@ type Execer interface {
 
 // RepoCloner is the server-side source acquisition abstraction.
 type RepoCloner interface {
-	// CloneAndUpload clones the repositories on the server and extracts
-	// them into remoteWorkDir on the host (see repo.go).
-	CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef, testInputRepo, testInputRef string, creds *GitCredentials, remoteWorkDir string, timeout time.Duration, logw io.Writer) (int64, error)
+	// CloneAndUpload clones the code repository on the server and extracts
+	// it into remoteWorkDir on the host (see repo.go).
+	CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef string, creds *GitCredentials, remoteWorkDir string, timeout time.Duration, logw io.Writer) (int64, error)
 }
 
 // SSHExecer is the production Execer/RepoCloner over the ssh.go functions.
@@ -62,8 +62,8 @@ func (SSHExecer) ExtractTarTo(ctx context.Context, h SSHHost, r io.Reader, destD
 }
 
 // CloneAndUpload implements RepoCloner.
-func (SSHExecer) CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef, testInputRepo, testInputRef string, creds *GitCredentials, remoteWorkDir string, timeout time.Duration, logw io.Writer) (int64, error) {
-	return CloneAndUpload(ctx, h, codeRepoURL, codeRef, testInputRepo, testInputRef, creds, remoteWorkDir, timeout, logw)
+func (SSHExecer) CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef string, creds *GitCredentials, remoteWorkDir string, timeout time.Duration, logw io.Writer) (int64, error) {
+	return CloneAndUpload(ctx, h, codeRepoURL, codeRef, creds, remoteWorkDir, timeout, logw)
 }
 
 // envToSSHHost builds the SSH endpoint from a stored environment row.

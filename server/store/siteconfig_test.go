@@ -12,7 +12,7 @@ func TestSiteConfigDefaults(t *testing.T) {
 	if cfg.ID != 1 {
 		t.Fatalf("expected singleton ID 1, got %d", cfg.ID)
 	}
-	if cfg.CodeRepo != "" || cfg.TestInputRepo != "" || cfg.TestRepoRef != "" {
+	if cfg.CodeRepo != "" {
 		t.Fatalf("expected empty defaults, got %+v", cfg)
 	}
 	if cfg.DeployKey != "" || cfg.DeployToken != "" || cfg.DeployTokenUser != "" {
@@ -25,8 +25,6 @@ func TestSiteConfigSaveLoad(t *testing.T) {
 
 	cfg := &SiteConfig{
 		CodeRepo:        "https://gitlab.com/group/code",
-		TestInputRepo:   "https://gitlab.com/group/test-inputs",
-		TestRepoRef:     "main",
 		DeployKey:       "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n",
 		DeployToken:     "glpat-xxxxxxxxxxxx",
 		DeployTokenUser: "gitlab+deploy-token-42",
@@ -39,9 +37,7 @@ func TestSiteConfigSaveLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSiteConfig: %v", err)
 	}
-	if got.CodeRepo != cfg.CodeRepo ||
-		got.TestInputRepo != cfg.TestInputRepo ||
-		got.TestRepoRef != cfg.TestRepoRef {
+	if got.CodeRepo != cfg.CodeRepo {
 		t.Fatalf("round-trip mismatch: %+v", got)
 	}
 	if got.DeployKey != cfg.DeployKey || got.DeployToken != cfg.DeployToken ||
@@ -53,7 +49,7 @@ func TestSiteConfigSaveLoad(t *testing.T) {
 	}
 
 	// Save again (update path) with new values.
-	cfg.TestRepoRef = "abc123def"
+	cfg.CodeRepo = "https://gitlab.com/group/code2"
 	if err := s.SaveSiteConfig(cfg); err != nil {
 		t.Fatalf("SaveSiteConfig update: %v", err)
 	}
@@ -61,8 +57,8 @@ func TestSiteConfigSaveLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSiteConfig after update: %v", err)
 	}
-	if got.TestRepoRef != "abc123def" {
-		t.Fatalf("expected updated ref, got %q", got.TestRepoRef)
+	if got.CodeRepo != "https://gitlab.com/group/code2" {
+		t.Fatalf("expected updated repo, got %q", got.CodeRepo)
 	}
 
 	// Still exactly one row.

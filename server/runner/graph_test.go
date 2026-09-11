@@ -158,7 +158,7 @@ func TestBuildStageScriptAndExports(t *testing.T) {
 		"export MD_COMMIT='abcdef123456'",
 		"export MD_ENV_NAME='cpu-node'",
 		"export MD_ENV_TAGS='cpu,mpi'",
-		`export MD_TEST_INPUT_DIR="$HOME/.md-builder/tasks/abcdef123456/tests"`,
+		`export MD_CODE_DIR="$HOME/.md-builder/tasks/abcdef123456/code"`,
 		"export CC='gcc'",
 	} {
 		if !strings.Contains(out, want) {

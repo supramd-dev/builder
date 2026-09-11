@@ -101,16 +101,15 @@ func (in *ScriptInput) TimeoutOr(fallback int) int {
 }
 
 // ExportEnv renders the `export` lines shared by all sub-task scripts:
-// MD_COMMIT / MD_ENV_NAME / MD_ENV_TAGS / MD_CODE_DIR / MD_TEST_INPUT_DIR
-// plus the entry's env map (sorted for deterministic scripts).
+// MD_COMMIT / MD_ENV_NAME / MD_ENV_TAGS / MD_CODE_DIR plus the entry's
+// env map (sorted for deterministic scripts).
 func ExportEnv(w func(format string, args ...any), in *ScriptInput) {
 	w("export MD_COMMIT=%s", shq(in.CommitSHA))
 	w("export MD_ENV_NAME=%s", shq(in.EnvName))
 	w("export MD_ENV_TAGS=%s", shq(in.EnvTags))
-	// The directory exports carry $HOME references: double-quote so they
-	// expand on the remote host instead of staying literal.
+	// The directory export carries a $HOME reference: double-quote so it
+	// expands on the remote host instead of staying literal.
 	w("export MD_CODE_DIR=%s", shellExpand(in.CodeDir))
-	w("export MD_TEST_INPUT_DIR=%s", shellExpand(remoteTestsDir(in.CodeDir)))
 	if in.Entry != nil {
 		keys := make([]string, 0, len(in.Entry.Env))
 		for k := range in.Entry.Env {
@@ -122,12 +121,6 @@ func ExportEnv(w func(format string, args ...any), in *ScriptInput) {
 		}
 	}
 	w("")
-}
-
-// remoteTestsDir derives the tests directory from the code dir (both are
-// extracted as siblings by the clone task: .../code and .../tests).
-func remoteTestsDir(codeDir string) string {
-	return strings.TrimSuffix(codeDir, "/code") + "/tests"
 }
 
 // shq single-quotes a string for safe use in bash.

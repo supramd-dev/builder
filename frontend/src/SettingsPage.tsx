@@ -10,16 +10,15 @@ interface SettingsPageProps {
 }
 
 // SettingsPage lets logged-in users edit the site-wide repository
-// configuration: the code repository under test, the test input repository
-// and the branch/commit of the test inputs to run against.
+// configuration: the code repository under test and the credentials used
+// to access it. Test inputs live inside the code repository itself (or are
+// fetched by it), so there is no separate test-input configuration.
 export default function SettingsPage({ onError }: SettingsPageProps) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [codeRepo, setCodeRepo] = useState('')
-  const [testInputRepo, setTestInputRepo] = useState('')
-  const [testRepoRef, setTestRepoRef] = useState('')
   const [deployKey, setDeployKey] = useState('')
   const [deployToken, setDeployToken] = useState('')
   const [deployTokenUser, setDeployTokenUser] = useState('')
@@ -35,8 +34,6 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
       .then((cfg: SiteConfig) => {
         if (cancelled) return
         setCodeRepo(cfg.codeRepo)
-        setTestInputRepo(cfg.testInputRepo)
-        setTestRepoRef(cfg.testRepoRef)
         setDeployTokenUser(cfg.deployTokenUser)
         setDeployKeySet(cfg.deployKeySet)
         setDeployTokenSet(cfg.deployTokenSet)
@@ -64,8 +61,6 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
     try {
       const cfg = await updateSiteConfig({
         codeRepo,
-        testInputRepo,
-        testRepoRef,
         deployKey: clearDeployKey ? '' : deployKey,
         deployToken: clearDeployToken ? '' : deployToken,
         deployTokenUser,
@@ -73,8 +68,6 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
         clearDeployToken,
       })
       setCodeRepo(cfg.codeRepo)
-      setTestInputRepo(cfg.testInputRepo)
-      setTestRepoRef(cfg.testRepoRef)
       setDeployTokenUser(cfg.deployTokenUser)
       setDeployKeySet(cfg.deployKeySet)
       setDeployTokenSet(cfg.deployTokenSet)
@@ -115,10 +108,9 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
       </div>
 
       <p className="text-muted">
-        The <strong>code repository</strong> holds the code under test. The{' '}
-        <strong>test input repository</strong> holds the inputs used to
-        exercise it; tests run against the branch or commit id configured
-        below.
+        The <strong>code repository</strong> holds the code under test and
+        its test inputs (they live inside the repository, or the repository
+        fetches them itself).
       </p>
 
       <form onSubmit={save} style={{ maxWidth: '36rem' }}>
@@ -134,39 +126,6 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
             }}
             placeholder="https://gitlab.com/group/code"
           />
-        </div>
-
-        <div className="form-group">
-          <label htmlFor="cfg-input-repo">Test input repository</label>
-          <input
-            id="cfg-input-repo"
-            type="text"
-            value={testInputRepo}
-            onChange={(e) => {
-              setTestInputRepo(e.target.value)
-              setSaved(false)
-            }}
-            placeholder="https://gitlab.com/group/test-inputs"
-          />
-        </div>
-
-        <div className="form-group">
-          <label htmlFor="cfg-test-repo-ref">
-            Test input branch or commit id
-          </label>
-          <input
-            id="cfg-test-repo-ref"
-            type="text"
-            value={testRepoRef}
-            onChange={(e) => {
-              setTestRepoRef(e.target.value)
-              setSaved(false)
-            }}
-            placeholder="main, v1.2.0 or a commit id"
-          />
-          <small className="text-muted">
-            Tests use this version of the test input repository.
-          </small>
         </div>
 
         <h4>Repository credentials (optional)</h4>
@@ -250,7 +209,7 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
           />
           <small className="text-muted">
             PEM-encoded SSH private key of a GitLab deploy key (granted read
-            access to both repositories).
+            access to the repository).
           </small>
         </div>
 

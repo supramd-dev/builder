@@ -79,9 +79,7 @@ func TestWebhookDispatchesTasks(t *testing.T) {
 
 	// Site config: code repo matches the webhook project.
 	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
-		CodeRepo:      "https://gitlab.com/group/code",
-		TestInputRepo: "https://gitlab.com/group/tests",
-		TestRepoRef:   "main"}); err != nil {
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -198,9 +196,7 @@ func TestWebhookDispatchErrorSurfaces(t *testing.T) {
 func TestJobsAPIListAndTrigger(t *testing.T) {
 	apiServer, s := newDispatchTestServer(t, dispatchYAML)
 	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
-		CodeRepo:      "https://gitlab.com/group/code",
-		TestInputRepo: "https://gitlab.com/group/tests",
-		TestRepoRef:   "main"}); err != nil {
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
 		t.Fatal(err)
 	}
 	seedUser(t, s, "jobsuser", "jobs@example.com", "pw")
@@ -624,9 +620,7 @@ func TestDashboardOverlaysTaskState(t *testing.T) {
 func TestManualTrigger(t *testing.T) {
 	apiServer, s := newDispatchTestServer(t, dispatchYAML)
 	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
-		CodeRepo:      "https://gitlab.com/group/code",
-		TestInputRepo: "https://gitlab.com/group/tests",
-		TestRepoRef:   "main"}); err != nil {
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
 		t.Fatal(err)
 	}
 	seedUser(t, s, "manualuser", "manual@example.com", "pw")

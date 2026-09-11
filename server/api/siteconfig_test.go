@@ -47,12 +47,12 @@ func TestSiteConfigAPIFlow(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
 		t.Fatalf("decode config: %v", err)
 	}
-	if cfg["codeRepo"] != "" || cfg["testInputRepo"] != "" || cfg["testRepoRef"] != "" {
+	if cfg["codeRepo"] != "" {
 		t.Fatalf("expected empty defaults, got %v", cfg)
 	}
 
 	// Validation: empty fields rejected.
-	rec = authed(http.MethodPut, "/api/site-config", `{"codeRepo":"","testInputRepo":"","testRepoRef":""}`)
+	rec = authed(http.MethodPut, "/api/site-config", `{"codeRepo":""}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty update: expected 400, got %d", rec.Code)
 	}
@@ -67,7 +67,7 @@ func TestSiteConfigAPIFlow(t *testing.T) {
 		"http://10.0.0.5/group/code",            // bare host, accepted
 	} {
 		rec = authed(http.MethodPut, "/api/site-config",
-			fmt.Sprintf(`{"codeRepo":%q,"testInputRepo":"https://gitlab.com/g/in","testRepoRef":"main"}`, repo))
+			fmt.Sprintf(`{"codeRepo":%q}`, repo))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("repo %q: expected 200 (no host validation), got %d, body %s", repo, rec.Code, rec.Body.String())
 		}
@@ -75,24 +75,15 @@ func TestSiteConfigAPIFlow(t *testing.T) {
 
 	// Valid update round-trips.
 	rec = authed(http.MethodPut, "/api/site-config",
-		`{"codeRepo":"https://gitlab.com/group/code","testInputRepo":"git@gitlab.com:group/test-inputs.git","testRepoRef":"main"}`)
+		`{"codeRepo":"git@gitlab.com:group/code.git"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("update: expected 200, got %d, body %s", rec.Code, rec.Body.String())
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
 		t.Fatalf("decode update: %v", err)
 	}
-	if cfg["codeRepo"] != "https://gitlab.com/group/code" ||
-		cfg["testInputRepo"] != "git@gitlab.com:group/test-inputs.git" ||
-		cfg["testRepoRef"] != "main" {
+	if cfg["codeRepo"] != "git@gitlab.com:group/code.git" {
 		t.Fatalf("update not echoed: %v", cfg)
-	}
-
-	// A commit id works as ref too.
-	rec = authed(http.MethodPut, "/api/site-config",
-		`{"codeRepo":"https://gitlab.com/group/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":"9c8b7a6"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("commit id update: expected 200, got %d, body %s", rec.Code, rec.Body.String())
 	}
 
 	// Re-read: persisted.
@@ -103,8 +94,8 @@ func TestSiteConfigAPIFlow(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
 		t.Fatalf("decode re-get: %v", err)
 	}
-	if cfg["testRepoRef"] != "9c8b7a6" {
-		t.Fatalf("expected persisted ref, got %v", cfg["testRepoRef"])
+	if cfg["codeRepo"] != "git@gitlab.com:group/code.git" {
+		t.Fatalf("expected persisted repo, got %v", cfg["codeRepo"])
 	}
 
 	// Unsupported method is rejected.
@@ -135,7 +126,7 @@ func TestSiteConfigCredentials(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		return rec
 	}
-	base := `{"codeRepo":"https://gitlab.com/g/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":"main"`
+	base := `{"codeRepo":"https://gitlab.com/g/code"`
 
 	// Initial state: nothing set.
 	rec := authed(http.MethodGet, "/api/site-config", "")
@@ -184,7 +175,7 @@ func TestSiteConfigCredentials(t *testing.T) {
 	}
 
 	// An update without the secret fields keeps them (empty = keep).
-	rec = authed(http.MethodPut, "/api/site-config", base+`,"testRepoRef":"dev"}`)
+	rec = authed(http.MethodPut, "/api/site-config", base+`}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("update without credentials: %d", rec.Code)
 	}
@@ -197,7 +188,7 @@ func TestSiteConfigCredentials(t *testing.T) {
 
 	// Explicit clear flags remove them.
 	rec = authed(http.MethodPut, "/api/site-config", base+
-		`,"testRepoRef":"dev","clearDeployKey":true,"clearDeployToken":true,"deployTokenUser":""}`)
+		`,"clearDeployKey":true,"clearDeployToken":true,"deployTokenUser":""}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("clear credentials: %d", rec.Code)
 	}
@@ -330,7 +321,7 @@ func TestSiteConfigDeployKeyNewline(t *testing.T) {
 
 	put := func(key string) {
 		t.Helper()
-		body := fmt.Sprintf(`{"codeRepo":"https://gitlab.com/g/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":"main","deployKey":%q}`, key)
+		body := fmt.Sprintf(`{"codeRepo":"https://gitlab.com/g/code","deployKey":%q}`, key)
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPut, "/api/site-config", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

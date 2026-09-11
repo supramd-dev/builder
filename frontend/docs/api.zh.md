@@ -140,7 +140,7 @@ POST /api/jobs/manual
 | PUT    | `/api/environments/{id}/enabled`| 启用/停用(`{"enabled": bool}`)               |
 | POST   | `/api/environments/{id}/exec`   | 运行 shell 命令(`{"command": string}`)       |
 | POST   | `/api/environments/{id}/script` | 运行脚本(`{"language", "script"}`)           |
-| GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`testInputRepo`、`testRepoRef`、凭据设置标志) |
+| GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、凭据设置标志) |
 | PUT    | `/api/site-config`              | 更新站点配置(deploy key/token:留空保留,`clearDeploy*` 删除) |
 | GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |

@@ -144,8 +144,6 @@ export async function buildTest(
 
 export interface SiteConfig {
   codeRepo: string
-  testInputRepo: string
-  testRepoRef: string
   deployKeySet: boolean
   deployTokenSet: boolean
   deployTokenUser: string
@@ -157,8 +155,6 @@ export interface SiteConfig {
 // remove it.
 export interface SiteConfigUpdate {
   codeRepo: string
-  testInputRepo: string
-  testRepoRef: string
   deployKey?: string
   deployToken?: string
   deployTokenUser?: string

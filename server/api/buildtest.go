@@ -101,7 +101,7 @@ func (s *Server) handleBuildTest(w http.ResponseWriter, r *http.Request, user *s
 	defer cancel()
 
 	// Phase 1: server-side clone + upload (the scheduled clone task's path).
-	if _, err := s.Runner.Clone.CloneAndUpload(ctx, h, cfg.CodeRepo, ref, "", "",
+	if _, err := s.Runner.Clone.CloneAndUpload(ctx, h, cfg.CodeRepo, ref,
 		creds, remoteDir,
 		time.Duration(buildTestStageTimeout)*time.Second, nil); err != nil {
 		writeJSON(w, http.StatusOK, buildTestResult{

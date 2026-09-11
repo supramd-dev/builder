@@ -59,16 +59,14 @@ func (f *fakeExecer) ExtractTarTo(ctx context.Context, h SSHHost, r io.Reader, d
 type fakeCloner struct {
 	mu         sync.Mutex
 	codeRepo   string
-	testRepo   string
 	err        error
 	remoteDirs []string
 }
 
-func (f *fakeCloner) CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef, testInputRepo, testInputRef string, creds *GitCredentials, remoteWorkDir string, timeout time.Duration, logw io.Writer) (int64, error) {
+func (f *fakeCloner) CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef string, creds *GitCredentials, remoteWorkDir string, timeout time.Duration, logw io.Writer) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.codeRepo = codeRepoURL
-	f.testRepo = testInputRepo
 	f.remoteDirs = append(f.remoteDirs, remoteWorkDir)
 	if f.err != nil {
 		return 0, f.err
@@ -104,9 +102,7 @@ func newExecuteFixture(t *testing.T, yaml string) (*Service, *store.Store, *fake
 		t.Fatal(err)
 	}
 	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
-		CodeRepo:      "https://gitlab.example.com/group/code",
-		TestInputRepo: "https://gitlab.example.com/group/tests",
-		TestRepoRef:   "main"}); err != nil {
+		CodeRepo: "https://gitlab.example.com/group/code"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -167,9 +163,6 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 	}
 	if cloner.codeRepo != "https://gitlab.example.com/group/code" {
 		t.Errorf("clone used the wrong repo: %s", cloner.codeRepo)
-	}
-	if cloner.testRepo != "https://gitlab.example.com/group/tests" {
-		t.Errorf("clone should fetch the test input repo: %s", cloner.testRepo)
 	}
 	if len(cloner.remoteDirs) != 1 || !strings.Contains(cloner.remoteDirs[0], "c0ffee123456") {
 		t.Errorf("clone remote dir wrong: %v", cloner.remoteDirs)
