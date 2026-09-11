@@ -136,7 +136,10 @@ function App() {
               onBack={() => setPage({ view: 'run-detail', runId: page.runId })}
             />
           ) : page.view === 'run' ? (
-            <RunPage onError={console.warn} />
+            <RunPage
+              onError={console.warn}
+              onOpenTask={(taskId) => setPage({ view: 'task-graph', taskId })}
+            />
           ) : page.view === 'settings' ? (
             <SettingsPage onError={console.warn} />
           ) : page.view === 'docs' ? (

@@ -67,6 +67,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// Job scheduling: manual trigger and monitoring (requires an
 	// authenticated user).
 	mux.HandleFunc("/api/jobs", s.requireAuth(s.handleJobs))
+	mux.HandleFunc("/api/jobs/", s.requireAuth(s.handleJobs))
 
 	// Task graphs: detail and incremental logs of the runner component.
 	mux.HandleFunc("/api/tasks/", s.requireAuth(s.handleTaskItem))

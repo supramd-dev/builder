@@ -234,6 +234,108 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// ResolveRef resolves a git ref (branch, tag, short or full SHA; empty
+// means HEAD) to the full commit SHA the repository currently points at,
+// via git ls-remote on the server. creds may be nil (public repositories).
+func ResolveRef(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) {
+	if strings.TrimSpace(repoURL) == "" {
+		return "", fmt.Errorf("repository URL is empty")
+	}
+	ref = strings.TrimSpace(ref)
+
+	cloneURL := repoURL
+	var keyFile string
+	secret := ""
+	if creds != nil {
+		switch {
+		case creds.HasToken():
+			cloneURL = creds.AuthenticatedURL(repoURL)
+			secret = creds.DeployToken
+		case creds.HasKey():
+			sshURL, ok := creds.SSHURL(repoURL)
+			if !ok {
+				return "", fmt.Errorf("cannot use deploy key with repository location %q", repoURL)
+			}
+			cloneURL = sshURL
+			dir, err := os.MkdirTemp("", "md-builder-key-*")
+			if err != nil {
+				return "", fmt.Errorf("create temp dir: %w", err)
+			}
+			keyFile, err = writeTempKey(creds.DeployKey, dir)
+			if err != nil {
+				os.RemoveAll(dir)
+				return "", err
+			}
+			defer os.RemoveAll(dir)
+		}
+	}
+
+	// A full 40-hex SHA needs no network round trip.
+	if isFullSHA(ref) {
+		return strings.ToLower(ref), nil
+	}
+
+	args := []string{"ls-remote", cloneURL}
+	if ref == "" {
+		args = append(args, "HEAD")
+	} else {
+		args = append(args, ref)
+	}
+	if keyFile != "" {
+		gitArgs := append([]string{
+			"-c", "credential.helper=",
+			"-c", fmt.Sprintf("core.sshCommand=ssh -i %s -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes", shq(keyFile)),
+		}, args...)
+		args = gitArgs
+	}
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	var buf strings.Builder
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git ls-remote %s: %w (%s)", repoURL, err, Redact(strings.TrimSpace(buf.String()), secret))
+	}
+	return firstLSRemoteSHA(buf.String(), ref)
+}
+
+// firstLSRemoteSHA parses ls-remote output (lines of "<sha>\t<ref>") and
+// returns the first SHA, preferring an exact ref match over the loosely
+// matched remainder. Empty output is an error (unknown ref).
+func firstLSRemoteSHA(out, ref string) (string, error) {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if ref != "" {
+		want := ref
+		for _, l := range lines {
+			if i := strings.IndexByte(l, '\t'); i > 0 && l[i+1:] == want {
+				return l[:i], nil
+			}
+		}
+	}
+	for _, l := range lines {
+		if i := strings.IndexByte(l, '\t'); i >= 40 {
+			return l[:40], nil
+		}
+	}
+	if ref == "" {
+		return "", fmt.Errorf("git ls-remote: repository advertises no HEAD")
+	}
+	return "", fmt.Errorf("git ls-remote: ref %q not found", ref)
+}
+
+// isFullSHA reports whether s is a 40-character hex commit id.
+func isFullSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return false
+		}
+	}
+	return true
+}
+
 // RemoteTaskDir is the remote workspace path for a commit: ~/.md-builder/
 // tasks/<sha12>. Both the shell script and the clone upload use it.
 func RemoteTaskDir(sha string) string {

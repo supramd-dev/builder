@@ -113,7 +113,8 @@ export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props)
             cells: full.environments.map((env) => {
               const stages = r.stages[String(env.id)] ?? []
               const taskId = r.taskIds[String(env.id)]
-              return { kind: 'full' as const, stages, taskId }
+              const trigger = r.triggers?.[String(env.id)]
+              return { kind: 'full' as const, stages, taskId, trigger }
             }),
           }))}
           onOpenRun={onOpenRun}
@@ -140,10 +141,11 @@ export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props)
 
 // Normalized row shape shared by the full and single-kind matrices: one
 // entry per (commit, environment) holding either the environment's stage
-// list (full view) or the single-kind's run cell.
+// list (full view) or the single-kind's run cell. trigger is the root
+// graph's origin (1 = manually dispatched from the UI).
 type MatrixCell =
   | { kind: 'single'; cell: RunCell | null; taskId?: number }
-  | { kind: 'full'; stages: FullStage[]; taskId?: number }
+  | { kind: 'full'; stages: FullStage[]; taskId?: number; trigger?: number }
 
 interface MatrixRow {
   commit: DashboardCommit
@@ -267,6 +269,7 @@ function MatrixTable({
                       </td>
                       <td className="dash-cell">
                         {cell.taskId ? (
+                          <>
                             <a
                               href="#"
                               className="dash-full-graph"
@@ -278,6 +281,12 @@ function MatrixTable({
                             >
                               <Network size={14} aria-label="graph" />
                             </a>
+                            {cell.trigger === 1 && (
+                              <span className="dash-trigger" title="manually triggered">
+                                M
+                              </span>
+                            )}
+                          </>
                         ) : (
                           <span className="text-muted">—</span>
                         )}
@@ -389,5 +398,14 @@ function SingleCell({
       (status === 'pending'
         ? 'Task queued — click for details'
         : 'Task running — click to follow the log')
-  return <StageStatus status={status} label={label} onClick={onClick} title={title} />
+  return (
+    <>
+      <StageStatus status={status} label={label} onClick={onClick} title={title} />
+      {cell.trigger === 1 && (
+        <span className="dash-trigger" title="manually triggered">
+          M
+        </span>
+      )}
+    </>
+  )
 }

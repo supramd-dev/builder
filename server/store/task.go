@@ -28,6 +28,13 @@ const (
 	TaskSkipped = "skipped"
 )
 
+// Task trigger sources: what dispatched the graph. Webhook (0) is the
+// default — a GitLab push; manual (1) is a user-submitted test from the UI.
+const (
+	TaskTriggerWebhook int = 0
+	TaskTriggerManual  int = 1
+)
+
 // Task is one node of a dispatched task graph: either the root (the whole
 // test of one commit on one environment, replacing the former Job row) or a
 // sub-task (clone / build / unit / regression, ...). Sub-tasks of a graph
@@ -43,8 +50,9 @@ type Task struct {
 	CommitID      int64  `gorm:"index;not null"`
 	EnvironmentID int64  `gorm:"index;not null"`
 	Tags          string `gorm:"not null;default:''"`
-	Config        string `gorm:"type:text"` // root: entry snapshot; sub-task: stage snapshot (JSON)
-	DependsOn     string `gorm:"type:text"` // JSON array of task IDs, e.g. "[3,4]"
+	Trigger       int    `gorm:"not null;default:0"` // 0 = webhook, 1 = manual (TaskTrigger*)
+	Config        string `gorm:"type:text"`          // root: entry snapshot; sub-task: stage snapshot (JSON)
+	DependsOn     string `gorm:"type:text"`          // JSON array of task IDs, e.g. "[3,4]"
 	Status        string `gorm:"index;not null;default:'pending'"`
 	Error         string `gorm:"not null;default:''"`
 	Attempts      int    `gorm:"not null;default:0"`

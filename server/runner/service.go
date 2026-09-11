@@ -30,14 +30,24 @@ const (
 // (execution pool) and sub-task execution. Construct with NewService; call
 // Start once from main to launch the scheduling pool.
 type Service struct {
-	Store     *store.Store
-	SSH       Execer      // transport to the test environments
-	Clone     RepoCloner  // server-side source acquisition
-	FetchYAML YAMLFetcher // reads md-builder.yaml at a commit (tests inject)
+	Store      *store.Store
+	SSH        Execer                                                                                // transport to the test environments
+	Clone      RepoCloner                                                                            // server-side source acquisition
+	FetchYAML  YAMLFetcher                                                                           // reads md-builder.yaml at a commit (tests inject)
+	ResolveRef func(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) // ref → SHA for manual dispatch (tests inject)
 
 	// Workers is the scheduling pool size (0 = defaultWorkers; the
 	// MD_BUILDER_WORKERS env var overrides at NewService time).
 	Workers int
+}
+
+// resolveRef resolves the Service's ref resolver, defaulting to the real
+// git ls-remote implementation.
+func (s *Service) resolveRef(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) {
+	if s.ResolveRef != nil {
+		return s.ResolveRef(ctx, repoURL, ref, creds)
+	}
+	return ResolveRef(ctx, repoURL, ref, creds)
 }
 
 // NewService returns a Service wired to the real SSH transport and git

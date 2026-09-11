@@ -40,6 +40,7 @@ type taskDetailJSON struct {
 	CommitID      int64             `json:"commitId"`
 	EnvironmentID int64             `json:"environmentId"`
 	Tags          string            `json:"tags"`
+	Trigger       int               `json:"trigger"` // 0 = webhook, 1 = manual
 	StartedAt     string            `json:"startedAt"`
 	FinishedAt    string            `json:"finishedAt"`
 	SubTasks      []subTaskJSON     `json:"subTasks,omitempty"` // roots only
@@ -104,6 +105,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, id int64) {
 		CommitID:      task.CommitID,
 		EnvironmentID: task.EnvironmentID,
 		Tags:          task.Tags,
+		Trigger:       task.Trigger,
 	}
 	if task.StartedAt != nil {
 		detail.StartedAt = task.StartedAt.UTC().Format(timeFormat)

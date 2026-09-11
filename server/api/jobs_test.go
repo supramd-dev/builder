@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -580,4 +581,152 @@ func TestDashboardOverlaysTaskState(t *testing.T) {
 	if dash.Environments[0].Tags != "cpu" {
 		t.Fatalf("environment tags missing: %+v", dash.Environments[0])
 	}
+}
+
+// TestManualTrigger creates graphs through POST /api/jobs/manual and checks
+// the trigger flag, the recorded commit and the validation paths.
+func TestManualTrigger(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo:      "https://gitlab.com/group/code",
+		TestInputRepo: "https://gitlab.com/group/tests",
+		TestRepoRef:   "main"}); err != nil {
+		t.Fatal(err)
+	}
+	seedUser(t, s, "manualuser", "manual@example.com", "pw")
+	envCPU := seedDispatchEnv(t, s, "cpu-manual", "cpu", true)
+	envGPU := seedDispatchEnv(t, s, "gpu-manual", "gpu", true)
+
+	// The runner resolves refs without git: inject a fake.
+	apiServer.Runner.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *runner.GitCredentials) (string, error) {
+		return "abc123abc123abc123abc123abc123abc123abc1", nil
+	}
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "manualuser", "pw")
+
+	authed := func(method, target, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Validation: no environments.
+	rec := authed(http.MethodPost, "/api/jobs/manual", `{"repo":"https://gitlab.com/group/code","buildCommand":"make"}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("no envs: expected 422, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	// Validation: all commands empty.
+	rec = authed(http.MethodPost, "/api/jobs/manual",
+		fmt.Sprintf(`{"environmentIds":[%d,%d],"unitCommand":""}`, envCPU.ID, envGPU.ID))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("no commands: expected 422, got %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// Happy path: build + unit on two environments, repo omitted (site default).
+	rec = authed(http.MethodPost, "/api/jobs/manual", fmt.Sprintf(`{
+		"buildCommand": "make -j4",
+		"unitCommand": "ctest -L unit",
+		"environmentIds": [%d, %d]
+	}`, envCPU.ID, envGPU.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manual trigger: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Roots []manualTestRoot `json:"roots"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Roots) != 2 {
+		t.Fatalf("expected 2 roots, got %d (%s)", len(res.Roots), rec.Body.String())
+	}
+
+	// The commit is recorded (normalized repo path) and each root is a
+	// manual graph over it, with build and unit sub-tasks.
+	commit, err := s.GetCommitByID(loadRootCommitID(t, s, res.Roots[0].TaskID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commit.Repo != "group/code" || commit.SHA != "abc123abc123abc123abc123abc123abc123abc1" {
+		t.Fatalf("unexpected commit: %+v", commit)
+	}
+	if commit.Author != "manualuser" {
+		t.Fatalf("commit author: want manualuser, got %q", commit.Author)
+	}
+	for _, rootRef := range res.Roots {
+		root, err := s.GetTask(rootRef.TaskID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if root.Trigger != store.TaskTriggerManual {
+			t.Fatalf("root %d trigger: want manual(%d), got %d", root.ID, store.TaskTriggerManual, root.Trigger)
+		}
+		subs, err := s.ListSubTasks(root.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kinds := map[string]bool{}
+		for i := range subs {
+			kinds[subs[i].Kind] = true
+		}
+		if !kinds[store.TaskKindBuild] || !kinds[store.TaskKindUnit] || kinds[store.TaskKindRegression] {
+			t.Fatalf("root %d sub-task kinds wrong: %v", root.ID, kinds)
+		}
+	}
+
+	// The task detail API exposes the trigger.
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d", res.Roots[0].TaskID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("task detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail taskDetailJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Trigger != store.TaskTriggerManual {
+		t.Fatalf("detail trigger: want %d, got %d", store.TaskTriggerManual, detail.Trigger)
+	}
+
+	// Webhook-created roots keep trigger 0.
+	commitWH := &store.Commit{Repo: "group/code", SHA: "ffff01", PushedAt: time.Now()}
+	if _, err := s.GetOrCreateCommit(commitWH); err != nil {
+		t.Fatal(err)
+	}
+	rec = authed(http.MethodPost, "/api/webhooks/gitlab", pushBody("group/code", "ffff01"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhook: %d %s", rec.Code, rec.Body.String())
+	}
+	whRoot, err := s.FindRootTaskByCommitEnv(commitWH.ID, envCPU.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whRoot.Trigger != store.TaskTriggerWebhook {
+		t.Fatalf("webhook root trigger: want %d, got %d", store.TaskTriggerWebhook, whRoot.Trigger)
+	}
+
+	// A disabled environment is rejected. SetEnvironmentEnabled is
+	// owner-scoped, so disable via a direct column update (no BeforeSave).
+	if err := s.DB.Model(&store.TestEnvironment{}).Where("id = ?", envGPU.ID).
+		UpdateColumn("enabled", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	rec = authed(http.MethodPost, "/api/jobs/manual",
+		fmt.Sprintf(`{"unitCommand":"go test ./...","environmentIds":[%d]}`, envGPU.ID))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("disabled env: expected 422, got %d, body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// loadRootCommitID returns a root task's CommitID.
+func loadRootCommitID(t *testing.T, s *store.Store, taskID int64) int64 {
+	t.Helper()
+	task, err := s.GetTask(taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return task.CommitID
 }

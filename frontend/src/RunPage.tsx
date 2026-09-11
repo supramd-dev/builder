@@ -6,6 +6,7 @@ import {
   execScript,
   getSiteConfig,
   listEnvironments,
+  triggerManualTest,
   type BuildTestResult,
   type ExecResult,
   type ScriptLanguage,
@@ -14,6 +15,8 @@ import {
 
 interface RunPageProps {
   onError: (message: string) => void
+  // onOpenTask jumps to a freshly dispatched graph (manual test tab).
+  onOpenTask?: (taskId: number) => void
 }
 
 // Default script skeletons. The first-line comment names the interpreter
@@ -43,8 +46,8 @@ const INTERPRETERS: Record<ScriptLanguage, string[]> = {
 // tabs: ad-hoc command/script execution, and an interactive build test
 // (clone the site-configured code repository on the environment and run a
 // build command).
-export default function RunPage({ onError }: RunPageProps) {
-  const [tab, setTab] = useState<'exec' | 'build'>('exec')
+export default function RunPage({ onError, onOpenTask }: RunPageProps) {
+  const [tab, setTab] = useState<'exec' | 'build' | 'manual'>('exec')
 
   return (
     <div>
@@ -68,8 +71,23 @@ export default function RunPage({ onError }: RunPageProps) {
         >
           Build test
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'manual'}
+          className={tab === 'manual' ? 'tab active' : 'tab'}
+          onClick={() => setTab('manual')}
+        >
+          Manual test
+        </button>
       </div>
-      {tab === 'exec' ? <ExecTab onError={onError} /> : <BuildTestTab onError={onError} />}
+      {tab === 'exec' ? (
+        <ExecTab onError={onError} />
+      ) : tab === 'build' ? (
+        <BuildTestTab onError={onError} />
+      ) : (
+        <ManualTestTab onError={onError} onOpenTask={onOpenTask} />
+      )}
     </div>
   )
 }
@@ -478,6 +496,242 @@ function BuildTestTab({ onError }: RunPageProps) {
             </>
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+// --- Manual test tab (dispatch build/unit/regression graphs) ---------------
+
+const DEFAULT_MANUAL_BUILD = 'cmake . && cmake --build . -j8'
+
+// ManualTestTab dispatches a user-configured test: one repository (default:
+// the site config's code repository), an optional ref and the three stage
+// commands, run as task graphs (clone → build → unit → regression) by the
+// scheduler on the selected environments.
+function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
+  const [environments, setEnvironments] = useState<TestEnvironment[]>([])
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [loading, setLoading] = useState(true)
+  const [repo, setRepo] = useState('')
+  const [ref, setRef] = useState('')
+  const [buildCommand, setBuildCommand] = useState('')
+  const [unitCommand, setUnitCommand] = useState('')
+  const [regressionCommand, setRegressionCommand] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const [dispatched, setDispatched] = useState<number[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    Promise.all([listEnvironments(), getSiteConfig().catch(() => null)])
+      .then(([envs, cfg]) => {
+        if (cancelled) return
+        const enabled = envs.filter((e) => e.enabled)
+        setEnvironments(enabled)
+        setSelected(new Set(enabled.map((e) => e.id))) // default: all
+        if (cfg) setRepo(cfg.codeRepo)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        const msg = err instanceof Error ? err.message : String(err)
+        setError(msg)
+        onError(msg)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [onError])
+
+  const toggleEnv = (id: number) => {
+    setSelected((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const submit = async () => {
+    if (submitting || selected.size === 0) return
+    setSubmitting(true)
+    setError('')
+    setDispatched([])
+    try {
+      const res = await triggerManualTest({
+        repo,
+        ref,
+        buildCommand,
+        unitCommand,
+        regressionCommand,
+        environmentIds: [...selected],
+      })
+      setDispatched(res.roots.map((r) => r.taskId))
+      if (res.roots.length > 0 && onOpenTask) onOpenTask(res.roots[0].taskId)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div>
+      <p className="text-muted">
+        Dispatch a test of one repository on the selected environments: the
+        task graph (clone → build → unit test → regression test) is queued
+        and run by the scheduler, like a webhook-triggered push. It shows up
+        on the dashboard marked <code>manual</code>.{' '}
+        {repo ? (
+          <>
+            Default repository: <code>{repo}</code>
+          </>
+        ) : (
+          <em>No code repository configured in the site settings — enter one below.</em>
+        )}
+      </p>
+
+      {loading ? (
+        <p>Loading environments…</p>
+      ) : environments.length === 0 ? (
+        <div className="alert alert-danger">
+          No enabled environments available. Enable one in the user center
+          first.
+        </div>
+      ) : (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (!submitting) void submit()
+          }}
+        >
+          <div className="run-controls">
+            <div className="form-group">
+              <label htmlFor="manual-repo">Repository (empty = site default)</label>
+              <input
+                id="manual-repo"
+                type="text"
+                value={repo}
+                onChange={(e) => setRepo(e.target.value)}
+                placeholder="https://gitlab.com/group/code"
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="manual-ref">Branch, tag or commit (optional)</label>
+              <input
+                id="manual-ref"
+                type="text"
+                value={ref}
+                onChange={(e) => setRef(e.target.value)}
+                placeholder="main / v1.2.0 / a commit id — empty = HEAD"
+              />
+            </div>
+          </div>
+
+          <fieldset className="form-group">
+            <label>Stages — an empty stage is skipped</label>
+            <div className="manual-stages">
+              <div className="form-group">
+                <label htmlFor="manual-build">Build command</label>
+                <textarea
+                  id="manual-build"
+                  className="form-control"
+                  rows={2}
+                  value={buildCommand}
+                  onChange={(e) => setBuildCommand(e.target.value)}
+                  placeholder={DEFAULT_MANUAL_BUILD}
+                  style={{
+                    fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+                    fontSize: '0.875rem',
+                  }}
+                />
+                <small className="text-muted">Empty uses the CMake default.</small>
+              </div>
+              <div className="form-group">
+                <label htmlFor="manual-unit">Unit test command</label>
+                <textarea
+                  id="manual-unit"
+                  className="form-control"
+                  rows={2}
+                  value={unitCommand}
+                  onChange={(e) => setUnitCommand(e.target.value)}
+                  placeholder="ctest -L unit"
+                  style={{
+                    fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+                    fontSize: '0.875rem',
+                  }}
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="manual-reg">Regression test command</label>
+                <textarea
+                  id="manual-reg"
+                  className="form-control"
+                  rows={2}
+                  value={regressionCommand}
+                  onChange={(e) => setRegressionCommand(e.target.value)}
+                  placeholder="python3 run.py"
+                  style={{
+                    fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+                    fontSize: '0.875rem',
+                  }}
+                />
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset className="form-group">
+            <label>Environments (all enabled selected by default)</label>
+            <div className="manual-envs">
+              {environments.map((env) => (
+                <label key={env.id} className="run-lang-option">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(env.id)}
+                    onChange={() => toggleEnv(env.id)}
+                  />{' '}
+                  {env.name}
+                  {env.tags && <span className="text-muted"> ({env.tags})</span>}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={submitting || selected.size === 0}
+          >
+            {submitting ? 'Dispatching…' : `Dispatch test (${selected.size} environment${selected.size === 1 ? '' : 's'})`}
+          </button>
+        </form>
+      )}
+
+      {error && <div className="alert alert-danger">{error}</div>}
+
+      {dispatched.length > 0 && !error && (
+        <p>
+          Dispatched {dispatched.length} task graph{dispatched.length === 1 ? '' : 's'}:{' '}
+          {dispatched.map((id, i) => (
+            <span key={id}>
+              {i > 0 && ', '}
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault()
+                  if (onOpenTask) onOpenTask(id)
+                }}
+              >
+                task #{id}
+              </a>
+            </span>
+          ))}
+        </p>
       )}
     </div>
   )

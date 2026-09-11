@@ -213,6 +213,7 @@ export interface RunCell {
   total: number
   passed: number
   failed: number
+  trigger?: number // the root graph's trigger: 1 = manual, 0/absent = webhook
   startedAt: string
   finishedAt: string
   error?: string
@@ -245,6 +246,32 @@ export async function triggerJobs(commitId: number): Promise<{
   return api<{ jobsCreated: number; entriesSkipped: number }>('/api/jobs', {
     method: 'POST',
     body: JSON.stringify({ commitId }),
+  })
+}
+
+// ManualTestInput is the POST /api/jobs/manual body: one repository (empty
+// = the site-config default), an optional ref (empty = HEAD), the stage
+// commands (an empty stage is skipped) and the environments to run on.
+export interface ManualTestInput {
+  repo?: string
+  ref?: string
+  buildCommand?: string
+  unitCommand?: string
+  regressionCommand?: string
+  environmentIds: number[]
+}
+
+export interface ManualTestRoot {
+  taskId: number
+  environmentId: number
+}
+
+export async function triggerManualTest(
+  input: ManualTestInput,
+): Promise<{ roots: ManualTestRoot[] }> {
+  return api<{ roots: ManualTestRoot[] }>('/api/jobs/manual', {
+    method: 'POST',
+    body: JSON.stringify(input),
   })
 }
 
@@ -289,6 +316,8 @@ export interface FullRow {
   stages: Record<string, FullStage[]>
   // environment id → root task id (the dependency graph link)
   taskIds: Record<string, number>
+  // environment id → root trigger (1 = manual, absent = webhook)
+  triggers?: Record<string, number>
 }
 
 export interface FullDashboard {
@@ -391,6 +420,7 @@ export interface TaskDetail {
   commitId: number
   environmentId: number
   tags: string
+  trigger?: number // 1 = manual, 0/absent = webhook
   startedAt: string
   finishedAt: string
   subTasks?: SubTask[]

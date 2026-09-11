@@ -679,6 +679,20 @@ div.dash-commit-cell {
   color: var(--muted);
 }
 
+/* The "M"/"manual" badge marking manually dispatched graphs (matrix cells,
+   task summaries). Small, muted, rounded — quieter than a status color. */
+.dash-trigger {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0 0.3rem;
+  font-size: 0.7rem;
+  line-height: 1.1;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  vertical-align: 1px;
+}
+
 .dash-no-run {
   display: inline-block;
   min-width: 1.5rem;

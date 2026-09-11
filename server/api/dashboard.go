@@ -55,6 +55,7 @@ type runCellJSON struct {
 	Total      int    `json:"total"`
 	Passed     int    `json:"passed"`
 	Failed     int    `json:"failed"`
+	Trigger    int    `json:"trigger,omitempty"` // the root graph's trigger (0 = webhook)
 	StartedAt  string `json:"startedAt"`
 	FinishedAt string `json:"finishedAt"`
 }
@@ -215,9 +216,10 @@ type fullStageJSON struct {
 // pipeline stages in display order (build, unit, regression) and the task
 // graph link (to the dependency-graph page).
 type fullRowJSON struct {
-	Commit  commitJSON                `json:"commit"`
-	Stages  map[int64][]fullStageJSON `json:"stages"`  // environment id → stages
-	TaskIDs map[int64]int64           `json:"taskIds"` // environment id → root task id (graph link)
+	Commit   commitJSON                `json:"commit"`
+	Stages   map[int64][]fullStageJSON `json:"stages"`             // environment id → stages
+	TaskIDs  map[int64]int64           `json:"taskIds"`            // environment id → root task id (graph link)
+	Triggers map[int64]int             `json:"triggers,omitempty"` // environment id → root trigger (0 = webhook)
 }
 
 // fullDashboardJSON is the full matrix response.
@@ -310,9 +312,10 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 	for i := range commits {
 		commit := &commits[i]
 		row := fullRowJSON{
-			Commit:  s.toCommitJSON(commit),
-			Stages:  map[int64][]fullStageJSON{},
-			TaskIDs: map[int64]int64{},
+			Commit:   s.toCommitJSON(commit),
+			Stages:   map[int64][]fullStageJSON{},
+			TaskIDs:  map[int64]int64{},
+			Triggers: map[int64]int{},
 		}
 		for j := range envs {
 			envID := envs[j].ID
@@ -324,6 +327,7 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 			graph, hasGraph := graphs[key]
 			if hasGraph {
 				row.TaskIDs[envID] = graph.Root.ID
+				row.Triggers[envID] = graph.Root.Trigger
 			}
 
 			for _, kind := range []string{store.RunKindBuild, store.RunKindUnit, store.RunKindRegression} {
@@ -740,7 +744,7 @@ func toRunCellJSON(run *store.TestRun, status string) *runCellJSON {
 // the stage sub-task is missing. When the stage failed before any report,
 // the sub-task errors hint at what broke.
 func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON {
-	cell := &runCellJSON{RunID: 0, TaskID: root.ID}
+	cell := &runCellJSON{RunID: 0, TaskID: root.ID, Trigger: root.Trigger}
 	// The sub-task whose kind matches this view (build/unit/regression).
 	stageKind := map[string]string{
 		store.RunKindBuild:      store.TaskKindBuild,

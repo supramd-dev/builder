@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"md-builder/server/runner"
 	"md-builder/server/store"
@@ -29,7 +30,15 @@ type jobJSON struct {
 // handleJobs routes /api/jobs: POST re-dispatches a commit (manual trigger),
 // GET lists recent root tasks.
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request, user *store.User) {
-	_ = user
+	rest := strings.TrimPrefix(r.URL.Path, "/api/jobs")
+	if strings.Trim(rest, "/") == "manual" {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		s.triggerManual(w, r, user)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.listJobs(w, r)
@@ -124,6 +133,69 @@ func (s *Server) triggerJobs(w http.ResponseWriter, r *http.Request) {
 		"jobsCreated":    d.TasksCreated,
 		"entriesSkipped": d.EntriesSkipped,
 	})
+}
+
+// manualTestInput is the body of POST /api/jobs/manual: one repository
+// (empty = site config default), an optional ref (empty = HEAD), the three
+// stage commands (an empty stage is skipped; at least one is required) and
+// the environments to run on.
+type manualTestInput struct {
+	Repo              string  `json:"repo"`
+	Ref               string  `json:"ref"`
+	BuildCommand      string  `json:"buildCommand"`
+	UnitCommand       string  `json:"unitCommand"`
+	RegressionCommand string  `json:"regressionCommand"`
+	EnvironmentIDs    []int64 `json:"environmentIds"`
+}
+
+// manualTestRoot is one created graph of the manual trigger response.
+type manualTestRoot struct {
+	TaskID        int64 `json:"taskId"`
+	EnvironmentID int64 `json:"environmentId"`
+}
+
+// triggerManual handles POST /api/jobs/manual — create task graphs for a
+// user-submitted test (repository + stage commands + environments) and let
+// the scheduler run them.
+func (s *Server) triggerManual(w http.ResponseWriter, r *http.Request, user *store.User) {
+	if s.Runner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "task dispatch is not configured"})
+		return
+	}
+	var in manualTestInput
+	if err := decodeJSON(r, &in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+	if len(in.EnvironmentIDs) == 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "select at least one environment"})
+		return
+	}
+	if strings.TrimSpace(in.BuildCommand) == "" &&
+		strings.TrimSpace(in.UnitCommand) == "" &&
+		strings.TrimSpace(in.RegressionCommand) == "" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "at least one stage command is required"})
+		return
+	}
+
+	roots, err := s.Runner.DispatchManual(runner.ManualDispatch{
+		Repo:              in.Repo,
+		Ref:               in.Ref,
+		BuildCommand:      in.BuildCommand,
+		UnitCommand:       in.UnitCommand,
+		RegressionCommand: in.RegressionCommand,
+		EnvironmentIDs:    in.EnvironmentIDs,
+		Username:          user.Username,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	out := make([]manualTestRoot, 0, len(roots))
+	for _, root := range roots {
+		out = append(out, manualTestRoot{TaskID: root.ID, EnvironmentID: root.EnvironmentID})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"roots": out})
 }
 
 func toJobJSON(t *store.Task) jobJSON {
