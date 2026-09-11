@@ -116,7 +116,7 @@ func TestBuildBuildScriptCMake(t *testing.T) {
 	}
 	for _, want := range []string{
 		"set -uo pipefail",
-		"CODE='$HOME/.md-builder/tasks/abcdef123456/code'",
+		`CODE="$HOME/.md-builder/tasks/abcdef123456/code"`,
 		`cd "$CODE" || exit 1`,
 		"timeout 120 cmake -DX=1 . && timeout 120 cmake --build . -j4",
 	} {
@@ -141,7 +141,7 @@ func TestBuildStageScriptAndExports(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"CODE='$HOME/.md-builder/tasks/abcdef123456/code'",
+		`CODE="$HOME/.md-builder/tasks/abcdef123456/code"`,
 		`cd "$CODE" || exit 1`,
 		"timeout 90 bash -c 'ctest -L unit'",
 	} {
@@ -158,7 +158,7 @@ func TestBuildStageScriptAndExports(t *testing.T) {
 		"export MD_COMMIT='abcdef123456'",
 		"export MD_ENV_NAME='cpu-node'",
 		"export MD_ENV_TAGS='cpu,mpi'",
-		"export MD_TEST_INPUT_DIR='$HOME/.md-builder/tasks/abcdef123456/tests'",
+		`export MD_TEST_INPUT_DIR="$HOME/.md-builder/tasks/abcdef123456/tests"`,
 		"export CC='gcc'",
 	} {
 		if !strings.Contains(out, want) {

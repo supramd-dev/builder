@@ -80,10 +80,12 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request) {
 	cfg.CodeRepo = strings.TrimSpace(in.CodeRepo)
 	cfg.TestInputRepo = strings.TrimSpace(in.TestInputRepo)
 	cfg.TestRepoRef = strings.TrimSpace(in.TestRepoRef)
-	// Credentials: empty = keep, Clear* = remove, otherwise replace.
+	// Credentials: empty = keep, Clear* = remove, otherwise replace. The
+	// deploy key keeps its trailing newline: OpenSSH-format keys are
+	// rejected by the ssh CLI ("invalid format") without one.
 	if in.ClearDeployKey {
 		cfg.DeployKey = ""
-	} else if key := strings.TrimSpace(in.DeployKey); key != "" {
+	} else if key := normalizePEMKey(in.DeployKey); key != "" {
 		cfg.DeployKey = key
 	}
 	if in.ClearDeployToken {

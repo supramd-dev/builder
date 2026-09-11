@@ -183,8 +183,9 @@ func CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef, testIn
 		if ref == "" {
 			ref = "HEAD"
 		}
+		fmt.Fprintf(logwOrDiscard(logw), "cloning test input %s at %s\n", testInputRepo, ref)
 		if err := CloneRepo(ctx, testInputRepo, ref, testsDir, creds, logw); err != nil {
-			return 0, fmt.Errorf("clone test input repository: %w", err)
+			return 0, fmt.Errorf("clone test input repository %s: %w", testInputRepo, err)
 		}
 	}
 
@@ -206,12 +207,11 @@ func CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef, testIn
 		uploadErr <- err
 	}()
 
+	// Count the bytes actually shipped to the remote tar (diagnostics for
+	// the "uploaded X MiB" log line).
 	var uploaded int64
-	counting := &countingWriter{n: &uploaded, w: logw}
-	// The tar stream is piped to the remote tar via SSH stdin; logw sees
-	// nothing from this phase except through the counting wrapper's noop.
-	_ = counting
-	if err := ExtractTarTo(ctx, h, pr, remoteWorkDir, timeout); err != nil {
+	counting := &countingReader{n: &uploaded, r: pr}
+	if err := ExtractTarTo(ctx, h, counting, remoteWorkDir, timeout); err != nil {
 		return uploaded, err
 	}
 	if err := <-uploadErr; err != nil {
@@ -220,18 +220,16 @@ func CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL, codeRef, testIn
 	return uploaded, nil
 }
 
-// countingWriter counts bytes written (diagnostics for upload logging).
-type countingWriter struct {
+// countingReader counts bytes read (diagnostics for upload logging).
+type countingReader struct {
 	n *int64
-	w io.Writer
+	r io.Reader
 }
 
-func (c *countingWriter) Write(p []byte) (int, error) {
-	*c.n += int64(len(p))
-	if c.w != nil {
-		return c.w.Write(p)
-	}
-	return len(p), nil
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	*c.n += int64(n)
+	return n, err
 }
 
 // ResolveRef resolves a git ref (branch, tag, short or full SHA; empty
@@ -337,21 +335,12 @@ func isFullSHA(s string) bool {
 }
 
 // RemoteTaskDir is the remote workspace path for a commit: ~/.md-builder/
-// tasks/<sha12>. Both the shell script and the clone upload use it.
+// tasks/<sha12> (as a $HOME reference — the remote shell expands it; both
+// the stage scripts and the clone upload use it).
 func RemoteTaskDir(sha string) string {
 	short := sha
 	if len(short) > 12 {
 		short = short[:12]
 	}
 	return "$HOME/.md-builder/tasks/" + short
-}
-
-// RemoteTaskDirResolved is RemoteTaskDir with the ~ already expanded (for
-// remote commands that must not rely on shell expansion).
-func RemoteTaskDirResolved(sha string) string {
-	short := sha
-	if len(short) > 12 {
-		short = short[:12]
-	}
-	return "~/.md-builder/tasks/" + short
 }

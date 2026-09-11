@@ -135,7 +135,7 @@ func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 	fmt.Fprintf(logw, "cloning %s at %s on the server\n", rc.cfg.CodeRepo, rc.sha)
 
 	h := envToSSHHost(rc.env)
-	remoteDir := RemoteTaskDirResolved(rc.sha)
+	remoteDir := RemoteTaskDir(rc.sha)
 	uploaded, err := s.Clone.CloneAndUpload(
 		ctx, h,
 		rc.cfg.CodeRepo, rc.sha,

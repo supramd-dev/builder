@@ -412,6 +412,17 @@ func validateEnvironmentInput(in *environmentInput) string {
 	return ""
 }
 
+// normalizePEMKey trims surrounding whitespace from a pasted key but keeps
+// the trailing newline OpenSSH keys require (ssh -i rejects the file with
+// "invalid format" without it). Empty input stays empty.
+func normalizePEMKey(key string) string {
+	key = strings.Trim(key, " \t\r\n")
+	if key == "" {
+		return ""
+	}
+	return key + "\n"
+}
+
 // isPEMKey performs a cheap check that the blob looks like PEM.
 func isPEMKey(key string) bool {
 	t := strings.TrimSpace(key)

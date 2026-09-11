@@ -75,10 +75,15 @@ func GitYAMLFetcher(codeRepoURL, sha string, creds *GitCredentials) ([]byte, err
 }
 
 // writeTempKey writes a PEM key inside dir with 0600 permissions; git/ssh
-// refuse world-readable key files.
+// refuse world-readable key files. A missing trailing newline is restored:
+// OpenSSH-format keys are rejected ("invalid format") without one, and keys
+// stored before that was guaranteed may lack it.
 func writeTempKey(pem, dir string) (string, error) {
 	if !strings.Contains(pem, "-----BEGIN") {
 		return "", fmt.Errorf("deploy key is not PEM-encoded")
+	}
+	if !strings.HasSuffix(pem, "\n") {
+		pem += "\n"
 	}
 	path := dir + "/deploy-key"
 	if err := os.WriteFile(path, []byte(pem), 0o600); err != nil {

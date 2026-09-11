@@ -88,7 +88,7 @@ func (s *Server) handleBuildTest(w http.ResponseWriter, r *http.Request, user *s
 	}
 
 	h := runner.SSHHostFromEnv(env)
-	remoteDir := "~/.md-builder/build-test"
+	remoteDir := "$HOME/.md-builder/build-test"
 	creds := &runner.GitCredentials{
 		DeployKey:       cfg.DeployKey,
 		DeployToken:     cfg.DeployToken,
@@ -113,7 +113,8 @@ func (s *Server) handleBuildTest(w http.ResponseWriter, r *http.Request, user *s
 		return
 	}
 
-	// Phase 2: the build command in the uploaded code directory.
+	// Phase 2: the build command in the uploaded code directory. The cd
+	// target is unquoted so $HOME expands on the remote host.
 	script := "#!/usr/bin/env bash\nset -uo pipefail\ncd " + remoteDir + "/code || exit 1\n" +
 		"timeout " + itoa(buildTestStageTimeout) + " bash -c " + runner.ShellQuote(command) + "\nexit $?\n"
 	var stdout, stderr strings.Builder

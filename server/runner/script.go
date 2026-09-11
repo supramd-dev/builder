@@ -25,7 +25,10 @@ func BuildBuildScript(in *ScriptInput) (string, error) {
 
 	w("#!/usr/bin/env bash")
 	w("set -uo pipefail")
-	w("CODE=%s", shq(in.CodeDir))
+	// CODE keeps $HOME as a reference: the assignment is double-quoted so it
+	// expands on the remote host at assignment time (a single-quoted value
+	// would stay literal in `cd "$CODE"`).
+	w("CODE=%s", shellExpand(in.CodeDir))
 	w("cd \"$CODE\" || exit 1")
 	w("")
 
@@ -62,7 +65,7 @@ func BuildStageScript(in *ScriptInput) (string, error) {
 
 	w("#!/usr/bin/env bash")
 	w("set -uo pipefail")
-	w("CODE=%s", shq(in.CodeDir))
+	w("CODE=%s", shellExpand(in.CodeDir))
 	w("cd \"$CODE\" || exit 1")
 	w("timeout %d bash -c %s", in.TimeoutOr(DefaultStageTimeoutSeconds), shq(in.StageCommand))
 	w("exit $?")
@@ -104,8 +107,10 @@ func ExportEnv(w func(format string, args ...any), in *ScriptInput) {
 	w("export MD_COMMIT=%s", shq(in.CommitSHA))
 	w("export MD_ENV_NAME=%s", shq(in.EnvName))
 	w("export MD_ENV_TAGS=%s", shq(in.EnvTags))
-	w("export MD_CODE_DIR=%s", shq(in.CodeDir))
-	w("export MD_TEST_INPUT_DIR=%s", shq(remoteTestsDir(in.CodeDir)))
+	// The directory exports carry $HOME references: double-quote so they
+	// expand on the remote host instead of staying literal.
+	w("export MD_CODE_DIR=%s", shellExpand(in.CodeDir))
+	w("export MD_TEST_INPUT_DIR=%s", shellExpand(remoteTestsDir(in.CodeDir)))
 	if in.Entry != nil {
 		keys := make([]string, 0, len(in.Entry.Env))
 		for k := range in.Entry.Env {
@@ -128,6 +133,14 @@ func remoteTestsDir(codeDir string) string {
 // shq single-quotes a string for safe use in bash.
 func shq(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// shellExpand double-quotes a path for bash, letting $HOME (and other
+// parameter expansions) resolve on the remote host. Backslashes, double
+// quotes and dollars that are NOT part of $HOME-style references would
+// need escaping; task dirs are plain "$HOME/..." so this stays simple.
+func shellExpand(s string) string {
+	return "\"" + s + "\""
 }
 
 // ShellQuote is the exported form of shq, for API handlers composing

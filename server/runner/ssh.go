@@ -227,10 +227,12 @@ func RunSSH(ctx context.Context, h SSHHost, cmd, stdinData string, timeout time.
 // remote host (server-side clone upload): the remote side runs
 // `mkdir -p && tar -xzf - -C dir`, the archive flows through the SSH stdin
 // without a temp file on either end. destDir is wiped first (the clone task
-// owns the workspace).
+// owns the workspace). destDir may reference $HOME — it is double-quoted so
+// the remote shell expands it (single quotes would create a literal "~"
+// directory).
 func ExtractTarTo(ctx context.Context, h SSHHost, r io.Reader, destDir string, timeout time.Duration) error {
 	remote := fmt.Sprintf("rm -rf %s && mkdir -p %s && tar -xzf - -C %s",
-		shq(destDir), shq(destDir), shq(destDir))
+		shellExpand(destDir), shellExpand(destDir), shellExpand(destDir))
 	client, err := dialSSH(h.Host, h.Username, h.PrivateKey)
 	if err != nil {
 		return fmt.Errorf("ssh dial: %w", err)

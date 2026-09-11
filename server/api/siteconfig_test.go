@@ -316,3 +316,50 @@ func TestGitLabWebhook(t *testing.T) {
 		t.Fatalf("expected ignored status, got %v", res)
 	}
 }
+
+// TestSiteConfigDeployKeyNewline checks the stored deploy key keeps its
+// trailing newline (ssh -i rejects OpenSSH keys without one) and regains it
+// when pasted without.
+func TestSiteConfigDeployKeyNewline(t *testing.T) {
+	apiServer, s := newTestServer(t)
+	seedUser(t, apiServer.Store, "keyuser", "key@example.com", "s3cret")
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "keyuser", "s3cret")
+
+	put := func(key string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"codeRepo":"https://gitlab.com/g/code","testInputRepo":"https://gitlab.com/g/in","testRepoRef":"main","deployKey":%q}`, key)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/site-config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	pem := "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"
+
+	// Pasted without the trailing newline: stored with it.
+	put(pem)
+	cfg, err := s.GetSiteConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DeployKey != pem+"\n" {
+		t.Fatalf("key without newline not normalized: %q", cfg.DeployKey)
+	}
+
+	// Pasted with surrounding whitespace: trimmed, newline kept.
+	put("  \n" + pem + "\n\n")
+	cfg, err = s.GetSiteConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DeployKey != pem+"\n" {
+		t.Fatalf("key not normalized: %q", cfg.DeployKey)
+	}
+}
