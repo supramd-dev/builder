@@ -14,11 +14,13 @@ export function commitUrl(repoUrl: string | undefined, sha: string): string {
   return repoUrl ? `${repoUrl}/commit/${sha}` : ''
 }
 
-// StageStatus renders a dashboard stage as plain colored text — "✓ ok" /
+// StageStatus renders a dashboard stage as plain colored text — "✓ pass" /
 // "✗ fail" / "⤼ skip" / spinner "run" / gray "pending" — linking to the run
-// or task details when clickable.
-export function StageStatus({ status, onClick, title }: {
+// or task details when clickable. label overrides the pass/fail word (e.g.
+// the passed/total counts on the unit and regression dashboards).
+export function StageStatus({ status, label, onClick, title }: {
   status: string
+  label?: string
   onClick?: () => void
   title?: string
 }) {
@@ -34,10 +36,9 @@ export function StageStatus({ status, onClick, title }: {
         <LoaderCircle size={11} className="spin" /> run
       </>
     )
-      : status === 'passed' ? '✓ ok'
-        : status === 'failed' ? '✗ fail'
-          : status === 'skipped' ? '⤼ skip'
-            : 'pending'
+      : status === 'pending' ? 'pending'
+        : status === 'skipped' ? '⤼ skip'
+          : `${status === 'passed' ? '✓' : '✗'} ${label ?? (status === 'passed' ? 'pass' : 'fail')}`
   if (onClick) {
     return (
       <a

@@ -11,7 +11,7 @@
   /* Palette (light). */
   --text: #212529;
   --muted: #6c757d;
-  --link: #0640e0;
+  --link: #007bff; /*#0640e0;*/
   --link-hover: #0056b3;
   --bg: #fff;
   --bg-alt: #f8f9fa;
@@ -588,39 +588,64 @@ footer .text-muted {
   white-space: nowrap;
 }
 
-/* Row header: the commit cell — linked sha, author, date on one line,
-   the message truncated beneath. */
+/* The darker vertical rule separating one environment's column group from
+   the next — and nothing else: on the group-spanning header cells and the
+   first sub-column (build) of every group, in both header rows and the
+   body. Sub-columns inside a group (build/unit, unit/reg, reg/graph) and
+   the commit column stay without a separator. */
+.dash-matrix th.dash-env-head,
+.dash-matrix td.dash-env-start,
+.dash-matrix thead tr.dash-subhead th.dash-env-start {
+  border-left: 1px solid var(--border);
+}
+
+/* Row header: the commit cell — one line: bold linked sha, author, date
+   (normal text color) and the gray commit message, with gaps between the
+   parts; truncates with an ellipsis when too wide. */
 .dash-matrix tbody td.dash-commit-cell {
   border-bottom: 1px solid var(--border-light);
   text-align: left;
   padding: 0.15rem 0.5rem;
-  white-space: nowrap;
-  max-width: 22rem;
+  max-width: 26rem;
 }
 
-.dash-commit-cell .dash-commit-line1 {
-  display: inline-flex;
+div.dash-commit-cell {
+  display: grid;
+  /* Fixed tracks for sha / author / date so the parts line up across rows;
+     the message takes the rest and truncates. The author track fits 5–6
+     characters; longer names truncate with an ellipsis. */
+  grid-template-columns: 4.5rem 4rem 5.5rem minmax(0, 1fr);
+  column-gap: 0.6rem;
   align-items: baseline;
-  gap: 0.6rem;
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .dash-commit-cell .dash-sha {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", monospace;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dash-commit-cell .dash-commit-author {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dash-commit-cell .dash-commit-date {
   font-size: 0.8rem;
+  white-space: nowrap;
 }
 
 .dash-commit-cell .dash-commit-msg {
-  display: block;
-  font-size: 0.8rem;
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 22rem;
+  min-width: 0;
 }
 
 .dash-cell {
@@ -628,6 +653,30 @@ footer .text-muted {
   padding: 0.15rem 0.5rem;
   border-bottom: 1px solid var(--border-light);
   white-space: nowrap;
+}
+
+/* Zebra striping of the commit rows: alternating white / gray. */
+.dash-matrix tbody tr.dash-row-alt td {
+  background: var(--bg-alt);
+}
+
+/* Full-matrix second header row: the build / unit test / reg test / graph
+   sub-column labels under each environment name. */
+.dash-matrix thead tr.dash-subhead th {
+  border-bottom: 1px solid var(--border);
+  padding: 0.1rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--muted);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.dash-env-tags {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--muted);
 }
 
 .dash-no-run {
@@ -644,6 +693,8 @@ footer .text-muted {
   white-space: nowrap;
 }
 
+/* Clickable statuses keep their status color without an underline; the
+   hover gets the underline like any other link. */
 a.dash-st {
   text-decoration: none;
 }
@@ -695,7 +746,12 @@ a.dash-st:hover {
 
 a.dash-full-graph {
   color: var(--link);
-  font-size: 0.78rem;
+  display: inline-flex;
+  align-items: center;
+}
+
+a.dash-full-graph:hover {
+  color: var(--link-hover);
 }
 
 /* Run detail: the one-paragraph conclusion reported by the worker. */

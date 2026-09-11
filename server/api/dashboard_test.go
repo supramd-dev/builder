@@ -635,11 +635,13 @@ func TestDashboardFullLiveOverlay(t *testing.T) {
 		{Kind: store.TaskKindBuild, Name: "build", Status: store.TaskRunning,
 			CommitID: commit.ID, EnvironmentID: envA.ID},
 	}
-	if _, err := store.CreateTaskGraph(s, rootA, subsA, [][]int64{
+	createdA, err := store.CreateTaskGraph(s, rootA, subsA, [][]int64{
 		{}, {subsA[0].ID},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
+	buildSubA := createdA[2] // createdA = [root, clone, build]
 	// A pending graph on env B for the same commit: the row must show
 	// per-environment isolation (env B stage pending, not running).
 	rootB := &store.Task{
@@ -695,7 +697,9 @@ func TestDashboardFullLiveOverlay(t *testing.T) {
 	if aBuild == nil {
 		t.Fatalf("env A build stage missing: %+v", row.Stages[envA.ID])
 	}
-	if aBuild.RunID != 0 || aBuild.TaskID != rootA.ID || aBuild.Status != string(store.TaskPending) {
+	// The stage links to the build sub-task itself (not the root): its
+	// detail page shows the stage's log.
+	if aBuild.RunID != 0 || aBuild.TaskID != buildSubA.ID || aBuild.Status != string(store.TaskPending) {
 		t.Fatalf("env A live build wrong: %+v", aBuild)
 	}
 

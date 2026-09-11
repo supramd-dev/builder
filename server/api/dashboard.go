@@ -352,7 +352,7 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 						sub := &graph.Subs[i]
 						st := fullStageJSON{
 							Kind:   kind,
-							TaskID: graph.Root.ID,
+							TaskID: sub.ID, // the stage sub-task: its detail page has the log
 							Status: liveSubStatus(sub),
 						}
 						if st.Status == "" {
@@ -732,13 +732,13 @@ func toRunCellJSON(run *store.TestRun, status string) *runCellJSON {
 }
 
 // taskCellJSON renders a live task graph as a matrix cell (runId 0,
-// taskId set: clickable through to the task detail). kind selects the stage
-// this dashboard view is about (build/unit/regression): the cell mirrors
-// that sub-task's own state — a running root with a queued unit stage shows
-// "pending" on the unit dashboard, a running build stage shows "running".
-// The root's state is only a fallback for graphs where the stage sub-task
-// is missing. When the stage failed before any report, the sub-task errors
-// hint at what broke.
+// taskId set: clickable through to the stage's task detail). kind selects
+// the stage this dashboard view is about (build/unit/regression): the cell
+// mirrors that sub-task's own state — a running root with a queued unit
+// stage shows "pending" on the unit dashboard, a running build stage shows
+// "running". The root's state and id are only a fallback for graphs where
+// the stage sub-task is missing. When the stage failed before any report,
+// the sub-task errors hint at what broke.
 func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON {
 	cell := &runCellJSON{RunID: 0, TaskID: root.ID}
 	// The sub-task whose kind matches this view (build/unit/regression).
@@ -755,7 +755,9 @@ func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON
 		}
 		// The stage exists: mirror its own state (pending stays pending,
 		// running stays running, failed stays failed). The root aggregate
-		// must not bleed into a per-stage cell.
+		// must not bleed into a per-stage cell. The cell links to the
+		// stage sub-task itself (its detail page shows the log).
+		cell.TaskID = subs[i].ID
 		status = subs[i].Status
 		errMsg = subs[i].Error
 		break
