@@ -130,8 +130,9 @@ func TestDispatchManual(t *testing.T) {
 		}
 	}
 
-	// Re-dispatching the same commit/environments requeues the same roots
-	// (no duplicates), keeping the manual trigger.
+	// Re-dispatching the same ref inserts a fresh commit row and builds a
+	// new root for it (each manual attempt is its own matrix row); the old
+	// root is left in place.
 	again, err := svc.DispatchManual(ManualDispatch{
 		Ref:               "v1.2",
 		RegressionCommand: "python3 run.py",
@@ -141,16 +142,36 @@ func TestDispatchManual(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-dispatch: %v", err)
 	}
-	if len(again) != 1 || again[0].ID != roots[0].ID {
-		t.Fatalf("re-dispatch returned %+v, want root %d", again, roots[0].ID)
+	if len(again) != 1 || again[0].ID == roots[0].ID {
+		t.Fatalf("re-dispatch returned %+v, want a new root distinct from %d", again, roots[0].ID)
 	}
-	subs, err := s.ListSubTasks(roots[0].ID)
+	if again[0].Trigger != store.TaskTriggerManual {
+		t.Errorf("re-dispatched root trigger %d, want manual", again[0].Trigger)
+	}
+
+	// Two commit rows share the (repo, sha) but belong to separate
+	// attempts, each with its own root.
+	var commits2 []store.Commit
+	if err := s.DB.Find(&commits2).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(commits2) != 2 {
+		t.Fatalf("want 2 commit rows after re-dispatch, got %d", len(commits2))
+	}
+	if commits2[0].Repo != commits2[1].Repo || commits2[0].SHA != commits2[1].SHA {
+		t.Fatalf("commit rows diverged: %+v", commits2)
+	}
+	if again[0].CommitID == roots[0].CommitID {
+		t.Fatalf("re-dispatch reused commit %d, want a fresh row", again[0].CommitID)
+	}
+
+	subs, err := s.ListSubTasks(again[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := range subs {
 		if subs[i].Kind == store.TaskKindRegression {
-			return // the fresh graph replaced the old one
+			return // the fresh graph has the requested stage
 		}
 	}
 	t.Fatal("re-dispatched root has no regression stage")

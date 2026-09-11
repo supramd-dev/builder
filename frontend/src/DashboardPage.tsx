@@ -234,7 +234,13 @@ function MatrixTable({
           {rows.map((row, ri) => (
             <tr
               key={row.commit.id}
-              className={ri % 2 === 1 ? 'dash-row-alt' : undefined}
+              className={
+                row.commit.superseded
+                  ? 'dash-row-superseded'
+                  : ri % 2 === 1
+                    ? 'dash-row-alt'
+                    : undefined
+              }
             >
               <td className="dash-commit-cell">
                 <CommitCell commit={row.commit} />
@@ -350,6 +356,11 @@ function CommitCell({ commit }: { commit: DashboardCommit }) {
       </span>
       <span className="dash-commit-date">{commit.pushedAt.slice(0, 10)}</span>
       {commit.message && <span className="dash-commit-msg">{commit.message}</span>}
+      {commit.superseded && (
+        <span className="dash-superseded" title="a newer attempt of this commit exists">
+          superseded
+        </span>
+      )}
     </div>
   )
 }

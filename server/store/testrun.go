@@ -208,8 +208,27 @@ type EnvCommit struct {
 	Commit int64
 }
 
-// DeleteRunsForEnvironment removes all runs (and their case results) of an
-// environment, in a transaction. Called when an environment is deleted so no
+// DeleteTestRun removes one run and its case results (requeue cleanup: a
+// stage dropped from a rebuilt graph must not leave its stale run behind).
+func (s *Store) DeleteTestRun(envID, commitID int64, kind string) error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		var run TestRun
+		err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ?",
+			envID, commitID, kind).First(&run).Error
+		if err != nil {
+			if err == ErrNotFound {
+				return nil // nothing to clean
+			}
+			return err
+		}
+		if err := tx.Where("test_run_id = ?", run.ID).Delete(&TestCaseResult{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&TestRun{}, run.ID).Error
+	})
+}
+
+// DeleteRunsForEnvironment removes all runs (and their case results) of an// environment, in a transaction. Called when an environment is deleted so no
 // dangling dashboard rows remain.
 func (s *Store) DeleteRunsForEnvironment(envID int64) error {
 	return s.DB.Transaction(func(tx *gorm.DB) error {

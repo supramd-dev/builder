@@ -125,16 +125,20 @@ func (s *Service) DispatchManual(in ManualDispatch) ([]*store.Task, error) {
 		return nil, err
 	}
 
-	// Record the commit like a webhook push so the dashboard lists it.
+	// Record a fresh commit row per dispatch (unlike webhook pushes, which
+	// deduplicate on (repo, sha)): each manual trigger gets its own matrix
+	// row, so re-running the same SHA shows each attempt. The message
+	// carries the time so same-SHA rows are distinguishable.
+	now := time.Now()
 	commit := &store.Commit{
 		Repo:     store.RepoPath(repo),
 		SHA:      sha,
 		Ref:      strings.TrimSpace(in.Ref),
 		Author:   in.Username,
-		Message:  "manual test",
-		PushedAt: time.Now(),
+		Message:  "manual test " + now.UTC().Format("2006-01-02 15:04"),
+		PushedAt: now,
 	}
-	if _, err := s.Store.GetOrCreateCommit(commit); err != nil {
+	if err := s.Store.CreateCommit(commit); err != nil {
 		return nil, err
 	}
 
@@ -205,6 +209,9 @@ func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnviron
 		if err := s.Store.UpdateTaskConfig(root.ID, root.Config, root.Tags); err != nil {
 			return nil, err
 		}
+		if err := s.dropStaleStageRuns(root, graph); err != nil {
+			return nil, err
+		}
 		return root, s.createSubTasks(root, graph)
 	}
 
@@ -221,6 +228,29 @@ func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnviron
 		return nil, err
 	}
 	return root, s.createSubTasks(root, graph)
+}
+
+// dropStaleStageRuns removes the recorded test runs of stages the rebuilt
+// graph no longer contains (e.g. a re-dispatch without the unit stage):
+// without this, the matrix would keep showing the dropped stage's stale
+// result forever.
+func (s *Service) dropStaleStageRuns(root *store.Task, graph []GraphTask) error {
+	present := map[string]bool{}
+	for i := range graph {
+		switch graph[i].Kind {
+		case store.TaskKindBuild, store.TaskKindUnit, store.TaskKindRegression:
+			present[graph[i].Kind] = true
+		}
+	}
+	for _, kind := range []string{store.TaskKindBuild, store.TaskKindUnit, store.TaskKindRegression} {
+		if present[kind] {
+			continue
+		}
+		if err := s.Store.DeleteTestRun(root.EnvironmentID, root.CommitID, kind); err != nil {
+			return fmt.Errorf("drop stale %s run: %w", kind, err)
+		}
+	}
+	return nil
 }
 
 // createGraph persists one entry's task graph (root + sub-tasks) for the
@@ -252,6 +282,9 @@ func (s *Service) createGraph(commit *store.Commit, entry *MergedEntry, env *sto
 			return err
 		}
 		if err := s.Store.UpdateTaskConfig(root.ID, root.Config, root.Tags); err != nil {
+			return err
+		}
+		if err := s.dropStaleStageRuns(root, graph); err != nil {
 			return err
 		}
 		return s.createSubTasks(root, graph)

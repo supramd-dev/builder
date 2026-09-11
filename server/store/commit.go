@@ -7,15 +7,18 @@ import (
 )
 
 // Commit records a git push received via the GitLab webhook — the code
-// revision a column of the test dashboard corresponds to.
+// revision a column of the test dashboard corresponds to. (repo, sha) is
+// NOT unique: manual triggers record one row per dispatch of the same SHA
+// (each gets its own matrix row); webhook pushes still deduplicate through
+// GetOrCreateCommit.
 type Commit struct {
 	ID        int64     `gorm:"primaryKey"`
-	Repo      string    `gorm:"uniqueIndex:idx_commits_repo_sha;not null"` // project path, e.g. "group/md-code"
-	SHA       string    `gorm:"uniqueIndex:idx_commits_repo_sha;not null"` // the pushed commit id
-	Ref       string    `gorm:"not null;default:''"`                       // branch name, e.g. "main"
-	Author    string    `gorm:"not null;default:''"`                       // the pushing user
-	Message   string    `gorm:"not null;default:''"`                       // head commit title
-	PushedAt  time.Time `gorm:"not null"`                                  // when the push was received
+	Repo      string    `gorm:"index:idx_commits_repo_sha;not null"` // project path, e.g. "group/md-code"
+	SHA       string    `gorm:"index:idx_commits_repo_sha;not null"` // the pushed commit id
+	Ref       string    `gorm:"not null;default:''"`                 // branch name, e.g. "main"
+	Author    string    `gorm:"not null;default:''"`                 // the pushing user
+	Message   string    `gorm:"not null;default:''"`                 // head commit title
+	PushedAt  time.Time `gorm:"not null"`                            // when the push was received
 	CreatedAt time.Time
 }
 

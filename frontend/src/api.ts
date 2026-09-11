@@ -201,6 +201,9 @@ export interface DashboardCommit {
   author: string
   message: string
   pushedAt: string
+  // true when a newer attempt of the same SHA exists (manual re-dispatch):
+  // the row is kept for history but rendered dimmed.
+  superseded?: boolean
 }
 
 export interface RunCell {

@@ -519,19 +519,42 @@ func TestDashboardOverlaysTaskState(t *testing.T) {
 	seedUser(t, s, "overlayuser", "ov@example.com", "pw")
 
 	env := seedDispatchEnv(t, s, "cpu-overlay", "cpu", true)
+	envStageless := seedDispatchEnv(t, s, "cpu-stageless", "cpu", true)
 	commit := &store.Commit{Repo: "group/code", SHA: "cafe11", PushedAt: time.Now()}
 	if _, err := s.GetOrCreateCommit(commit); err != nil {
 		t.Fatal(err)
 	}
-	// A pending task graph for (env, commit) with no run.
+	// A pending task graph for (env, commit) with no run: clone → regression.
 	root := &store.Task{
 		Kind: store.TaskKindRoot, Name: "test cafe11", CommitID: commit.ID,
 		EnvironmentID: env.ID, Tags: "cpu", Config: "{}",
 	}
 	subs := []*store.Task{
 		{Kind: store.TaskKindClone, Name: "clone", CommitID: commit.ID, EnvironmentID: env.ID},
+		{Kind: store.TaskKindRegression, Name: "regression", CommitID: commit.ID, EnvironmentID: env.ID},
 	}
-	if _, err := store.CreateTaskGraph(s, root, subs, [][]int64{{store.TaskRootPlaceholder}}); err != nil {
+	created, err := store.CreateTaskGraph(s, root, subs, [][]int64{
+		{store.TaskRootPlaceholder}, {subs[0].ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	regSub := created[2] // created = [root, clone, regression]
+
+	// A graph with no regression stage at all (e.g. a manual dispatch with
+	// only a build command): the regression matrix must show "—", not a
+	// failed 0/0 invented from the root state.
+	rootBuildOnly := &store.Task{
+		Kind: store.TaskKindRoot, Name: "test cafe11 build-only", CommitID: commit.ID,
+		EnvironmentID: envStageless.ID, Tags: "cpu", Config: "{}",
+	}
+	subsBuildOnly := []*store.Task{
+		{Kind: store.TaskKindClone, Name: "clone", CommitID: commit.ID, EnvironmentID: envStageless.ID},
+		{Kind: store.TaskKindBuild, Name: "build", CommitID: commit.ID, EnvironmentID: envStageless.ID},
+	}
+	if _, err := store.CreateTaskGraph(s, rootBuildOnly, subsBuildOnly, [][]int64{
+		{store.TaskRootPlaceholder}, {subsBuildOnly[0].ID},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -539,42 +562,55 @@ func TestDashboardOverlaysTaskState(t *testing.T) {
 	apiServer.Register(mux)
 	cookie := loginAndGetCookie(t, mux, "overlayuser", "pw")
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/regression", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("dashboard: expected 200, got %d", rec.Code)
+	fetch := func() dashboardJSON {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/dashboard/regression", nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("dashboard: expected 200, got %d", rec.Code)
+		}
+		var dash dashboardJSON
+		if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+			t.Fatal(err)
+		}
+		return dash
 	}
-	var dash dashboardJSON
-	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
-		t.Fatal(err)
+
+	dash := fetch()
+	if len(dash.Rows) != 1 || len(dash.Rows[0].Cells) != 2 {
+		t.Fatalf("unexpected matrix shape: %d rows, %d cells", len(dash.Rows), len(dash.Rows[0].Cells))
 	}
-	if len(dash.Rows) != 1 || len(dash.Rows[0].Cells) != 1 {
-		t.Fatalf("unexpected matrix shape: %d rows", len(dash.Rows))
+	envIdx := func(id int64) int {
+		for i, e := range dash.Environments {
+			if e.ID == id {
+				return i
+			}
+		}
+		t.Fatalf("environment %d not found", id)
+		return -1
 	}
-	cell := dash.Rows[0].Cells[0]
+	cell := dash.Rows[0].Cells[envIdx(env.ID)]
 	if cell == nil {
 		t.Fatal("expected a task overlay cell, got null")
 	}
-	if cell.Status != "pending" || cell.RunID != 0 || cell.TaskID != root.ID {
+	if cell.Status != "pending" || cell.RunID != 0 || cell.TaskID != regSub.ID {
 		t.Fatalf("overlay cell wrong: %+v", cell)
+	}
+	// The build-only graph has no regression stage: no overlay, no invented
+	// failure — the cell stays null ("—").
+	if c := dash.Rows[0].Cells[envIdx(envStageless.ID)]; c != nil {
+		t.Fatalf("stage-less graph should show no cell, got %+v", c)
 	}
 
 	// A done root is not overlaid (the run takes over).
 	if err := s.FinishTask(root.ID, store.TaskDone, ""); err != nil {
 		t.Fatal(err)
 	}
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/dashboard/regression", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
-	mux.ServeHTTP(rec, req)
-	dash = dashboardJSON{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
-		t.Fatal(err)
-	}
-	if dash.Rows[0].Cells[0] != nil {
-		t.Fatalf("done root should not overlay: %+v", dash.Rows[0].Cells[0])
+	dash = fetch()
+	if c := dash.Rows[0].Cells[envIdx(env.ID)]; c != nil {
+		t.Fatalf("done root should not overlay: %+v", c)
 	}
 
 	// Environment columns now include tags.

@@ -31,15 +31,16 @@ type dashboardEnvJSON struct {
 
 // commitJSON is a commit row of the dashboard matrix.
 type commitJSON struct {
-	ID       int64  `json:"id"`
-	SHA      string `json:"sha"`
-	ShortSHA string `json:"shortSha"`
-	Repo     string `json:"repo"`
-	RepoURL  string `json:"repoUrl,omitempty"` // web URL of the repository, when derivable
-	Ref      string `json:"ref"`
-	Author   string `json:"author"`
-	Message  string `json:"message"`
-	PushedAt string `json:"pushedAt"`
+	ID         int64  `json:"id"`
+	SHA        string `json:"sha"`
+	ShortSHA   string `json:"shortSha"`
+	Repo       string `json:"repo"`
+	RepoURL    string `json:"repoUrl,omitempty"` // web URL of the repository, when derivable
+	Ref        string `json:"ref"`
+	Author     string `json:"author"`
+	Message    string `json:"message"`
+	PushedAt   string `json:"pushedAt"`
+	Superseded bool   `json:"superseded,omitempty"` // a newer attempt of the same SHA exists (manual re-dispatch)
 }
 
 // runCellJSON is one cell of the matrix: a run's summary, aligned with an
@@ -170,10 +171,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 	}
 
 	// Commit rows, newest first; cells align with the environment columns.
+	superseded := supersededCommits(commits)
 	for i := range commits {
 		commit := &commits[i]
+		cj := s.toCommitJSON(commit)
+		cj.Superseded = superseded[commit.ID]
 		row := dashboardRowJSON{
-			Commit: s.toCommitJSON(commit),
+			Commit: cj,
 			Cells:  make([]*runCellJSON, len(envs)),
 		}
 		for j := range envs {
@@ -309,10 +313,13 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	superseded := supersededCommits(commits)
 	for i := range commits {
 		commit := &commits[i]
+		cj := s.toCommitJSON(commit)
+		cj.Superseded = superseded[commit.ID]
 		row := fullRowJSON{
-			Commit:   s.toCommitJSON(commit),
+			Commit:   cj,
 			Stages:   map[int64][]fullStageJSON{},
 			TaskIDs:  map[int64]int64{},
 			Triggers: map[int64]int{},
@@ -688,6 +695,23 @@ func (s *Server) toCommitJSON(c *store.Commit) commitJSON {
 	}
 }
 
+// supersededCommits returns the ids of every commit row but the newest of
+// each (repo, sha) group: manual re-dispatches of the same SHA insert one
+// row per attempt, and only the latest attempt is the live result. commits
+// must be newest-first (ListCommits order).
+func supersededCommits(commits []store.Commit) map[int64]bool {
+	seen := map[string]bool{}
+	superseded := map[int64]bool{}
+	for i := range commits {
+		key := commits[i].Repo + "\x00" + commits[i].SHA
+		if seen[key] {
+			superseded[commits[i].ID] = true
+		}
+		seen[key] = true
+	}
+	return superseded
+}
+
 // repoWebURL turns a repository location — the site config's codeRepo or a
 // webhook's path_with_namespace — into the web URL hosting it, so dashboard
 // commit cells can link to the actual repository. Falls back to "" when the
@@ -740,19 +764,21 @@ func toRunCellJSON(run *store.TestRun, status string) *runCellJSON {
 // the stage this dashboard view is about (build/unit/regression): the cell
 // mirrors that sub-task's own state — a running root with a queued unit
 // stage shows "pending" on the unit dashboard, a running build stage shows
-// "running". The root's state and id are only a fallback for graphs where
-// the stage sub-task is missing. When the stage failed before any report,
-// the sub-task errors hint at what broke.
+// "running". When the graph has no sub-task of that kind (the graph simply
+// does not include the stage — e.g. a manual dispatch with only a build
+// command), the cell is nil: the stage was never requested, so the matrix
+// shows "—" rather than inventing a failure. When the stage failed before
+// any report, the sub-task errors hint at what broke.
 func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON {
-	cell := &runCellJSON{RunID: 0, TaskID: root.ID, Trigger: root.Trigger}
 	// The sub-task whose kind matches this view (build/unit/regression).
 	stageKind := map[string]string{
 		store.RunKindBuild:      store.TaskKindBuild,
 		store.RunKindUnit:       store.TaskKindUnit,
 		store.RunKindRegression: store.TaskKindRegression,
 	}[kind]
-	status := root.Status
-	errMsg := root.Error
+	cell := &runCellJSON{RunID: 0, TaskID: root.ID, Trigger: root.Trigger}
+	var status, errMsg string
+	found := false
 	for i := range subs {
 		if subs[i].Kind != stageKind {
 			continue
@@ -764,7 +790,11 @@ func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON
 		cell.TaskID = subs[i].ID
 		status = subs[i].Status
 		errMsg = subs[i].Error
+		found = true
 		break
+	}
+	if !found {
+		return nil // the graph has no such stage: nothing to show
 	}
 	switch status {
 	case store.TaskPending:

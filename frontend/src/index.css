@@ -679,6 +679,25 @@ div.dash-commit-cell {
   color: var(--muted);
 }
 
+/* Commit rows superseded by a newer attempt of the same SHA (manual
+   re-dispatch): kept for history, dimmed to recede behind live rows. */
+.dash-matrix tbody tr.dash-row-superseded td {
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+/* The "superseded" tag in a dimmed row's commit cell. */
+.dash-superseded {
+  margin-left: 0.35rem;
+  padding: 0 0.3rem;
+  font-size: 0.7rem;
+  line-height: 1.1;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  vertical-align: 1px;
+}
+
 /* The "M"/"manual" badge marking manually dispatched graphs (matrix cells,
    task summaries). Small, muted, rounded — quieter than a status color. */
 .dash-trigger {

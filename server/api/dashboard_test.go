@@ -756,3 +756,64 @@ func TestDashboardFullLiveOverlay(t *testing.T) {
 		t.Fatalf("build sub-task should link the recorded run: %+v", buildSub)
 	}
 }
+
+// TestDashboardSupersededRows checks the manual re-dispatch presentation:
+// a second commit row with the same (repo, sha) keeps both rows in the
+// matrix, and every row but the newest of the group is flagged superseded
+// (both the single-kind and the full matrix).
+func TestDashboardSupersededRows(t *testing.T) {
+	apiServer, env := newDashboardEnv(t)
+
+	cfg, err := apiServer.Store.GetSiteConfig()
+	if err != nil {
+		t.Fatalf("get config: %v", err)
+	}
+	cfg.CodeRepo = "https://gitlab.com/group/md-code.git"
+	if err := apiServer.Store.SaveSiteConfig(cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	// A manual re-dispatch of the newest seeded commit: a fresh row with
+	// the same (repo, sha), pushed later.
+	if err := apiServer.Store.CreateCommit(&store.Commit{
+		Repo: "group/md-code", SHA: "3333333", Ref: "master", Author: "alice",
+		Message: "manual test", PushedAt: time.Now().Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("create commit: %v", err)
+	}
+
+	check := func(t *testing.T, target string) {
+		t.Helper()
+		rec := env.authed(http.MethodGet, target, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", target, rec.Code)
+		}
+		var dash struct {
+			Rows []struct {
+				Commit struct {
+					SHA        string `json:"sha"`
+					Superseded bool   `json:"superseded"`
+				} `json:"commit"`
+			} `json:"rows"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+			t.Fatal(err)
+		}
+		var newest, older bool
+		for _, row := range dash.Rows {
+			if row.Commit.SHA != "3333333" {
+				continue
+			}
+			if row.Commit.Superseded {
+				older = true
+			} else {
+				newest = true
+			}
+		}
+		if !newest || !older {
+			t.Fatalf("%s: expected one live and one superseded 3333333 row, got %+v", target, dash.Rows)
+		}
+	}
+	check(t, "/api/dashboard/full")
+	check(t, "/api/dashboard/regression")
+}

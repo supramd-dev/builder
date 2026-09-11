@@ -87,6 +87,14 @@ func openDB(dsn string) (*gorm.DB, error) {
 // `jobs` table is intentionally no longer migrated (superseded by `tasks`;
 // stale rows in old databases are harmless).
 func (s *Store) migrate() error {
+	// commits (repo, sha) became a plain index (manual triggers may record
+	// the same SHA more than once); AutoMigrate never drops the old unique
+	// index, so do it by name when it still exists.
+	if s.DB.Migrator().HasIndex(&Commit{}, "idx_commits_repo_sha") {
+		if err := s.DB.Migrator().DropIndex(&Commit{}, "idx_commits_repo_sha"); err != nil {
+			return fmt.Errorf("drop old commits unique index: %w", err)
+		}
+	}
 	if err := s.DB.AutoMigrate(
 		&User{}, &Session{}, &TestEnvironment{}, &SiteConfig{},
 		&Commit{}, &TestRun{}, &TestCaseResult{}, &Task{}, &TaskLog{},
