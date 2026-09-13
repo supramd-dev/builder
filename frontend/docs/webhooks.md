@@ -29,7 +29,7 @@ that repository (matched by path), dispatching kicks in automatically:
    `dispatchError` when the YAML cannot be fetched or parsed — the
    commit is still recorded either way.
 
-Private repositories are handled with the deploy key / deploy token
+Private repositories are handled with the Project Access Token
 configured in the site settings (see
 [Site configuration](#/docs/site-configuration)).
 

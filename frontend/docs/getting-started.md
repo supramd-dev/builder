@@ -46,8 +46,8 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 
 1. Create a user with `adduser`, log in.
 2. **Settings**: configure the code repository under test (see
-   [Site configuration](#/docs/site-configuration)); add a deploy key or
-   token if the repository is private.
+   [Site configuration](#/docs/site-configuration)); add a Project
+   Access Token if the repository is private.
 3. **Runner Envs**: register at least one test environment and give it
    tags (see [Test environments](#/docs/environments)).
 4. **Code repository**: add a md-builder.yaml test matrix (see

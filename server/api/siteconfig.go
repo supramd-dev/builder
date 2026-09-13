@@ -10,28 +10,23 @@ import (
 )
 
 // siteConfigJSON is the wire representation of the site configuration. The
-// deploy key and token are write-only secrets: only whether they are set is
-// reported, never the values themselves.
+// access token is a write-only secret: only whether it is set is reported,
+// never the value itself.
 type siteConfigJSON struct {
-	CodeRepo        string `json:"codeRepo"`
-	DeployKeySet    bool   `json:"deployKeySet"`
-	DeployTokenSet  bool   `json:"deployTokenSet"`
-	DeployTokenUser string `json:"deployTokenUser"`
-	Timezone        string `json:"timezone"` // IANA name, "" = browser local
-	UpdatedAt       string `json:"updatedAt"`
+	CodeRepo       string `json:"codeRepo"`
+	AccessTokenSet bool   `json:"accessTokenSet"`
+	Timezone       string `json:"timezone"` // IANA name, "" = browser local
+	UpdatedAt      string `json:"updatedAt"`
 }
 
 // siteConfigInput is the request body for updating the configuration. The
-// secret fields follow the environment private-key convention: an empty
-// value keeps the stored one; the explicit Clear* flags remove it.
+// token follows the environment private-key convention: an empty value
+// keeps the stored one; the explicit Clear flag removes it.
 type siteConfigInput struct {
-	CodeRepo         string `json:"codeRepo"`
-	DeployKey        string `json:"deployKey"`       // empty = keep current
-	DeployToken      string `json:"deployToken"`     // empty = keep current
-	DeployTokenUser  string `json:"deployTokenUser"` // not a secret, replaced as given
-	Timezone         string `json:"timezone"`        // IANA name, "" = browser local
-	ClearDeployKey   bool   `json:"clearDeployKey"`
-	ClearDeployToken bool   `json:"clearDeployToken"`
+	CodeRepo       string `json:"codeRepo"`
+	AccessToken    string `json:"accessToken"` // empty = keep current
+	Timezone       string `json:"timezone"`    // IANA name, "" = browser local
+	ClearAccessToken bool  `json:"clearAccessToken"`
 }
 
 // handleSiteConfig routes GET/PUT /api/site-config. Any logged-in user may
@@ -77,20 +72,12 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.CodeRepo = strings.TrimSpace(in.CodeRepo)
-	// Credentials: empty = keep, Clear* = remove, otherwise replace. The
-	// deploy key keeps its trailing newline: OpenSSH-format keys are
-	// rejected by the ssh CLI ("invalid format") without one.
-	if in.ClearDeployKey {
-		cfg.DeployKey = ""
-	} else if key := normalizePEMKey(in.DeployKey); key != "" {
-		cfg.DeployKey = key
+	// Token: empty = keep, Clear = remove, otherwise replace.
+	if in.ClearAccessToken {
+		cfg.AccessToken = ""
+	} else if tok := strings.TrimSpace(in.AccessToken); tok != "" {
+		cfg.AccessToken = tok
 	}
-	if in.ClearDeployToken {
-		cfg.DeployToken = ""
-	} else if tok := strings.TrimSpace(in.DeployToken); tok != "" {
-		cfg.DeployToken = tok
-	}
-	cfg.DeployTokenUser = strings.TrimSpace(in.DeployTokenUser)
 	cfg.Timezone = strings.TrimSpace(in.Timezone)
 	if err := s.Store.SaveSiteConfig(cfg); err != nil {
 		log.Printf("save site config: %v", err)
@@ -107,9 +94,6 @@ func validateSiteConfigInput(in *siteConfigInput) string {
 	if strings.TrimSpace(in.CodeRepo) == "" {
 		return "code repository is required"
 	}
-	if key := strings.TrimSpace(in.DeployKey); key != "" && !isPEMKey(key) {
-		return "deploy key must be a PEM-encoded SSH key"
-	}
 	if tz := strings.TrimSpace(in.Timezone); tz != "" {
 		if _, err := time.LoadLocation(tz); err != nil {
 			return "unknown timezone " + tz + " (use an IANA name like Asia/Shanghai)"
@@ -120,11 +104,9 @@ func validateSiteConfigInput(in *siteConfigInput) string {
 
 func toSiteConfigJSON(cfg *store.SiteConfig) siteConfigJSON {
 	return siteConfigJSON{
-		CodeRepo:        cfg.CodeRepo,
-		DeployKeySet:    strings.TrimSpace(cfg.DeployKey) != "",
-		DeployTokenSet:  strings.TrimSpace(cfg.DeployToken) != "",
-		DeployTokenUser: cfg.DeployTokenUser,
-		Timezone:        cfg.Timezone,
-		UpdatedAt:       cfg.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		CodeRepo:       cfg.CodeRepo,
+		AccessTokenSet: strings.TrimSpace(cfg.AccessToken) != "",
+		Timezone:       cfg.Timezone,
+		UpdatedAt:      cfg.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 }

@@ -123,8 +123,9 @@ artifact 存在同一张表里,由浏览器的"分析"视图取回展示;而逐�
 
 ## 前置条件
 
-- **服务器** 的 PATH 上需要有 `git`,且对两个仓库有读权限(读 YAML 和
-  克隆)—— 公开仓库开箱即用,私有仓库使用站点设置中配置的
-  deploy key / deploy token(见[站点配置](#/docs/site-configuration))。
+- **服务器** 需要对代码仓库有读权限(读 YAML 和克隆)—— 公开仓库开箱
+  即用,私有仓库使用站点设置中配置的 Project Access Token(项目访问
+  令牌,见[站点配置](#/docs/site-configuration))。克隆通过 go-git 在
+  进程内完成:服务器**不需要**安装 `git`。
 - 每个**远程环境**需要 `bash`、`tar`、`gzip` 和 `timeout`,以及构建与
   测试命令所需的工具链。它不需要 git,也不需要仓库访问权限。

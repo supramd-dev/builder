@@ -181,27 +181,70 @@ func TestDispatchManual(t *testing.T) {
 	t.Fatal("re-dispatched root has no regression stage")
 }
 
-// TestResolveRefParsing covers the ls-remote output parsing (exact ref
-// preferred, HEAD fallback, full-SHA short circuit) without git.
-func TestResolveRefParsing(t *testing.T) {
-	out := "abc111abc111abc111abc111abc111abc111abc1\trefs/heads/main\n" +
-		"def222def222def222def222def222def222def222def2\trefs/heads/v1\n"
-	sha, err := firstLSRemoteSHA(out, "refs/heads/v1")
-	if err != nil || sha != "def222def222def222def222def222def222def222def2" {
-		t.Fatalf("exact ref: %q %v", sha, err)
-	}
-	sha, err = firstLSRemoteSHA(out, "")
-	if err != nil || sha != "abc111abc111abc111abc111abc111abc111abc1" {
-		t.Fatalf("first line fallback: %q %v", sha, err)
-	}
-	if _, err := firstLSRemoteSHA("", "refs/heads/nope"); err == nil {
-		t.Fatal("empty output should fail")
-	}
+// TestIsFullSHA covers the full-SHA detection used by the ref resolver
+// (a full SHA skips the network round trip entirely).
+func TestIsFullSHA(t *testing.T) {
 	if !isFullSHA("ABCDEF0123456789abcdef0123456789ABCDEF01") {
 		t.Fatal("40-hex should parse as a full SHA")
 	}
 	if isFullSHA("abc123") || isFullSHA("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz") {
 		t.Fatal("non-40-hex must not parse as a full SHA")
+	}
+}
+
+// TestHTTPURLConversion covers the repository-location normalization: all
+// accepted location forms become the https URL go-git clones from, and the
+// token is never embedded in the URL itself.
+func TestHTTPURLConversion(t *testing.T) {
+	cases := []struct{ in, want string }{
+		// https passes through unchanged (user info stripped).
+		{"https://gitlab.com/group/code", "https://gitlab.com/group/code"},
+		{"https://gitlab.com/group/code.git", "https://gitlab.com/group/code.git"},
+		{"https://user:pass@gitlab.com/group/code", "https://gitlab.com/group/code"},
+		{"http://gitlab.example.com/group/code", "http://gitlab.example.com/group/code"},
+		// ssh:// form, including a non-standard ssh port (dropped: it is
+		// not the https port).
+		{"ssh://git@gitlab.com/group/code.git", "https://gitlab.com/group/code.git"},
+		{"ssh://git@git.hpcer.dev:2222/HPCer/MISA-MD/MISA-MD.git", "https://git.hpcer.dev/HPCer/MISA-MD/MISA-MD.git"},
+		// scp-style remote.
+		{"git@gitlab.com:group/code.git", "https://gitlab.com/group/code.git"},
+		// Bare paths have no host to build an https URL from: unchanged.
+		{"group/code", "group/code"},
+		// Empty stays empty.
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := HTTPURL(c.in); got != c.want {
+			t.Errorf("HTTPURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestGitCredentialsToken covers the credential helpers: token
+// extraction, emptiness, and the Basic-auth pair (Project Access Tokens
+// authenticate as "oauth2").
+func TestGitCredentialsToken(t *testing.T) {
+	var nilCreds *GitCredentials
+	if !nilCreds.Empty() || nilCreds.Token() != "" {
+		t.Fatal("nil credentials should be empty")
+	}
+	empty := &GitCredentials{}
+	if !empty.Empty() {
+		t.Fatal("zero credentials should be empty")
+	}
+	c := &GitCredentials{AccessToken: " glpat-xyz "}
+	if c.Empty() {
+		t.Fatal("token credentials should not be empty")
+	}
+	if c.Token() != "glpat-xyz" {
+		t.Fatalf("token should be trimmed: %q", c.Token())
+	}
+	user, pass, ok := c.httpBasicAuth()
+	if !ok || user != "oauth2" || pass != "glpat-xyz" {
+		t.Fatalf("basic auth = %q/%q ok=%v, want oauth2/glpat-xyz", user, pass, ok)
+	}
+	if _, _, ok := empty.httpBasicAuth(); ok {
+		t.Fatal("no basic auth without a token")
 	}
 }
 

@@ -15,8 +15,8 @@ func TestSiteConfigDefaults(t *testing.T) {
 	if cfg.CodeRepo != "" {
 		t.Fatalf("expected empty defaults, got %+v", cfg)
 	}
-	if cfg.DeployKey != "" || cfg.DeployToken != "" || cfg.DeployTokenUser != "" {
-		t.Fatalf("expected empty credentials, got %+v", cfg)
+	if cfg.AccessToken != "" {
+		t.Fatalf("expected empty token, got %+v", cfg)
 	}
 }
 
@@ -24,10 +24,9 @@ func TestSiteConfigSaveLoad(t *testing.T) {
 	s := newTestStore(t)
 
 	cfg := &SiteConfig{
-		CodeRepo:        "https://gitlab.com/group/code",
-		DeployKey:       "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n",
-		DeployToken:     "glpat-xxxxxxxxxxxx",
-		DeployTokenUser: "gitlab+deploy-token-42",
+		CodeRepo:    "https://gitlab.com/group/code",
+		AccessToken: "glpat-xxxxxxxxxxxx",
+		Timezone:    "Asia/Shanghai",
 	}
 	if err := s.SaveSiteConfig(cfg); err != nil {
 		t.Fatalf("SaveSiteConfig: %v", err)
@@ -40,9 +39,8 @@ func TestSiteConfigSaveLoad(t *testing.T) {
 	if got.CodeRepo != cfg.CodeRepo {
 		t.Fatalf("round-trip mismatch: %+v", got)
 	}
-	if got.DeployKey != cfg.DeployKey || got.DeployToken != cfg.DeployToken ||
-		got.DeployTokenUser != cfg.DeployTokenUser {
-		t.Fatalf("credentials round-trip mismatch: %+v", got)
+	if got.AccessToken != cfg.AccessToken || got.Timezone != cfg.Timezone {
+		t.Fatalf("token/timezone round-trip mismatch: %+v", got)
 	}
 	if got.UpdatedAt.IsZero() {
 		t.Fatal("expected UpdatedAt to be set")

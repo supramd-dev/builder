@@ -58,11 +58,7 @@ func (s *Service) DispatchForCommit(commit *store.Commit) DispatchResult {
 		return res
 	}
 
-	creds := &GitCredentials{
-		DeployKey:       cfg.DeployKey,
-		DeployToken:     cfg.DeployToken,
-		DeployTokenUser: cfg.DeployTokenUser,
-	}
+	creds := &GitCredentials{AccessToken: cfg.AccessToken}
 	yamlBytes, err := s.FetchYAML(cfg.CodeRepo, commit.SHA, creds)
 	if err != nil {
 		res.Err = err
@@ -117,11 +113,7 @@ func (s *Service) DispatchManual(in ManualDispatch) ([]*store.Task, error) {
 		return nil, errors.New("no environment selected")
 	}
 
-	creds := &GitCredentials{
-		DeployKey:       cfg.DeployKey,
-		DeployToken:     cfg.DeployToken,
-		DeployTokenUser: cfg.DeployTokenUser,
-	}
+	creds := &GitCredentials{AccessToken: cfg.AccessToken}
 	sha, err := s.resolveRef(context.Background(), repo, in.Ref, creds)
 	if err != nil {
 		return nil, err

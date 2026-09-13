@@ -97,11 +97,7 @@ func (s *Service) loadRootContext(task *store.Task) (*rootContext, bool) {
 
 // creds builds the git credentials from the site config.
 func (rc *rootContext) creds() *GitCredentials {
-	return &GitCredentials{
-		DeployKey:       rc.cfg.DeployKey,
-		DeployToken:     rc.cfg.DeployToken,
-		DeployTokenUser: rc.cfg.DeployTokenUser,
-	}
+	return &GitCredentials{AccessToken: rc.cfg.AccessToken}
 }
 
 // scriptInput assembles the shared ScriptInput for sub-task scripts.
@@ -370,7 +366,7 @@ func (s *Service) finishCommandTask(task *store.Task, logw *LogWriter, exitCode 
 // failTask marks a task failed with a redacted message.
 func (s *Service) failTask(task *store.Task, msg string) {
 	if cfg, err := s.Store.GetSiteConfig(); err == nil {
-		msg = Redact(msg, cfg.DeployToken)
+		msg = Redact(msg, cfg.AccessToken)
 	}
 	if err := s.Store.FinishTask(task.ID, store.TaskFailed, msg); err != nil {
 		log.Printf("runner: task %d: finish failed: %v", task.ID, err)
@@ -380,7 +376,7 @@ func (s *Service) failTask(task *store.Task, msg string) {
 // failTaskLogged marks a task failed and appends the reason to its log.
 func (s *Service) failTaskLogged(task *store.Task, logw *LogWriter, msg string) {
 	if cfg, err := s.Store.GetSiteConfig(); err == nil {
-		msg = Redact(msg, cfg.DeployToken)
+		msg = Redact(msg, cfg.AccessToken)
 	}
 	fmt.Fprintf(logw, "task failed: %s\n", msg)
 	if err := s.Store.FinishTask(task.ID, store.TaskFailed, msg); err != nil {

@@ -18,23 +18,18 @@ git@gitlab.example.com:group/code.git
 
 ## Credentials for private repositories
 
-For private repositories configure **one** of:
-
-- **Deploy token** — a GitLab deploy token or personal/group access token
-  with the read_repository scope, plus the username shown next to it in
-  GitLab (e.g. gitlab+deploy-token-42; leave the username empty for the
-  default oauth2). Applies to https repository URLs.
-- **Deploy key** — a PEM-encoded SSH private key whose public half is
-  registered as a GitLab deploy key with read access to the repository.
-  https URLs are converted to their ssh:// form automatically.
-
-Both are used by the **server only**: to read the test matrix from the
+For private repositories configure a **Project Access Token** — created in
+GitLab under *Settings → Access Tokens* with the `read_repository` scope.
+The token is used by the **server only**: to read the test matrix from the
 code repository and to clone it before uploading it to the test
 environments (the environments themselves need no repository access —
-see [Runner and tasks](#/docs/runner-strategy)). Secrets are
-write-only: the form shows whether one is configured, never the value
-itself; leave the field blank to keep the stored secret, tick the
-*Remove* checkbox to clear it.
+see [Runner and tasks](#/docs/runner-strategy)). Repository locations
+given in SSH form (ssh:// or git@host:group/repo) are cloned over https
+with the token. For public repositories leave the token empty.
+
+The token is write-only: the form shows whether one is configured, never
+the value itself; leave the field blank to keep the stored token, tick
+the *Remove* checkbox to clear it.
 
 ## Display timezone
 

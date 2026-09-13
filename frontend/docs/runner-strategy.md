@@ -148,10 +148,11 @@ through the regular case-result rows.
 
 ## Prerequisites
 
-- The **server** needs `git` on PATH and read access to both repositories
-  (to read the YAML and clone) — public repos work as-is, private ones use
-  the deploy key / deploy token configured in the site settings (see
-  [Site configuration](#/docs/site-configuration)).
+- The **server** needs read access to the code repository (to read the
+  YAML and clone) — public repos work as-is, private ones use the Project
+  Access Token configured in the site settings (see
+  [Site configuration](#/docs/site-configuration)). Cloning happens
+  in-process via go-git: no `git` binary is required.
 - Each **remote environment** needs `bash`, `tar`, `gzip` and `timeout`,
   plus the toolchain the build and test commands use. It needs no git and
   no repository access.

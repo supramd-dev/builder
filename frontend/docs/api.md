@@ -158,8 +158,9 @@ The `unitResults` / `regressionResults` fields accept a single path or a
 list of paths — a run can produce several results files.
 
 - At least one stage command and one environment are required.
-- The ref is resolved to a concrete commit (`git ls-remote`) with the
-  site's deploy key / deploy token; the response is
+- The ref is resolved to a concrete commit (a remote ref listing, the
+  equivalent of `git ls-remote`) with the site's Project Access Token;
+  the response is
   `{"roots": [{"taskId": 42, "environmentId": 1}, …]}` — one root task
   per environment, ordered like the request.
 - Graphs are marked `trigger: 1` (manual); every dispatch records a
@@ -187,8 +188,8 @@ created with the `adduser` CLI (see
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
-| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, credential set-flags, `timezone`) |
-| PUT    | `/api/site-config`              | Update site configuration (deploy key/token: empty = keep, `clearDeploy*` = remove; `timezone`: IANA name, empty = browser-local) |
+| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`) |
+| PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
 | POST   | `/api/test-runs`                | Report a test run result                      |

@@ -26,8 +26,8 @@ POST https://your-server/api/webhooks/gitlab
 3. 响应携带 `jobsCreated` / `entriesSkipped`,以及 YAML 无法获取或解析
    时的 `dispatchError` —— 无论成败,提交都会被记录。
 
-私有仓库通过站点设置中配置的 deploy key / deploy token 处理(见
-[站点配置](#/docs/site-configuration))。
+私有仓库通过站点设置中配置的 Project Access Token(项目访问令牌)处理
+(见[站点配置](#/docs/site-configuration))。
 
 ## 重新派发
 

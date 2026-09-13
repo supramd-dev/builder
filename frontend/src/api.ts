@@ -123,26 +123,20 @@ export async function execScript(
 
 export interface SiteConfig {
   codeRepo: string
-  deployKeySet: boolean
-  deployTokenSet: boolean
-  deployTokenUser: string
+  accessTokenSet: boolean
   // IANA timezone name every timestamp is displayed in; "" = the viewer's
   // browser-local zone.
   timezone: string
   updatedAt: string
 }
 
-// SiteConfigUpdate is the PUT body: the secret fields are write-only.
-// An empty deployKey/deployToken keeps the stored one; the clear flags
-// remove it.
+// SiteConfigUpdate is the PUT body: the access token is write-only.
+// An empty accessToken keeps the stored one; the clear flag removes it.
 export interface SiteConfigUpdate {
   codeRepo: string
-  deployKey?: string
-  deployToken?: string
-  deployTokenUser?: string
+  accessToken?: string
   timezone?: string
-  clearDeployKey?: boolean
-  clearDeployToken?: boolean
+  clearAccessToken?: boolean
 }
 
 export async function getSiteConfig(): Promise<SiteConfig> {

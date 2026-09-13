@@ -75,13 +75,9 @@ function RepositoryTab({ onError }: { onError: (message: string) => void }) {
   const [saved, setSaved] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [codeRepo, setCodeRepo] = useState('')
-  const [deployKey, setDeployKey] = useState('')
-  const [deployToken, setDeployToken] = useState('')
-  const [deployTokenUser, setDeployTokenUser] = useState('')
-  const [clearDeployKey, setClearDeployKey] = useState(false)
-  const [clearDeployToken, setClearDeployToken] = useState(false)
-  const [deployKeySet, setDeployKeySet] = useState(false)
-  const [deployTokenSet, setDeployTokenSet] = useState(false)
+  const [accessToken, setAccessToken] = useState('')
+  const [clearAccessToken, setClearAccessToken] = useState(false)
+  const [accessTokenSet, setAccessTokenSet] = useState(false)
   const [timezone, setTimezone] = useState('')
   const [updatedAt, setUpdatedAt] = useState('')
 
@@ -91,9 +87,7 @@ function RepositoryTab({ onError }: { onError: (message: string) => void }) {
       .then((cfg: SiteConfig) => {
         if (cancelled) return
         setCodeRepo(cfg.codeRepo)
-        setDeployTokenUser(cfg.deployTokenUser)
-        setDeployKeySet(cfg.deployKeySet)
-        setDeployTokenSet(cfg.deployTokenSet)
+        setAccessTokenSet(cfg.accessTokenSet)
         setTimezone(cfg.timezone)
         setUpdatedAt(cfg.updatedAt)
       })
@@ -119,23 +113,16 @@ function RepositoryTab({ onError }: { onError: (message: string) => void }) {
     try {
       const cfg = await updateSiteConfig({
         codeRepo,
-        deployKey: clearDeployKey ? '' : deployKey,
-        deployToken: clearDeployToken ? '' : deployToken,
-        deployTokenUser,
+        accessToken: clearAccessToken ? '' : accessToken,
         // Keep the timezone as-is from this tab (the Display tab owns it).
         timezone,
-        clearDeployKey,
-        clearDeployToken,
+        clearAccessToken,
       })
       setCodeRepo(cfg.codeRepo)
-      setDeployTokenUser(cfg.deployTokenUser)
-      setDeployKeySet(cfg.deployKeySet)
-      setDeployTokenSet(cfg.deployTokenSet)
+      setAccessTokenSet(cfg.accessTokenSet)
       setTimezone(cfg.timezone)
-      setDeployKey('')
-      setDeployToken('')
-      setClearDeployKey(false)
-      setClearDeployToken(false)
+      setAccessToken('')
+      setClearAccessToken(false)
       setUpdatedAt(cfg.updatedAt)
       setSaved(true)
     } catch (err: unknown) {
@@ -186,115 +173,57 @@ function RepositoryTab({ onError }: { onError: (message: string) => void }) {
         <h4>Repository credentials (optional)</h4>
         <p className="text-muted">
           For <strong>private</strong> repositories, configure a GitLab{' '}
-          <strong>deploy token</strong> or a{' '}
-          <strong>deploy key</strong> — used both by the server (to read the
-          test matrix) and by the test environments (to clone the
-          repositories). For public repositories leave both empty. The token
-          applies to https repository URLs; the key converts them to SSH.
-          Secrets are stored server-side and never shown again.
+          <strong>Project Access Token</strong> with the{' '}
+          <code>read_repository</code> scope. It is used by the server only
+          (to read the test matrix and to clone the repository before
+          uploading it to the test environments — the environments
+          themselves need no repository access). For public repositories
+          leave it empty. SSH repository locations are cloned over https
+          with the token. The secret is stored server-side and never shown
+          again.
         </p>
 
         <div className="form-group">
-          <label htmlFor="cfg-deploy-token">
-            Deploy token{' '}
-            {deployTokenSet &&
-              !clearDeployToken &&
+          <label htmlFor="cfg-access-token">
+            Project Access Token{' '}
+            {accessTokenSet &&
+              !clearAccessToken &&
               '(configured — leave blank to keep)'}
           </label>
           <input
-            id="cfg-deploy-token"
+            id="cfg-access-token"
             type="password"
-            value={deployToken}
+            value={accessToken}
             onChange={(e) => {
-              setDeployToken(e.target.value)
-              if (e.target.value) setClearDeployToken(false)
+              setAccessToken(e.target.value)
+              if (e.target.value) setClearAccessToken(false)
               setSaved(false)
             }}
             placeholder={
-              deployTokenSet ? '••••••••' : 'glpat-… or the token value'
+              accessTokenSet ? '••••••••' : 'glpat-… (the token value)'
             }
             autoComplete="new-password"
           />
           <small className="text-muted">
-            A GitLab deploy token or personal/group access token with{' '}
-            <code>read_repository</code> scope.
+            Create one in GitLab under <em>Settings → Access Tokens</em>{' '}
+            with the <code>read_repository</code> scope.
           </small>
         </div>
 
-        <div className="form-group">
-          <label htmlFor="cfg-deploy-token-user">
-            Deploy token username (optional)
-          </label>
-          <input
-            id="cfg-deploy-token-user"
-            type="text"
-            value={deployTokenUser}
-            onChange={(e) => {
-              setDeployTokenUser(e.target.value)
-              setSaved(false)
-            }}
-            placeholder="oauth2 (default for access tokens)"
-          />
-          <small className="text-muted">
-            GitLab shows this next to the token, e.g.{' '}
-            <code>gitlab+deploy-token-42</code>. Leave empty for{' '}
-            <code>oauth2</code>.
-          </small>
-        </div>
-
-        <div className="form-group">
-          <label htmlFor="cfg-deploy-key">
-            Deploy key (SSH private key){' '}
-            {deployKeySet &&
-              !clearDeployKey &&
-              '(configured — leave blank to keep)'}
-          </label>
-          <textarea
-            id="cfg-deploy-key"
-            className="form-control"
-            rows={3}
-            value={deployKey}
-            onChange={(e) => {
-              setDeployKey(e.target.value)
-              if (e.target.value) setClearDeployKey(false)
-              setSaved(false)
-            }}
-            placeholder="-----BEGIN OPENSSH PRIVATE KEY----- ..."
-            style={{ fontFamily: 'monospace', fontSize: '0.875rem' }}
-          />
-          <small className="text-muted">
-            PEM-encoded SSH private key of a GitLab deploy key (granted read
-            access to the repository).
-          </small>
-        </div>
-
-        {(deployKeySet || deployTokenSet) && (
+        {accessTokenSet && (
           <div className="form-group">
             <label style={{ fontWeight: 'normal' }}>
               <input
                 type="checkbox"
-                checked={clearDeployKey}
+                checked={clearAccessToken}
                 onChange={(e) => {
-                  setClearDeployKey(e.target.checked)
-                  if (e.target.checked) setDeployKey('')
+                  setClearAccessToken(e.target.checked)
+                  if (e.target.checked) setAccessToken('')
                   setSaved(false)
                 }}
                 style={{ marginRight: '0.35rem', position: 'relative', top: '2px' }}
               />
-              Remove stored deploy key
-            </label>
-            <label style={{ fontWeight: 'normal' }}>
-              <input
-                type="checkbox"
-                checked={clearDeployToken}
-                onChange={(e) => {
-                  setClearDeployToken(e.target.checked)
-                  if (e.target.checked) setDeployToken('')
-                  setSaved(false)
-                }}
-                style={{ marginRight: '0.35rem', position: 'relative', top: '2px' }}
-              />
-              Remove stored deploy token
+              Remove stored access token
             </label>
           </div>
         )}

@@ -4,25 +4,43 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	"github.com/go-git/go-git/v5/storage/memory"
 )
 
 // This file implements the server-side clone: the code repository is
-// cloned on the server (with the site-configured deploy key/token) and
-// uploaded to the remote environment as a gzipped tar stream. The remote
-// environment needs no git and no repository access. Test inputs are
-// expected to live inside the code repository itself (or to be fetched
-// by it), so there is no separate test-input clone.
+// cloned on the server (with the site-configured Project Access Token)
+// and uploaded to the remote environment as a gzipped tar stream. The
+// remote environment needs no git and no repository access. Test inputs
+// are expected to live inside the code repository itself (or to be
+// fetched by it), so there is no separate test-input clone. Cloning goes
+// through go-git — no git binary is required on the server.
 
-// CloneRepo clones repoURL at ref into destDir. ref may be a branch, tag or
-// commit SHA. creds may be nil (public repositories). git's progress output
-// goes to logw when non-nil.
+// gitAuth builds the HTTP Basic-auth transport for the token (nil for
+// public repositories). GitLab Project Access Tokens authenticate as
+// "oauth2" over HTTPS.
+func gitAuth(creds *GitCredentials) *http.BasicAuth {
+	if user, pass, ok := creds.httpBasicAuth(); ok {
+		return &http.BasicAuth{Username: user, Password: pass}
+	}
+	return nil
+}
+
+// CloneRepo clones repoURL at ref into destDir. ref may be a branch, tag
+// or commit SHA (empty = the remote HEAD). creds may be nil (public
+// repositories). Progress goes to logw when non-nil; the token is
+// redacted from any error output.
 func CloneRepo(ctx context.Context, repoURL, ref, destDir string, creds *GitCredentials, logw io.Writer) error {
 	if strings.TrimSpace(repoURL) == "" {
 		return fmt.Errorf("repository URL is empty")
@@ -32,77 +50,77 @@ func CloneRepo(ctx context.Context, repoURL, ref, destDir string, creds *GitCred
 	}
 	_ = os.RemoveAll(destDir)
 
-	cloneURL := repoURL
-	var keyFile string
-	secret := ""
-	if creds != nil {
-		switch {
-		case creds.HasToken():
-			cloneURL = creds.AuthenticatedURL(repoURL)
-			secret = creds.DeployToken
-		case creds.HasKey():
-			sshURL, ok := creds.SSHURL(repoURL)
-			if !ok {
-				return fmt.Errorf("cannot use deploy key with repository location %q", repoURL)
-			}
-			cloneURL = sshURL
-			dir, err := os.MkdirTemp("", "md-builder-key-*")
-			if err != nil {
-				return fmt.Errorf("create temp dir: %w", err)
-			}
-			keyFile, err = writeTempKey(creds.DeployKey, dir)
-			if err != nil {
-				os.RemoveAll(dir)
-				return err
-			}
-			defer os.RemoveAll(dir) // removes the key file with it
+	cloneURL := HTTPURL(repoURL)
+	secret := creds.Token()
+
+	ref = strings.TrimSpace(ref)
+	opts := &git.CloneOptions{
+		URL:      cloneURL,
+		Auth:     gitAuth(creds),
+		Progress: logwOrDiscard(logw),
+	}
+	// A concrete ref: fetch only that branch/tag (a SHA goes through the
+	// HEAD clone + checkout path below — git servers do not advertise
+	// arbitrary commits as refs).
+	if ref != "" && !isFullSHA(ref) {
+		opts.ReferenceName = plumbing.NewBranchReferenceName(ref)
+		if !refExists(ctx, cloneURL, creds, opts.ReferenceName) {
+			// Not a branch: try a tag with the same name.
+			opts.ReferenceName = plumbing.NewTagReferenceName(ref)
 		}
 	}
-
-	args := []string{"clone", "--quiet"}
-	if keyFile != "" {
-		args = append(args,
-			"-c", "credential.helper=",
-			"-c", fmt.Sprintf("core.sshCommand=ssh -i %s -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes", shq(keyFile)),
-		)
-	}
-	args = append(args, cloneURL, destDir)
-
-	if err := runGit(ctx, args, logw, secret); err != nil {
-		return fmt.Errorf("git clone %s: %w", repoURL, err)
-	}
-
-	// Checkout the requested ref when it is not the default HEAD.
-	ref = strings.TrimSpace(ref)
-	if ref == "" || ref == "HEAD" {
-		return nil
-	}
-	checkout := exec.CommandContext(ctx, "git", "-C", destDir, "checkout", "--quiet", ref)
-	if out, err := checkout.CombinedOutput(); err != nil {
-		return fmt.Errorf("git checkout %s: %w (%s)", ref, err, Redact(string(out), secret))
-	}
-	return nil
-}
-
-// runGit executes git with args, logging combined output to logw (with the
-// secret redacted) and failing with a redacted message.
-func runGit(ctx context.Context, args []string, logw io.Writer, secret string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	var buf strings.Builder
-	cmd.Stdout = io.MultiWriter(&buf, logwOrDiscard(logw))
-	cmd.Stderr = io.MultiWriter(&buf, logwOrDiscard(logw))
-	err := cmd.Run()
+	repo, err := git.PlainCloneContext(ctx, destDir, false, opts)
 	if err != nil {
-		return fmt.Errorf("%w (%s)", err, Redact(strings.TrimSpace(buf.String()), secret))
+		return redactErr(fmt.Errorf("git clone %s: %w", repoURL, err), secret)
+	}
+
+	// Checkout the requested SHA when the ref is not a branch/tag (empty
+	// ref already cloned HEAD).
+	if isFullSHA(ref) {
+		h := plumbing.NewHash(strings.ToLower(ref))
+		w, werr := repo.Worktree()
+		if werr != nil {
+			return redactErr(fmt.Errorf("git checkout %s: %w", ref, werr), secret)
+		}
+		if err := w.Checkout(&git.CheckoutOptions{Hash: h}); err != nil {
+			return redactErr(fmt.Errorf("git checkout %s: %w", ref, err), secret)
+		}
 	}
 	return nil
 }
 
+// refExists reports whether the remote advertises the named ref (used to
+// decide between branch and tag spellings before cloning).
+func refExists(ctx context.Context, cloneURL string, creds *GitCredentials, name plumbing.ReferenceName) bool {
+	remote := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{
+		Name: "origin", URLs: []string{cloneURL},
+	})
+	refs, err := remote.ListContext(ctx, &git.ListOptions{Auth: gitAuth(creds)})
+	if err != nil {
+		return false
+	}
+	for _, r := range refs {
+		if r.Name() == name {
+			return true
+		}
+	}
+	return false
+}
+
+// logwOrDiscard passes w through, or discards when nil.
 func logwOrDiscard(w io.Writer) io.Writer {
 	if w == nil {
 		return io.Discard
 	}
 	return w
+}
+
+// redactErr redacts the secret from an error's message.
+func redactErr(err error, secret string) error {
+	if secret == "" {
+		return err
+	}
+	return errors.New(Redact(err.Error(), secret))
 }
 
 // TarDir gzips the contents of dir into w (a single top-level entry per
@@ -224,91 +242,67 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 // ResolveRef resolves a git ref (branch, tag, short or full SHA; empty
 // means HEAD) to the full commit SHA the repository currently points at,
-// via git ls-remote on the server. creds may be nil (public repositories).
+// via go-git's remote listing (the equivalent of git ls-remote). creds
+// may be nil (public repositories).
 func ResolveRef(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) {
 	if strings.TrimSpace(repoURL) == "" {
 		return "", fmt.Errorf("repository URL is empty")
 	}
 	ref = strings.TrimSpace(ref)
 
-	cloneURL := repoURL
-	var keyFile string
-	secret := ""
-	if creds != nil {
-		switch {
-		case creds.HasToken():
-			cloneURL = creds.AuthenticatedURL(repoURL)
-			secret = creds.DeployToken
-		case creds.HasKey():
-			sshURL, ok := creds.SSHURL(repoURL)
-			if !ok {
-				return "", fmt.Errorf("cannot use deploy key with repository location %q", repoURL)
-			}
-			cloneURL = sshURL
-			dir, err := os.MkdirTemp("", "md-builder-key-*")
-			if err != nil {
-				return "", fmt.Errorf("create temp dir: %w", err)
-			}
-			keyFile, err = writeTempKey(creds.DeployKey, dir)
-			if err != nil {
-				os.RemoveAll(dir)
-				return "", err
-			}
-			defer os.RemoveAll(dir)
-		}
-	}
-
 	// A full 40-hex SHA needs no network round trip.
 	if isFullSHA(ref) {
 		return strings.ToLower(ref), nil
 	}
 
-	args := []string{"ls-remote", cloneURL}
-	if ref == "" {
-		args = append(args, "HEAD")
-	} else {
-		args = append(args, ref)
-	}
-	if keyFile != "" {
-		gitArgs := append([]string{
-			"-c", "credential.helper=",
-			"-c", fmt.Sprintf("core.sshCommand=ssh -i %s -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes", shq(keyFile)),
-		}, args...)
-		args = gitArgs
+	remote := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{
+		Name: "origin", URLs: []string{HTTPURL(repoURL)},
+	})
+	refs, err := remote.ListContext(ctx, &git.ListOptions{Auth: gitAuth(creds)})
+	if err != nil {
+		return "", redactErr(fmt.Errorf("git ls-remote %s: %w", repoURL, err), creds.Token())
 	}
 
-	cmd := exec.CommandContext(ctx, "git", args...)
-	var buf strings.Builder
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("git ls-remote %s: %w (%s)", repoURL, err, Redact(strings.TrimSpace(buf.String()), secret))
-	}
-	return firstLSRemoteSHA(buf.String(), ref)
-}
-
-// firstLSRemoteSHA parses ls-remote output (lines of "<sha>\t<ref>") and
-// returns the first SHA, preferring an exact ref match over the loosely
-// matched remainder. Empty output is an error (unknown ref).
-func firstLSRemoteSHA(out, ref string) (string, error) {
-	lines := strings.Split(strings.TrimSpace(out), "\n")
+	// Prefer an exact branch, then an exact tag; a short SHA matches any
+	// advertised commit id by prefix.
 	if ref != "" {
-		want := ref
-		for _, l := range lines {
-			if i := strings.IndexByte(l, '\t'); i > 0 && l[i+1:] == want {
-				return l[:i], nil
+		for _, name := range []plumbing.ReferenceName{
+			plumbing.NewBranchReferenceName(ref),
+			plumbing.NewTagReferenceName(ref),
+		} {
+			for _, r := range refs {
+				if r.Name() == name && !r.Hash().IsZero() {
+					return r.Hash().String(), nil
+				}
+			}
+		}
+		for _, r := range refs {
+			if !r.Hash().IsZero() && strings.HasPrefix(r.Hash().String(), strings.ToLower(ref)) {
+				return r.Hash().String(), nil
+			}
+		}
+		return "", fmt.Errorf("git ls-remote: ref %q not found", ref)
+	}
+
+	// Empty ref: HEAD. Some servers advertise HEAD with its commit hash;
+	// others (the common case) send a symbolic reference pointing at the
+	// default branch — follow the target through the same listing.
+	for _, r := range refs {
+		if r.Name() != plumbing.HEAD {
+			continue
+		}
+		if !r.Hash().IsZero() {
+			return r.Hash().String(), nil
+		}
+		if tgt := r.Target(); tgt != "" {
+			for _, r2 := range refs {
+				if r2.Name() == tgt && !r2.Hash().IsZero() {
+					return r2.Hash().String(), nil
+				}
 			}
 		}
 	}
-	for _, l := range lines {
-		if i := strings.IndexByte(l, '\t'); i >= 40 {
-			return l[:40], nil
-		}
-	}
-	if ref == "" {
-		return "", fmt.Errorf("git ls-remote: repository advertises no HEAD")
-	}
-	return "", fmt.Errorf("git ls-remote: ref %q not found", ref)
+	return "", fmt.Errorf("git ls-remote: repository advertises no HEAD")
 }
 
 // isFullSHA reports whether s is a 40-character hex commit id.
