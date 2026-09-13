@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import Editor, { type OnMount } from '@monaco-editor/react'
 import { defineMonacoTheme } from './monacoTheme'
+import { formatDuration } from './gtest'
 import {
   execEnvironment,
   execScript,
@@ -282,7 +283,7 @@ function ExecTab({ onError }: RunPageProps) {
                 Failed (exit code {result.exitCode})
               </span>
             )}{' '}
-            · {result.durationMilliSeconds} ms
+            · {formatDuration(result.durationMilliSeconds)}
           </p>
           {result.stdout && (
             <>

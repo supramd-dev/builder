@@ -32,19 +32,19 @@ const scriptExecTimeout = 10 * time.Minute
 
 // Result reports the outcome of a connectivity check.
 type Result struct {
-	Success  bool          `json:"success"`
-	Message  string        `json:"message"`          // human-readable summary
-	Banner   string        `json:"banner,omitempty"` // remote SSH version banner
-	Duration time.Duration `json:"durationMilliSeconds"`
+	Success        bool   `json:"success"`
+	Message        string `json:"message"`          // human-readable summary
+	Banner         string `json:"banner,omitempty"` // remote SSH version banner
+	DurationMillis int64  `json:"durationMilliSeconds"`
 }
 
 // ExecResult reports the outcome of a remote command execution.
 type ExecResult struct {
-	Success  bool          `json:"success"`
-	Stdout   string        `json:"stdout"`
-	Stderr   string        `json:"stderr"`
-	ExitCode int           `json:"exitCode"`
-	Duration time.Duration `json:"durationMilliSeconds"`
+	Success        bool   `json:"success"`
+	Stdout         string `json:"stdout"`
+	Stderr         string `json:"stderr"`
+	ExitCode       int    `json:"exitCode"`
+	DurationMillis int64  `json:"durationMilliSeconds"`
 }
 
 // SSHHost identifies the remote endpoint of an execution: the fields of a
@@ -103,10 +103,10 @@ func CheckSSH(h SSHHost) Result {
 	}
 
 	return Result{
-		Success:  true,
-		Message:  fmt.Sprintf("connected to %s as %s; %s", h.Host, h.Username, strings.TrimSpace(out)),
-		Banner:   banner,
-		Duration: time.Since(start),
+		Success:        true,
+		Message:        fmt.Sprintf("connected to %s as %s; %s", h.Host, h.Username, strings.TrimSpace(out)),
+		Banner:         banner,
+		DurationMillis: time.Since(start).Milliseconds(),
 	}
 }
 
@@ -158,13 +158,13 @@ func RunSSH(ctx context.Context, h SSHHost, cmd, stdinData string, timeout time.
 
 	client, err := dialSSH(h.Host, h.Username, h.PrivateKey)
 	if err != nil {
-		return ExecResult{Success: false, Stderr: err.Error(), ExitCode: -1, Duration: time.Since(start)}
+		return ExecResult{Success: false, Stderr: err.Error(), ExitCode: -1, DurationMillis: time.Since(start).Milliseconds()}
 	}
 	defer client.Close()
 
 	sess, err := client.NewSession()
 	if err != nil {
-		return ExecResult{Success: false, Stderr: err.Error(), ExitCode: -1, Duration: time.Since(start)}
+		return ExecResult{Success: false, Stderr: err.Error(), ExitCode: -1, DurationMillis: time.Since(start).Milliseconds()}
 	}
 	defer sess.Close()
 
@@ -200,14 +200,14 @@ func RunSSH(ctx context.Context, h SSHHost, cmd, stdinData string, timeout time.
 				exit = ee.ExitStatus()
 			} else {
 				return ExecResult{
-					Success:  false,
-					Stderr:   fmt.Sprintf("run error: %v", err),
-					ExitCode: -1,
-					Duration: time.Since(start),
+					Success:        false,
+					Stderr:         fmt.Sprintf("run error: %v", err),
+					ExitCode:       -1,
+					DurationMillis: time.Since(start).Milliseconds(),
 				}
 			}
 		}
-		return ExecResult{Success: exit == 0, ExitCode: exit, Duration: time.Since(start)}
+		return ExecResult{Success: exit == 0, ExitCode: exit, DurationMillis: time.Since(start).Milliseconds()}
 	case <-ctx.Done():
 		_ = client.Close()
 		reason := ctx.Err()
@@ -215,10 +215,10 @@ func RunSSH(ctx context.Context, h SSHHost, cmd, stdinData string, timeout time.
 			reason = fmt.Errorf("command timed out after %s", timeout)
 		}
 		return ExecResult{
-			Success:  false,
-			Stderr:   fmt.Sprintf("%v", reason),
-			ExitCode: -1,
-			Duration: time.Since(start),
+			Success:        false,
+			Stderr:         fmt.Sprintf("%v", reason),
+			ExitCode:       -1,
+			DurationMillis: time.Since(start).Milliseconds(),
 		}
 	}
 }
@@ -294,5 +294,5 @@ func runCommandOn(client *ssh.Client, cmd string) (string, error) {
 }
 
 func failSSH(start time.Time, msg string) Result {
-	return Result{Success: false, Message: msg, Duration: time.Since(start)}
+	return Result{Success: false, Message: msg, DurationMillis: time.Since(start).Milliseconds()}
 }
