@@ -30,3 +30,11 @@ git@gitlab.example.com:group/code.git
 [Runner 与任务](#/docs/runner-strategy))。密钥为只写:表单只显示是否
 已配置,绝不显示其值;留空表示保留已存的密钥,勾选 *Remove* 复选框则
 删除。
+
+## 显示时区
+
+**Settings → Display** 标签页设置所有时间戳(仪表板、任务与运行页面)
+的显示时区:选择一个 IANA 时区如 `Asia/Shanghai`,或保持 *Browser
+local* 让每个访问者按自己浏览器的时区查看。该设置仅影响显示 —— 存储
+数据与日志保留原始时间戳;浏览器会在本地缓存该选择,刷新页面后时间立
+即按所选时区渲染,无需等待请求。

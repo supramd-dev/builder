@@ -10,6 +10,10 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	// Embed the IANA time zone database so the site-config timezone setting
+	// (and time.LoadLocation) works on hosts without system zoneinfo (e.g.
+	// scratch containers).
+	_ "time/tzdata"
 
 	"md-builder/server/api"
 	"md-builder/server/runner"

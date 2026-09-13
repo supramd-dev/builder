@@ -34,6 +34,12 @@ type SiteConfig struct {
 	// the default for personal/group access tokens.
 	DeployTokenUser string
 
+	// Timezone is the IANA time zone name every timestamp is displayed in
+	// (e.g. "Asia/Shanghai"). Empty means "the viewer's browser local
+	// zone". The name is validated against the time/tzdata database; it is
+	// display-only — server internals always work in UTC.
+	Timezone string
+
 	UpdatedAt time.Time
 }
 

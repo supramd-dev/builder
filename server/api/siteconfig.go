@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"md-builder/server/store"
 )
@@ -16,6 +17,7 @@ type siteConfigJSON struct {
 	DeployKeySet    bool   `json:"deployKeySet"`
 	DeployTokenSet  bool   `json:"deployTokenSet"`
 	DeployTokenUser string `json:"deployTokenUser"`
+	Timezone        string `json:"timezone"` // IANA name, "" = browser local
 	UpdatedAt       string `json:"updatedAt"`
 }
 
@@ -27,6 +29,7 @@ type siteConfigInput struct {
 	DeployKey        string `json:"deployKey"`       // empty = keep current
 	DeployToken      string `json:"deployToken"`     // empty = keep current
 	DeployTokenUser  string `json:"deployTokenUser"` // not a secret, replaced as given
+	Timezone         string `json:"timezone"`        // IANA name, "" = browser local
 	ClearDeployKey   bool   `json:"clearDeployKey"`
 	ClearDeployToken bool   `json:"clearDeployToken"`
 }
@@ -88,6 +91,7 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request) {
 		cfg.DeployToken = tok
 	}
 	cfg.DeployTokenUser = strings.TrimSpace(in.DeployTokenUser)
+	cfg.Timezone = strings.TrimSpace(in.Timezone)
 	if err := s.Store.SaveSiteConfig(cfg); err != nil {
 		log.Printf("save site config: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -106,6 +110,11 @@ func validateSiteConfigInput(in *siteConfigInput) string {
 	if key := strings.TrimSpace(in.DeployKey); key != "" && !isPEMKey(key) {
 		return "deploy key must be a PEM-encoded SSH key"
 	}
+	if tz := strings.TrimSpace(in.Timezone); tz != "" {
+		if _, err := time.LoadLocation(tz); err != nil {
+			return "unknown timezone " + tz + " (use an IANA name like Asia/Shanghai)"
+		}
+	}
 	return ""
 }
 
@@ -115,6 +124,7 @@ func toSiteConfigJSON(cfg *store.SiteConfig) siteConfigJSON {
 		DeployKeySet:    strings.TrimSpace(cfg.DeployKey) != "",
 		DeployTokenSet:  strings.TrimSpace(cfg.DeployToken) != "",
 		DeployTokenUser: cfg.DeployTokenUser,
+		Timezone:        cfg.Timezone,
 		UpdatedAt:       cfg.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 }

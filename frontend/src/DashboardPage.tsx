@@ -11,6 +11,7 @@ import {
   type RunCell,
 } from './api'
 import { StageStatus, commitUrl, truncate } from './StatusViews'
+import { formatTimeShort } from './timezone'
 
 interface Props {
   onOpenRun: (runId: number) => void
@@ -354,7 +355,7 @@ function CommitCell({ commit }: { commit: DashboardCommit }) {
       <span className="dash-commit-author" title={commit.author}>
         {truncate(commit.author, 16)}
       </span>
-      <span className="dash-commit-date">{commit.pushedAt.slice(0, 10)}</span>
+      <span className="dash-commit-date">{formatTimeShort(commit.pushedAt)}</span>
       {commit.message && <span className="dash-commit-msg">{commit.message}</span>}
       {commit.superseded && (
         <span className="dash-superseded" title="a newer attempt of this commit exists">

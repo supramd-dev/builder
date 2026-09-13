@@ -9,6 +9,7 @@ import {
   type TestEnvironment,
 } from './api'
 import EnvironmentForm from './EnvironmentForm'
+import { formatTime } from './timezone'
 
 interface Props {
   me: Me
@@ -206,7 +207,7 @@ export default function UserCenter({ me }: Props) {
                     </button>
                   </td>
                   <td className="text-muted">
-                    {new Date(env.updatedAt).toLocaleString()}
+                    {formatTime(env.updatedAt)}
                   </td>
                   <td>
                     {res ? (

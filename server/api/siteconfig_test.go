@@ -98,6 +98,44 @@ func TestSiteConfigAPIFlow(t *testing.T) {
 		t.Fatalf("expected persisted repo, got %v", cfg["codeRepo"])
 	}
 
+	// Timezone: invalid IANA names are rejected, valid ones round-trip, and
+	// empty (browser-local) is the default.
+	rec = authed(http.MethodPut, "/api/site-config",
+		`{"codeRepo":"git@gitlab.com:group/code.git","timezone":"Not/AZone"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad timezone: expected 400, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	rec = authed(http.MethodPut, "/api/site-config",
+		`{"codeRepo":"git@gitlab.com:group/code.git","timezone":"Asia/Shanghai"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("timezone update: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode timezone update: %v", err)
+	}
+	if cfg["timezone"] != "Asia/Shanghai" {
+		t.Fatalf("timezone not echoed: %v", cfg["timezone"])
+	}
+	rec = authed(http.MethodGet, "/api/site-config", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["timezone"] != "Asia/Shanghai" {
+		t.Fatalf("timezone not persisted: %v", cfg["timezone"])
+	}
+	// Clearing back to browser-local.
+	rec = authed(http.MethodPut, "/api/site-config",
+		`{"codeRepo":"git@gitlab.com:group/code.git","timezone":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("timezone clear: expected 200, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["timezone"] != "" {
+		t.Fatalf("timezone should clear to empty: %v", cfg["timezone"])
+	}
+
 	// Unsupported method is rejected.
 	rec = authed(http.MethodDelete, "/api/site-config", "")
 	if rec.Code != http.StatusMethodNotAllowed {

@@ -9,6 +9,7 @@ import {
 import { formatDuration, parseGTestResults, type GTestCase } from './gtest'
 import MessageDialog from './MessageDialog'
 import TaskLogView from './TaskLogView'
+import { formatTime } from './timezone'
 
 interface Props {
   runId: number
@@ -426,9 +427,4 @@ function BackLink({ onBack }: { onBack: () => void }) {
       </a>
     </p>
   )
-}
-
-// formatTime renders an RFC3339 timestamp for display.
-function formatTime(ts: string): string {
-  return ts.replace('T', ' ').replace('Z', ' UTC')
 }

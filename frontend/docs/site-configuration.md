@@ -35,3 +35,12 @@ see [Runner and tasks](#/docs/runner-strategy)). Secrets are
 write-only: the form shows whether one is configured, never the value
 itself; leave the field blank to keep the stored secret, tick the
 *Remove* checkbox to clear it.
+
+## Display timezone
+
+The **Settings → Display** tab sets the timezone every timestamp is
+displayed in (dashboards, task and run pages): pick an IANA zone such as
+`Asia/Shanghai`, or leave it on *Browser local* so each viewer sees times
+in their own zone. The setting is display-only — stored data and logs keep
+their original timestamps, and the browser caches the choice locally so
+pages render immediately after a reload.

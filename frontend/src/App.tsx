@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import './App.css'
-import { api, type Me } from './api'
+import { api, getSiteConfig, type Me } from './api'
 import LoginPage from './LoginPage'
 import UserCenter from './UserCenter'
 import RunPage from './RunPage'
@@ -11,6 +11,7 @@ import CaseDetailPage from './CaseDetailPage'
 import DocsPage from './DocsPage'
 import TaskDetailPage from './TaskDetailPage'
 import TaskGraphPage from './TaskGraphPage'
+import { applySiteTimezone, subscribeTimezone } from './timezone'
 import type { CaseResult } from './api'
 
 // Page is the client-side routing state. The dashboard hierarchy is
@@ -31,6 +32,9 @@ function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [loadingMe, setLoadingMe] = useState(true)
   const [page, setPage] = useState<Page>({ view: 'dashboard' })
+  // Bumped when the display timezone changes so every page re-renders its
+  // timestamps (the formatters read the module-level state directly).
+  const [, setTimezoneTick] = useState(0)
 
   // Check for an existing session on mount.
   useEffect(() => {
@@ -39,6 +43,31 @@ function App() {
       .catch(() => setMe(null))
       .finally(() => setLoadingMe(false))
   }, [])
+
+  // Load the site timezone (cached in localStorage; a session may not even
+  // be established yet — the timezone applies to any rendered times).
+  useEffect(() => {
+    let cancelled = false
+    getSiteConfig()
+      .then((cfg) => {
+        if (!cancelled) applySiteTimezone(cfg.timezone)
+      })
+      .catch(() => {
+        // Not logged in or offline: the localStorage cache (applied at
+        // module load) carries the last known setting.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(
+    () =>
+      subscribeTimezone(() => {
+        setTimezoneTick((t) => t + 1)
+      }),
+    [],
+  )
 
   async function handleLogout() {
     try {

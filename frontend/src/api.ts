@@ -126,6 +126,9 @@ export interface SiteConfig {
   deployKeySet: boolean
   deployTokenSet: boolean
   deployTokenUser: string
+  // IANA timezone name every timestamp is displayed in; "" = the viewer's
+  // browser-local zone.
+  timezone: string
   updatedAt: string
 }
 
@@ -137,6 +140,7 @@ export interface SiteConfigUpdate {
   deployKey?: string
   deployToken?: string
   deployTokenUser?: string
+  timezone?: string
   clearDeployKey?: boolean
   clearDeployToken?: boolean
 }
