@@ -1,6 +1,6 @@
 # Test environments
 
-Register the machines that run the tests in the **User center**: name,
+Register the machines that run the tests under **Runner Envs**: name,
 SSH host, SSH username and an SSH private key. Use **Test** to verify
 connectivity, **Run command** to try commands interactively or dispatch
 a manual test on the machine (see

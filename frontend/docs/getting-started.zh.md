@@ -47,7 +47,7 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 2. **Settings**:配置被测试的代码仓库(见
    [站点配置](#/docs/site-configuration));仓库为私有
    时,配置 deploy key 或 deploy token。
-3. **User center**:注册至少一个测试环境并打上标签(见
+3. **运行环境**(Runner Envs):注册至少一个测试环境并打上标签(见
    [测试环境](#/docs/environments))。
 4. **代码仓库**:添加 md-builder.yaml 测试矩阵(见
    [测试矩阵](#/docs/test-matrix))。

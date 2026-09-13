@@ -73,7 +73,7 @@ function App() {
         {me && (
           <nav className="navbar-nav">
             {navLink({ view: 'dashboard' }, 'Dashboard')}
-            {navLink({ view: 'environments' }, 'User center')}
+            {navLink({ view: 'environments' }, 'Runner Envs')}
             {navLink({ view: 'run' }, 'Run command')}
             {navLink({ view: 'settings' }, 'Settings')}
           </nav>

@@ -103,16 +103,6 @@ func (s *Server) handleEnvironmentItem(w http.ResponseWriter, r *http.Request, u
 		s.scriptEnvironment(w, r, user, id)
 		return
 	}
-	// /api/environments/{id}/build-test — clone the code repository and run
-	// a build command (ad-hoc; reuses the job script generator).
-	if len(parts) == 2 && parts[1] == "build-test" {
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-			return
-		}
-		s.handleBuildTest(w, r, user, id)
-		return
-	}
 	if len(parts) != 1 {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return

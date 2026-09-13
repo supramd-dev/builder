@@ -99,7 +99,7 @@ export default function UserCenter({ me }: Props) {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <h2>User center</h2>
+        <h2>Runner environments</h2>
         <span className="text-muted">
           {me.username} · {me.email}
         </span>

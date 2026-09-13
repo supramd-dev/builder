@@ -174,7 +174,7 @@ function MatrixTable({
     return (
       <div className="event">
         <p className="text-muted" style={{ margin: 0 }}>
-          No test environments yet. Create one in the user center first —
+          No test environments yet. Create one in the Runner Envs page first —
           each environment becomes a column of the matrix.
         </p>
       </div>

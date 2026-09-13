@@ -1,6 +1,6 @@
 # 测试环境
 
-在 **User center** 中注册运行测试的机器:名称、SSH 主机、SSH 用户名和
+在 **运行环境**(Runner Envs)中注册运行测试的机器:名称、SSH 主机、SSH 用户名和
 SSH 私钥。用 **Test** 验证连通性,用 **Run command** 交互式地尝试命令,
 或在机器上派发一次手动测试(见 [Runner 与任务](#/docs/runner-strategy))。
 

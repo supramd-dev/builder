@@ -121,27 +121,6 @@ export async function execScript(
   })
 }
 
-export interface BuildTestResult {
-  success: boolean
-  stdout: string
-  stderr: string
-  exitCode: number
-  durationMilliSeconds: number
-}
-
-// buildTest clones the site-configured code repository on the server,
-// uploads it to the remote environment and runs a build command there.
-export async function buildTest(
-  id: number,
-  buildCommand: string,
-  ref: string,
-): Promise<BuildTestResult> {
-  return api<BuildTestResult>(`/api/environments/${id}/build-test`, {
-    method: 'POST',
-    body: JSON.stringify({ buildCommand, ref }),
-  })
-}
-
 export interface SiteConfig {
   codeRepo: string
   deployKeySet: boolean

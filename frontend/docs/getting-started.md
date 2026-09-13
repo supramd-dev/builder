@@ -48,7 +48,7 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 2. **Settings**: configure the code repository under test (see
    [Site configuration](#/docs/site-configuration)); add a deploy key or
    token if the repository is private.
-3. **User center**: register at least one test environment and give it
+3. **Runner Envs**: register at least one test environment and give it
    tags (see [Test environments](#/docs/environments)).
 4. **Code repository**: add a md-builder.yaml test matrix (see
    [The test matrix](#/docs/test-matrix)).
