@@ -140,12 +140,14 @@ func (s *Server) triggerJobs(w http.ResponseWriter, r *http.Request) {
 // stage commands (an empty stage is skipped; at least one is required) and
 // the environments to run on.
 type manualTestInput struct {
-	Repo              string  `json:"repo"`
-	Ref               string  `json:"ref"`
-	BuildCommand      string  `json:"buildCommand"`
-	UnitCommand       string  `json:"unitCommand"`
-	RegressionCommand string  `json:"regressionCommand"`
-	EnvironmentIDs    []int64 `json:"environmentIds"`
+	Repo              string              `json:"repo"`
+	Ref               string              `json:"ref"`
+	BuildCommand      string              `json:"buildCommand"`
+	UnitCommand       string              `json:"unitCommand"`
+	UnitResults       runner.ResultsPaths `json:"unitResults"` // optional results file path(s)
+	RegressionCommand string              `json:"regressionCommand"`
+	RegressionResults runner.ResultsPaths `json:"regressionResults"` // optional results file path(s)
+	EnvironmentIDs    []int64             `json:"environmentIds"`
 }
 
 // manualTestRoot is one created graph of the manual trigger response.
@@ -183,7 +185,9 @@ func (s *Server) triggerManual(w http.ResponseWriter, r *http.Request, user *sto
 		Ref:               in.Ref,
 		BuildCommand:      in.BuildCommand,
 		UnitCommand:       in.UnitCommand,
+		UnitResults:       in.UnitResults,
 		RegressionCommand: in.RegressionCommand,
+		RegressionResults: in.RegressionResults,
 		EnvironmentIDs:    in.EnvironmentIDs,
 		Username:          user.Username,
 	})

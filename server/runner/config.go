@@ -5,6 +5,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -34,8 +35,88 @@ const (
 
 // EnvConfig is a test stage: unit or regression.
 type EnvConfig struct {
-	Command string `yaml:"command" json:"command"`
-	Timeout int    `yaml:"timeout,omitempty" json:"timeout,omitempty"` // seconds; 0 = use default
+	Command string       `yaml:"command" json:"command"`
+	Timeout int          `yaml:"timeout,omitempty" json:"timeout,omitempty"` // seconds; 0 = use default
+	Results ResultsPaths `yaml:"results,omitempty" json:"results,omitempty"` // googletest results files (XML/JSON) produced by the command
+}
+
+// ResultsPaths is a list of results file paths. A run (or a single case) can
+// produce several of them, so the yaml/JSON form accepts either one scalar
+// path or a list:
+//
+//	results: "build/test_detail.xml"
+//	results: ["build/test_detail.xml", "build/extra.json"]
+type ResultsPaths []string
+
+// UnmarshalYAML accepts a scalar path or a list of paths.
+func (r *ResultsPaths) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Value == "" && node.Tag == "!!null" {
+			*r = nil
+			return nil
+		}
+		*r = ResultsPaths{node.Value}
+		return nil
+	case yaml.SequenceNode:
+		var list []string
+		if err := node.Decode(&list); err != nil {
+			return err
+		}
+		*r = list
+		return nil
+	default:
+		return fmt.Errorf("results must be a path or a list of paths")
+	}
+}
+
+// UnmarshalJSON accepts a scalar path or a list of paths (legacy snapshots
+// and API bodies stored a single string).
+func (r *ResultsPaths) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	if s == "null" || s == "" {
+		*r = nil
+		return nil
+	}
+	if s[0] == '[' {
+		var list []string
+		if err := json.Unmarshal(data, &list); err != nil {
+			return err
+		}
+		*r = list
+		return nil
+	}
+	var one string
+	if err := json.Unmarshal(data, &one); err != nil {
+		return err
+	}
+	*r = ResultsPaths{one}
+	return nil
+}
+
+// MarshalJSON emits the list form (one file → a one-element list keeps the
+// shape stable).
+func (r ResultsPaths) MarshalJSON() ([]byte, error) {
+	list := []string(r)
+	if list == nil {
+		list = []string{}
+	}
+	return json.Marshal(list)
+}
+
+// Clean returns the paths trimmed, deduplicated, with empties dropped.
+func (r ResultsPaths) Clean() ResultsPaths {
+	seen := map[string]bool{}
+	out := make(ResultsPaths, 0, len(r))
+	for _, p := range r {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // BuildConfig describes how to compile the code repository.

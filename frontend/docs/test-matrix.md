@@ -35,6 +35,7 @@ matrix:
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
       timeout: 600
+      results: "build/test_detail.xml"   # googletest results file
     regression:
       command: "python3 run_regression.py --suite full"
       timeout: 1800
@@ -61,9 +62,10 @@ matrix:
 | matrix[].timeout             | no       | Default stage timeout in seconds (default 3600, capped at 14400).   |
 | matrix[].env                 | no       | Extra environment variables exported for all stages.                |
 | matrix[].build               | no       | Build stage (see below).                                            |
-| matrix[].unit                | no       | Unit test stage: at least command; optional timeout.                |
-| matrix[].regression          | no       | Regression test stage: at least command; optional timeout.          |
+| matrix[].unit                | no       | Unit test stage: at least command; optional timeout, results.        |
+| matrix[].regression          | no       | Regression test stage: at least command; optional timeout, results.  |
 | unit.command / regression.command | yes (per stage) | Shell command run in the code directory.                    |
+| unit.results / regression.results | no | Results file path (or list of paths) the runner fetches back (see Results files). |
 
 The build stage has two forms:
 
@@ -108,6 +110,44 @@ Each matched entry becomes a task graph (see
 4. **unit / regression**: the stage command runs in the code directory,
    each under its timeout; the full output streams into the task log and
    the outcome is stored as a test run.
+
+## Results files
+
+A stage command may produce structured results files — by default the
+googletest XML (`--gtest_output=xml:`) or JSON (`--gtest_output=json:`)
+format, which the test binary writes itself. A run can produce several of
+them; `results` accepts a single path or a list:
+
+```yaml
+unit:
+  command: "./build/unit_tests --gtest_output=xml:build/test_detail.xml"
+  results: "build/test_detail.xml"
+```
+
+```yaml
+unit:
+  command: "ctest --output-junit junit.xml && ./build/extra_tests --gtest_output=json:build/extra.json"
+  results: ["build/test_detail.xml", "build/extra.json"]
+```
+
+When `results` is set, the runner reads every configured file back after
+the command and:
+
+- stores each one **verbatim** as its own run artifact, and
+- extracts only the aggregate counts (total / failed / skipped) from each
+  file's root attributes, **summed across all files**, for the matrix cell.
+
+The per-case list — name, status, duration, failure message — is parsed
+**in the browser** when you open the run's detail page; the server never
+interprets individual cases. Every stored results file is parsed by its
+default name/format; files that are missing or unrecognized are skipped
+(noted in the stage log) and do not fail the run — it still records the
+command's exit status. Paths are relative to the code directory (absolute
+paths work too).
+
+The same field works for regression stages, and regression reports may
+additionally submit per-case rows (status, error value, duration) through
+the reporting API.
 
 ## Custom summaries
 

@@ -422,15 +422,16 @@ func liveSubStatus(sub *store.Task) string {
 
 // caseInput is one test case in a report.
 type caseInput struct {
-	Name       string  `json:"name"`
-	Status     string  `json:"status"`     // "passed" or "failed"
-	ErrorValue float64 `json:"errorValue"` // regression error metric
-	Message    string  `json:"message"`    // short note / failure reason
+	Name           string  `json:"name"`
+	Status         string  `json:"status"`     // "passed" or "failed"
+	ErrorValue     float64 `json:"errorValue"` // regression error metric
+	Message        string  `json:"message"`    // short note / failure reason
+	DurationMillis float64 `json:"durationMillis"`
 }
 
 // runInputJSON is the request body of POST /api/test-runs. When cases are
 // present the run status is derived from them; without cases the explicit
-// status/summary are stored directly (the build runs' simplified path).
+// counts and status/summary are stored directly (the aggregate unit path).
 type runInputJSON struct {
 	EnvironmentID int64       `json:"environmentId"`
 	CommitID      int64       `json:"commitId"`
@@ -439,6 +440,10 @@ type runInputJSON struct {
 	Kind          string      `json:"kind"`    // "regression", "unit" or "build"
 	Status        string      `json:"status"`  // used only when cases is empty
 	Summary       string      `json:"summary"` // used only when cases is empty
+	Total         int         `json:"total"`   // aggregate counts, used only when cases is empty
+	Passed        int         `json:"passed"`
+	Failed        int         `json:"failed"`
+	Skipped       int         `json:"skipped"`
 	Cases         []caseInput `json:"cases"`
 	StartedAt     string      `json:"startedAt"`  // optional RFC3339
 	FinishedAt    string      `json:"finishedAt"` // optional RFC3339
@@ -453,6 +458,8 @@ type runJSON struct {
 	Total         int    `json:"total"`
 	Passed        int    `json:"passed"`
 	Failed        int    `json:"failed"`
+	Skipped       int    `json:"skipped"`
+	TaskID        int64  `json:"taskId"` // stage sub-task that produced the run (0 = external report)
 	EnvironmentID int64  `json:"environmentId"`
 	CommitID      int64  `json:"commitId"`
 	StartedAt     string `json:"startedAt"`
@@ -517,13 +524,18 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 		Kind:          in.Kind,
 		Status:        in.Status,
 		Summary:       in.Summary,
+		Total:         in.Total,
+		Passed:        in.Passed,
+		Failed:        in.Failed,
+		Skipped:       in.Skipped,
 	}
 	for i := range in.Cases {
 		input.Cases = append(input.Cases, store.TestCaseResult{
-			Name:       strings.TrimSpace(in.Cases[i].Name),
-			Status:     in.Cases[i].Status,
-			ErrorValue: in.Cases[i].ErrorValue,
-			Message:    in.Cases[i].Message,
+			Name:           strings.TrimSpace(in.Cases[i].Name),
+			Status:         in.Cases[i].Status,
+			ErrorValue:     in.Cases[i].ErrorValue,
+			Message:        in.Cases[i].Message,
+			DurationMillis: in.Cases[i].DurationMillis,
 		})
 	}
 	if t, err := parseOptionalTime(in.StartedAt); err != nil {
@@ -616,10 +628,17 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	artifacts, err := s.Store.ListRunArtifacts(run.ID)
+	if err != nil {
+		log.Printf("test-run artifacts: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
 
 	detail := runDetailJSON{
-		runJSON: toRunJSON(run),
-		Cases:   make([]caseJSON, 0, len(cases)),
+		runJSON:   toRunJSON(run),
+		Cases:     make([]caseJSON, 0, len(cases)),
+		Artifacts: make([]artifactRefJSON, 0, len(artifacts)),
 	}
 	if env != nil {
 		name := env.Name
@@ -630,37 +649,100 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 		short := shortSHA(commit.SHA)
 		msg := commit.Message
 		author := commit.Author
+		repo := commit.Repo
+		repoURL := s.repoWebURL(commit.Repo)
 		detail.CommitSHA = &sha
 		detail.CommitShortSHA = &short
 		detail.CommitMessage = &msg
 		detail.CommitAuthor = &author
+		detail.CommitRepo = &repo
+		detail.CommitRepoURL = &repoURL
 	}
 	for i := range cases {
 		detail.Cases = append(detail.Cases, toCaseJSON(&cases[i]))
+	}
+	for i := range artifacts {
+		detail.Artifacts = append(detail.Artifacts, artifactRefJSON{
+			ID:     artifacts[i].ID,
+			CaseID: artifacts[i].CaseID,
+			Kind:   artifacts[i].Kind,
+			Name:   artifacts[i].Name,
+			Size:   len(artifacts[i].Content),
+		})
 	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
 // caseJSON is one case result in the run detail.
 type caseJSON struct {
-	ID         int64   `json:"id"`
-	Name       string  `json:"name"`
-	Status     string  `json:"status"`
-	ErrorValue float64 `json:"errorValue"`
-	Message    string  `json:"message"`
+	ID             int64   `json:"id"`
+	Name           string  `json:"name"`
+	Status         string  `json:"status"`
+	ErrorValue     float64 `json:"errorValue"`
+	Message        string  `json:"message"`
+	DurationMillis float64 `json:"durationMillis"`
+}
+
+// artifactRefJSON references one stored artifact in the run detail (the
+// content itself comes from GET /api/test-artifacts/{id}).
+type artifactRefJSON struct {
+	ID     int64  `json:"id"`
+	CaseID int64  `json:"caseId"`
+	Kind   string `json:"kind"`
+	Name   string `json:"name"`
+	Size   int    `json:"size"`
 }
 
 // runDetailJSON is GET /api/test-runs/{id}'s response: the run summary plus
-// environment/commit context and the case list. Pointer fields are null when
-// the referenced record was deleted.
+// environment/commit context, the case list and the artifact references.
+// Pointer fields are null when the referenced record was deleted.
 type runDetailJSON struct {
 	runJSON
-	EnvironmentName *string    `json:"environmentName"`
-	CommitSHA       *string    `json:"commitSha"`
-	CommitShortSHA  *string    `json:"commitShortSha"`
-	CommitMessage   *string    `json:"commitMessage"`
-	CommitAuthor    *string    `json:"commitAuthor"`
-	Cases           []caseJSON `json:"cases"`
+	EnvironmentName *string           `json:"environmentName"`
+	CommitSHA       *string           `json:"commitSha"`
+	CommitShortSHA  *string           `json:"commitShortSha"`
+	CommitMessage   *string           `json:"commitMessage"`
+	CommitAuthor    *string           `json:"commitAuthor"`
+	CommitRepo      *string           `json:"commitRepo"`    // repository location, e.g. "group/code"
+	CommitRepoURL   *string           `json:"commitRepoUrl"` // web URL of the repository, when derivable
+	Cases           []caseJSON        `json:"cases"`
+	Artifacts       []artifactRefJSON `json:"artifacts"`
+}
+
+// handleTestArtifact routes GET /api/test-artifacts/{id} — one stored
+// artifact's raw content (the run detail lists references only; this is the
+// fetch entry point for the browser-side results parsing and the future
+// regression "analyze" view).
+func (s *Server) handleTestArtifact(w http.ResponseWriter, r *http.Request, user *store.User) {
+	_ = user
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/test-artifacts/")
+	id, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil || id <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid artifact id"})
+		return
+	}
+	a, err := s.Store.GetArtifact(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "artifact not found"})
+			return
+		}
+		log.Printf("artifact get: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      a.ID,
+		"runId":   a.RunID,
+		"caseId":  a.CaseID,
+		"kind":    a.Kind,
+		"name":    a.Name,
+		"content": a.Content,
+	})
 }
 
 // --- helpers ---
@@ -840,6 +922,8 @@ func toRunJSON(run *store.TestRun) runJSON {
 		Total:         run.Total,
 		Passed:        run.Passed,
 		Failed:        run.Failed,
+		Skipped:       run.Skipped,
+		TaskID:        run.TaskID,
 		EnvironmentID: run.EnvironmentID,
 		CommitID:      run.CommitID,
 		StartedAt:     run.StartedAt.UTC().Format(time.RFC3339),
@@ -849,10 +933,11 @@ func toRunJSON(run *store.TestRun) runJSON {
 
 func toCaseJSON(c *store.TestCaseResult) caseJSON {
 	return caseJSON{
-		ID:         c.ID,
-		Name:       c.Name,
-		Status:     c.Status,
-		ErrorValue: c.ErrorValue,
-		Message:    c.Message,
+		ID:             c.ID,
+		Name:           c.Name,
+		Status:         c.Status,
+		ErrorValue:     c.ErrorValue,
+		Message:        c.Message,
+		DurationMillis: c.DurationMillis,
 	}
 }

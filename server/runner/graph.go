@@ -97,13 +97,14 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 	return tasks, nil
 }
 
-// stageConfig marshals the per-stage snapshot: command, timeout and the
-// entry's environment (the script exports it).
+// stageConfig marshals the per-stage snapshot: command, timeout, results
+// file and the entry's environment (the script exports it).
 func stageConfig(entry *MergedEntry, stage *EnvConfig) (string, error) {
 	cfg := StageConfig{
 		Command: stage.Command,
 		Timeout: resolveStageTimeout(stage, entry),
 		Env:     entry.Env,
+		Results: stage.Results,
 	}
 	return marshalJSON(cfg)
 }

@@ -250,13 +250,17 @@ export async function triggerJobs(commitId: number): Promise<{
 
 // ManualTestInput is the POST /api/jobs/manual body: one repository (empty
 // = the site-config default), an optional ref (empty = HEAD), the stage
-// commands (an empty stage is skipped) and the environments to run on.
+// commands (an empty stage is skipped) and the environments to run on. The
+// results fields accept one path or a list — a run can produce several
+// results files.
 export interface ManualTestInput {
   repo?: string
   ref?: string
   buildCommand?: string
   unitCommand?: string
+  unitResults?: string | string[]
   regressionCommand?: string
+  regressionResults?: string | string[]
   environmentIds: number[]
 }
 
@@ -337,6 +341,26 @@ export interface CaseResult {
   status: 'passed' | 'failed'
   errorValue: number
   message: string
+  durationMillis: number
+}
+
+// TestArtifactRef references one stored result/log/series file of a run;
+// the content itself is fetched via getTestArtifact.
+export interface TestArtifactRef {
+  id: number
+  caseId: number
+  kind: 'results' | 'log' | 'series'
+  name: string
+  size: number
+}
+
+export interface TestArtifactContent {
+  id: number
+  runId: number
+  caseId: number
+  kind: string
+  name: string
+  content: string
 }
 
 export interface TestRunDetail {
@@ -350,6 +374,10 @@ export interface TestRunDetail {
   total: number
   passed: number
   failed: number
+  skipped: number
+  // Stage sub-task that produced the run (0 = external report); its log
+  // (stdout) is shown on the detail page.
+  taskId: number
   environmentId: number
   environmentName: string | null
   commitId: number
@@ -357,13 +385,24 @@ export interface TestRunDetail {
   commitShortSha: string | null
   commitMessage: string | null
   commitAuthor: string | null
+  // Repository location and web URL (when derivable) — the case detail page
+  // links to the commit on the hosting site.
+  commitRepo: string | null
+  commitRepoUrl: string | null
   startedAt: string
   finishedAt: string
   cases: CaseResult[]
+  artifacts: TestArtifactRef[]
 }
 
 export async function getTestRun(id: number): Promise<TestRunDetail> {
   return api<TestRunDetail>(`/api/test-runs/${id}`)
+}
+
+// getTestArtifact fetches one stored artifact's raw content (the browser
+// parses googletest results files client-side).
+export async function getTestArtifact(id: number): Promise<TestArtifactContent> {
+  return api<TestArtifactContent>(`/api/test-artifacts/${id}`)
 }
 
 // --- Tasks (runner component) ---

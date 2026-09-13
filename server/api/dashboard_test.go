@@ -817,3 +817,142 @@ func TestDashboardSupersededRows(t *testing.T) {
 	check(t, "/api/dashboard/full")
 	check(t, "/api/dashboard/regression")
 }
+
+// TestRunDetailArtifactFields checks the run detail's artifact references,
+// taskId/skipped fields, and GET /api/test-artifacts/{id} content delivery
+// (the browser-side results parsing fetch path).
+func TestRunDetailArtifactFields(t *testing.T) {
+	apiServer, env := newDashboardEnv(t)
+
+	var env1 store.TestEnvironment
+	apiServer.Store.DB.Where("name = ?", "cpu-node-1").First(&env1)
+	commit := &store.Commit{Repo: "group/md-code", SHA: "1111111"}
+	if _, err := apiServer.Store.GetOrCreateCommit(commit); err != nil {
+		t.Fatalf("get commit: %v", err)
+	}
+
+	// The runner's aggregate unit path: counts + stored results file.
+	run, err := apiServer.Store.UpsertTestRun(&store.RunInput{
+		EnvironmentID: env1.ID,
+		CommitID:      commit.ID,
+		Kind:          store.RunKindUnit,
+		TaskID:        77,
+		Total:         12,
+		Passed:        9,
+		Failed:        2,
+		Skipped:       1,
+		StatusFailed:  true,
+		Artifacts: []store.ArtifactInput{
+			{Kind: store.ArtifactKindResults, Name: "build/test_detail.xml", Content: "<testsuites/>"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	rec := env.authed(http.MethodGet, fmt.Sprintf("/api/test-runs/%d", run.ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		TaskID        int64   `json:"taskId"`
+		Skipped       int     `json:"skipped"`
+		CommitRepo    *string `json:"commitRepo"`
+		CommitRepoURL *string `json:"commitRepoUrl"`
+		Artifacts     []struct {
+			ID     int64  `json:"id"`
+			CaseID int64  `json:"caseId"`
+			Kind   string `json:"kind"`
+			Name   string `json:"name"`
+			Size   int    `json:"size"`
+		} `json:"artifacts"`
+		Cases []struct {
+			DurationMillis float64 `json:"durationMillis"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detail.TaskID != 77 || detail.Skipped != 1 {
+		t.Fatalf("taskId/skipped wrong: %+v", detail)
+	}
+	if detail.CommitRepo == nil || *detail.CommitRepo != "group/md-code" {
+		t.Fatalf("commitRepo wrong: %v", detail.CommitRepo)
+	}
+	if len(detail.Artifacts) != 1 || detail.Artifacts[0].Kind != "results" ||
+		detail.Artifacts[0].Name != "build/test_detail.xml" || detail.Artifacts[0].Size != len("<testsuites/>") {
+		t.Fatalf("artifact ref wrong: %+v", detail.Artifacts)
+	}
+
+	// The artifact content endpoint delivers the raw file.
+	rec = env.authed(http.MethodGet, fmt.Sprintf("/api/test-artifacts/%d", detail.Artifacts[0].ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("artifact: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var artifact struct {
+		RunID   int64  `json:"runId"`
+		CaseID  int64  `json:"caseId"`
+		Kind    string `json:"kind"`
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &artifact); err != nil {
+		t.Fatalf("decode artifact: %v", err)
+	}
+	if artifact.RunID != run.ID || artifact.Kind != "results" || artifact.Content != "<testsuites/>" {
+		t.Fatalf("artifact content wrong: %+v", artifact)
+	}
+
+	// Unknown artifact id: 404; bad id: 400.
+	rec = env.authed(http.MethodGet, "/api/test-artifacts/9999", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown artifact: expected 404, got %d", rec.Code)
+	}
+	rec = env.authed(http.MethodGet, "/api/test-artifacts/abc", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad artifact id: expected 400, got %d", rec.Code)
+	}
+}
+
+// TestReportRunAggregateCounts checks POST /api/test-runs with aggregate
+// counts and no cases (the external-report form of the unit path).
+func TestReportRunAggregateCounts(t *testing.T) {
+	apiServer, env := newDashboardEnv(t)
+
+	var env1 store.TestEnvironment
+	apiServer.Store.DB.Where("name = ?", "cpu-node-1").First(&env1)
+	commit := &store.Commit{Repo: "group/md-code", SHA: "1111111"}
+	if _, err := apiServer.Store.GetOrCreateCommit(commit); err != nil {
+		t.Fatalf("get commit: %v", err)
+	}
+
+	body := fmt.Sprintf(`{
+		"environmentId": %d,
+		"commitSha": "1111111",
+		"commitRepo": "group/md-code",
+		"kind": "unit",
+		"total": 10,
+		"passed": 8,
+		"failed": 2,
+		"skipped": 0,
+		"status": "failed",
+		"summary": "8 of 10 passed"
+	}`, env1.ID)
+	rec := env.authed(http.MethodPost, "/api/test-runs", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("report: expected 201, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var run struct {
+		Status  string `json:"status"`
+		Total   int    `json:"total"`
+		Passed  int    `json:"passed"`
+		Failed  int    `json:"failed"`
+		Skipped int    `json:"skipped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &run); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	if run.Status != "failed" || run.Total != 10 || run.Passed != 8 || run.Failed != 2 {
+		t.Fatalf("unexpected run: %+v", run)
+	}
+}

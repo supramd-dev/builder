@@ -147,6 +147,200 @@ matrix:
       timeout: 120
 `
 
+// runUntilStage drives the fixture's claimed clone task, then claims and
+// executes tasks until one of the given kinds is claimable; that task is
+// returned NOT yet executed (for tests that seed the fake's outcome first).
+func runUntilStage(t *testing.T, svc *Service, s *store.Store, cloneTask *store.Task, kinds ...string) *store.Task {
+	t.Helper()
+	ctx := context.Background()
+	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		task, err := s.ClaimReadyTask()
+		if err != nil || task == nil {
+			t.Fatalf("no %v task claimable", kinds)
+		}
+		for _, k := range kinds {
+			if task.Kind == k {
+				return task
+			}
+		}
+		if err := svc.ExecuteTask(ctx, task); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+const resultsYAML = `version: 1
+matrix:
+  - tags: [cpu]
+    build:
+      cmake_flags: "-DEXEC=1"
+    unit:
+      command: "ctest -L unit --output-junit junit.xml"
+      results: "build/test_detail.xml"
+`
+
+const multiResultsYAML = `version: 1
+matrix:
+  - tags: [cpu]
+    unit:
+      command: "ctest -L unit"
+      results:
+        - "build/test_detail.xml"
+        - "build/extra_results.json"
+`
+
+// TestExecuteStageFetchesResultsFile: a configured results file is fetched,
+// stored verbatim as an artifact, its root counts land on the run, and the
+// run links back to the stage task (its stdout lives in the task log).
+func TestExecuteStageFetchesResultsFile(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, resultsYAML)
+	// The fetch script contains the results path as a quoted cat argument;
+	// seed the fake to return the gtest XML for it.
+	exec.outcome["test_detail.xml"] = 0
+	exec.output["test_detail.xml"] = sampleGTestXML
+	stage := runUntilStage(t, svc, s, cloneTask, store.TaskKindUnit)
+	if err := svc.ExecuteTask(context.Background(), stage); err != nil {
+		t.Fatal(err)
+	}
+
+	// The unit script ran; the fetch script cats the results path.
+	fetchSeen := false
+	for _, script := range exec.scripts {
+		if strings.Contains(script, "test_detail.xml") {
+			fetchSeen = true
+		}
+	}
+	if !fetchSeen {
+		t.Fatalf("no results fetch script ran: %+v", exec.scripts)
+	}
+
+	envs := []int64{stage.EnvironmentID}
+	commits := []int64{stage.CommitID}
+	runs, _ := s.FindRunsByCommits(store.RunKindUnit, envs, commits)
+	run, ok := runs[store.EnvCommit{Env: stage.EnvironmentID, Commit: stage.CommitID}]
+	if !ok {
+		t.Fatal("unit run missing")
+	}
+	if run.TaskID != stage.ID {
+		t.Errorf("run.TaskID = %d, want the stage task %d", run.TaskID, stage.ID)
+	}
+	if run.Total != 12 || run.Failed != 2 || run.Skipped != 1 {
+		t.Errorf("counts wrong: total=%d failed=%d skipped=%d", run.Total, run.Failed, run.Skipped)
+	}
+	if run.Passed != 9 {
+		t.Errorf("passed = %d, want 9", run.Passed)
+	}
+	if run.Status != store.StatusFailed {
+		t.Errorf("run with failures should be failed: %s", run.Status)
+	}
+	if run.Summary != "12 tests, 9 passed, 2 failed, 1 skipped" {
+		t.Errorf("summary should default to counts: %q", run.Summary)
+	}
+
+	// The artifact stores the raw file content.
+	artifacts, err := s.ListRunArtifacts(run.ID)
+	if err != nil || len(artifacts) != 1 {
+		t.Fatalf("artifacts: %v %v", artifacts, err)
+	}
+	if artifacts[0].Kind != store.ArtifactKindResults || artifacts[0].Name != "build/test_detail.xml" {
+		t.Errorf("artifact wrong: %+v", artifacts[0])
+	}
+	if artifacts[0].Content != sampleGTestXML {
+		t.Errorf("artifact content should be verbatim")
+	}
+	if artifacts[0].CaseID != 0 {
+		t.Errorf("unit artifact should be run-level (case 0): %d", artifacts[0].CaseID)
+	}
+}
+
+// TestExecuteStageMultipleResultsFiles: a run configured with several
+// results files stores one artifact per file and sums the parsed counts
+// across all of them.
+func TestExecuteStageMultipleResultsFiles(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, multiResultsYAML)
+	// Both files parse; a missing second file is tolerated (logged, no
+	// artifact for it).
+	exec.outcome["test_detail.xml"] = 0
+	exec.output["test_detail.xml"] = sampleGTestXML // 12 tests, 2 failed, 1 skipped
+	exec.outcome["extra_results.json"] = 0
+	exec.output["extra_results.json"] = sampleGTestJSON
+	stage := runUntilStage(t, svc, s, cloneTask, store.TaskKindUnit)
+	if err := svc.ExecuteTask(context.Background(), stage); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, _ := s.FindRunsByCommits(store.RunKindUnit,
+		[]int64{stage.EnvironmentID}, []int64{stage.CommitID})
+	run, ok := runs[store.EnvCommit{Env: stage.EnvironmentID, Commit: stage.CommitID}]
+	if !ok {
+		t.Fatal("unit run missing")
+	}
+	if run.Total != 12 || run.Failed != 2 || run.Skipped != 1 {
+		t.Errorf("counts should sum across files: total=%d failed=%d skipped=%d",
+			run.Total, run.Failed, run.Skipped)
+	}
+
+	artifacts, err := s.ListRunArtifacts(run.ID)
+	if err != nil || len(artifacts) != 2 {
+		t.Fatalf("artifacts: %v %v", artifacts, err)
+	}
+	byName := map[string]string{}
+	for _, a := range artifacts {
+		if a.Kind != store.ArtifactKindResults || a.CaseID != 0 {
+			t.Errorf("artifact wrong: %+v", a)
+		}
+		byName[a.Name] = a.Content
+	}
+	if byName["build/test_detail.xml"] != sampleGTestXML {
+		t.Errorf("xml artifact content should be verbatim: %q", byName["build/test_detail.xml"])
+	}
+	if byName["build/extra_results.json"] != sampleGTestJSON {
+		t.Errorf("json artifact content should be verbatim: %q", byName["build/extra_results.json"])
+	}
+}
+
+// TestExecuteStageResultsFileMissing: a configured results file that does
+// not exist on the host leaves counts at zero, stores no artifact, and the
+// run still records the command's outcome.
+func TestExecuteStageResultsFileMissing(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, resultsYAML)
+	// The fetch fails remotely (cat: no such file).
+	exec.outcome["test_detail.xml"] = 1
+	stage := runUntilStage(t, svc, s, cloneTask, store.TaskKindUnit)
+	if err := svc.ExecuteTask(context.Background(), stage); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, _ := s.FindRunsByCommits(store.RunKindUnit,
+		[]int64{stage.EnvironmentID}, []int64{stage.CommitID})
+	run, ok := runs[store.EnvCommit{Env: stage.EnvironmentID, Commit: stage.CommitID}]
+	if !ok {
+		t.Fatal("unit run missing")
+	}
+	if run.Total != 0 || run.Failed != 0 {
+		t.Errorf("missing file should leave counts zero: %+v", run)
+	}
+	if run.Status != store.StatusPassed {
+		t.Errorf("the command itself passed; run should pass: %+v", run)
+	}
+	artifacts, _ := s.ListRunArtifacts(run.ID)
+	if len(artifacts) != 0 {
+		t.Errorf("no artifact should be stored: %+v", artifacts)
+	}
+	// The stage log mentions the fetch failure.
+	logs, _ := s.ReadTaskLogs(stage.ID, 0)
+	var all string
+	for _, l := range logs {
+		all += l.Content
+	}
+	if !strings.Contains(all, "results file") {
+		t.Errorf("log should mention the results file: %q", tailLine(all, 3))
+	}
+}
+
 func TestExecuteFullChainHappyPath(t *testing.T) {
 	svc, s, exec, cloner, cloneTask := newExecuteFixture(t, execYAML)
 	// The executor loop drives everything; emulate runClaimed manually to
@@ -341,6 +535,7 @@ func TestExecuteStageFailureRecordsFailedRun(t *testing.T) {
 	// Make the unit stage fail (its script contains the command).
 	exec.outcome["ctest -L unit"] = 1
 	exec.output["ctest -L unit"] = "1/3 tests passed\nMD-BUILDER-SUMMARY: 2 of 3 unit tests failed\n"
+	// The fetch script (not configured here) never runs.
 
 	ctx := context.Background()
 	// Run clone + build to completion.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"md-builder/server/store"
@@ -18,6 +19,14 @@ import (
 // stageTimeoutSlack is added to a stage's configured timeout for the SSH
 // session overall bound (script upload, session setup).
 const stageTimeoutSlack = 5 * time.Minute
+
+// fetchResultsTimeout bounds the short session that reads the results file
+// back from the remote host.
+const fetchResultsTimeout = 2 * time.Minute
+
+// maxArtifactBytes caps a stored results/log/series artifact (the same cap
+// as the task log; anything larger is truncated at fetch time).
+const maxArtifactBytes = 8 * 1024 * 1024
 
 // cloneTimeout is the overall bound of the clone sub-task when the entry
 // does not set one.
@@ -189,13 +198,14 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	if res.ExitCode < 0 {
 		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
 	}
-	s.recordStageRun(task, rc, status, summary)
+	s.recordStageRun(task, rc, status, summary, 0, 0, 0, nil)
 
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
 }
 
 // executeStage implements a test sub-task (unit / regression): run the
-// stage command remotely, then record the TestRun for the dashboard.
+// stage command remotely, fetch the configured results file back (aggregate
+// counts + raw artifact), then record the TestRun for the dashboard.
 func (s *Service) executeStage(ctx context.Context, task *store.Task) {
 	rc, ok := s.loadRootContext(task)
 	if !ok {
@@ -218,6 +228,38 @@ func (s *Service) executeStage(ctx context.Context, task *store.Task) {
 
 	h := envToSSHHost(rc.env)
 	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
+
+	// The results files (when configured) are fetched in separate short
+	// sessions so their bytes are stored verbatim alongside the stage log —
+	// one artifact per file, counts summed across all of them.
+	var counts struct{ total, failed, skipped int }
+	var artifacts []store.ArtifactInput
+	for _, path := range stage.Results.Clean() {
+		if res.ExitCode < 0 {
+			break // the session never ran; nothing to fetch
+		}
+		content, fetchErr := s.fetchResultsFile(ctx, h, rc, path)
+		switch {
+		case fetchErr != nil:
+			fmt.Fprintf(logw, "results file %s: %v; skipping counts\n", path, fetchErr)
+		case content == "":
+			fmt.Fprintf(logw, "results file %s: not found or empty; skipping counts\n", path)
+		default:
+			artifacts = append(artifacts, store.ArtifactInput{
+				Kind:    store.ArtifactKindResults,
+				Name:    path,
+				Content: content,
+			})
+			if total, failed, skipped, ok := ExtractGTestCounts([]byte(content)); ok {
+				counts.total += total
+				counts.failed += failed
+				counts.skipped += skipped
+			} else {
+				fmt.Fprintf(logw, "results file %s: unrecognized format; storing file without counts\n", path)
+			}
+		}
+	}
+
 	logw.Flush() // the summary is derived from the persisted log
 
 	// The log holds the full output; the summary is derived from it.
@@ -230,9 +272,38 @@ func (s *Service) executeStage(ctx context.Context, task *store.Task) {
 	if res.ExitCode < 0 {
 		// Session-level failure (dial, timeout): surface the transport error.
 		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
+	} else if !hasSummaryLine(output) {
+		// No MD-BUILDER-SUMMARY line: default to the parsed counts when the
+		// results files yielded them.
+		passed := counts.total - counts.failed - counts.skipped
+		if s := GTestCountsSummary(counts.total, passed, counts.failed, counts.skipped); s != "" {
+			summary = s
+		}
 	}
-	s.recordStageRun(task, rc, status, summary)
+	s.recordStageRun(task, rc, status, summary, counts.total, counts.failed, counts.skipped, artifacts)
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
+}
+
+// fetchResultsFile cats the configured results file on the remote host
+// (relative paths resolve against the code directory), capped at
+// maxArtifactBytes. The fetched bytes are written to the returned string;
+// a scratch writer swallows the (unexpected) stderr without polluting the
+// stage log.
+func (s *Service) fetchResultsFile(ctx context.Context, h SSHHost, rc *rootContext, path string) (string, error) {
+	var script strings.Builder
+	w := func(format string, args ...any) { fmt.Fprintf(&script, format+"\n", args...) }
+	w("#!/usr/bin/env bash")
+	w("set -uo pipefail")
+	if !strings.HasPrefix(path, "/") {
+		w("cd %s || exit 1", shellExpand(rc.remoteCodeDir()))
+	}
+	w("head -c %d %s", maxArtifactBytes, shq(path))
+	var out, errOut strings.Builder
+	res := s.SSH.RunScript(ctx, h, "bash -s", script.String(), fetchResultsTimeout, &out, &errOut)
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("remote read failed (exit %d)", res.ExitCode)
+	}
+	return out.String(), nil
 }
 
 // readLogTail re-reads the persisted log tail (the LogWriter already closed
@@ -250,17 +321,31 @@ func (s *Service) readLogTail(taskID int64) string {
 }
 
 // recordStageRun upserts the dashboard TestRun for a finished (or failed to
-// even start) test stage.
-func (s *Service) recordStageRun(task *store.Task, rc *rootContext, status, summary string) {
+// even start) test stage. counts/artifacts carry the fetched results files'
+// summed aggregates and raw contents (nil when not configured or unfetchable).
+func (s *Service) recordStageRun(task *store.Task, rc *rootContext, status, summary string,
+	total, failed, skipped int, artifacts []store.ArtifactInput) {
 	input := &store.RunInput{
 		EnvironmentID: task.EnvironmentID,
 		CommitID:      task.CommitID,
 		Kind:          task.Kind, // unit/regression match the run kinds
-		Status:        status,
+		TaskID:        task.ID,
+		Total:         total,
+		Failed:        failed,
+		Skipped:       skipped,
 		Summary:       summary,
 		StartedAt:     taskStart(task),
 		FinishedAt:    time.Now(),
 	}
+	if len(artifacts) > 0 {
+		input.Passed = total - failed - skipped
+		input.Artifacts = artifacts
+	}
+	// The command's exit code and the parsed counts both count: a failed
+	// command fails the run, and so do failed cases even when the command
+	// exited zero (ctest wrappers can swallow the test binary's result).
+	input.StatusFailed = status == store.StatusFailed || failed > 0
+	input.Status = store.StatusPassed
 	if _, err := s.Store.UpsertTestRun(input); err != nil {
 		log.Printf("runner: task %d: record %s run: %v", task.ID, task.Kind, err)
 	}

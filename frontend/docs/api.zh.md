@@ -72,11 +72,35 @@ commit 行还带 **graph** 链接:该 commit 任务管线
 - `commitId` 可以换成 `"commitSha"` + `"commitRepo"`。
 - `startedAt` / `finishedAt` 可选(RFC 3339)。
 - 提供 `cases` 时,运行状态与计数从用例推导。没有用例时,直接存储
-  显式的 `"status"`(`passed` | `failed`)和 `"summary"` —— 这是简化
-  报告路径(构建运行使用;它们没有逐用例结果)。
+  显式的 `"status"`(`passed` | `failed`)、`"summary"` 和可选的聚合计数
+  (`"total"` / `"passed"` / `"failed"` / `"skipped"`)—— 这是简化报告
+  路径(构建运行和单元测试运行使用;单元测试的逐用例明细存在结果文件
+  artifact 里,不进数据库)。
+- 用例可以携带 `"durationMillis"`(回归报告)。
 - 对同一(环境, 提交, 类别)重复报告会替换已存结果 —— API 是幂等的,
   不稳定的报告端可以安全重试。
 - 删除环境会同时删除其测试运行。
+
+`GET /api/test-runs/{id}` 返回运行详情,含 `taskId`(产出该运行的阶段
+子任务,其日志即阶段的 stdout;外部上报为 0)、`skipped` 计数、`cases`
+(带 `durationMillis`)以及 `artifacts` —— 存储文件的引用,例如 runner
+取回的 googletest 结果文件(一次运行可以产出多个):
+
+```json
+{
+  "id": 12, "kind": "unit", "status": "failed", "taskId": 77,
+  "total": 12, "passed": 9, "failed": 2, "skipped": 1,
+  "artifacts": [
+    {"id": 3, "caseId": 0, "kind": "results",
+     "name": "build/test_detail.xml", "size": 15832},
+    {"id": 4, "caseId": 0, "kind": "results",
+     "name": "build/extra.json", "size": 2101}
+  ]
+}
+```
+
+`GET /api/test-artifacts/{id}` 返回单个 artifact 的原始 `content` ——
+浏览器端的结果解析和后续回归的"分析"视图都从这里取数。
 
 ## 脚本执行(交互式)
 
@@ -107,10 +131,15 @@ POST /api/jobs/manual
   "ref": "master",                                    // 可选:HEAD
   "buildCommand": "cmake . && cmake --build . -j8",   // 可选:CMake 默认值
   "unitCommand": "ctest -L unit",                     // 可选:阶段跳过
+  "unitResults": "build/test_detail.xml",             // 可选:结果文件
   "regressionCommand": "python3 run.py",              // 可选:阶段跳过
+  "regressionResults": "reg/results.json",            // 可选:结果文件
   "environmentIds": [1, 2]
 }
 ```
+
+`unitResults` / `regressionResults` 接受单个路径或路径列表 —— 一次
+运行可以产出多个结果文件。
 
 - 至少需要一个阶段命令和一个环境。
 - ref 会用站点的 deploy key / deploy token 解析为具体提交
@@ -145,7 +174,8 @@ POST /api/jobs/manual
 | GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
 | POST   | `/api/test-runs`                | 报告测试运行结果                              |
-| GET    | `/api/test-runs/{id}`           | 单次运行详情,含逐用例结果                    |
+| GET    | `/api/test-runs/{id}`           | 单次运行详情:用例、计数、artifact            |
+| GET    | `/api/test-artifacts/{id}`      | 单个存储 artifact 的原始内容                 |
 | POST   | `/api/jobs`                     | 手动重新派发某提交的任务图(webhook 方式,读取 YAML) |
 | POST   | `/api/jobs/manual`              | 派发自定义测试(仓库、ref、阶段命令、环境;无需 YAML) |
 | GET    | `/api/jobs`                     | 最近的任务图(`?limit=`;监控;旧 job 形状)    |

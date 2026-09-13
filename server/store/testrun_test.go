@@ -309,3 +309,124 @@ func TestListAllEnvironments(t *testing.T) {
 		t.Fatalf("unexpected order: %v", envs)
 	}
 }
+
+func TestUpsertTestRunAggregateWithArtifact(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+
+	// The unit path: counts + a stored results file, no per-case rows.
+	run, err := s.UpsertTestRun(&RunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		Kind:          RunKindUnit,
+		TaskID:        42,
+		Total:         12,
+		Passed:        9,
+		Failed:        2,
+		Skipped:       1,
+		StatusFailed:  true, // e.g. ctest exited non-zero
+		Artifacts: []ArtifactInput{
+			{Kind: ArtifactKindResults, Name: "build/test_detail.xml", Content: "<testsuites/>"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if run.Total != 12 || run.Passed != 9 || run.Failed != 2 || run.Skipped != 1 {
+		t.Fatalf("counts wrong: %+v", run)
+	}
+	if run.Status != StatusFailed {
+		t.Fatalf("StatusFailed override should force failed: %+v", run)
+	}
+	if run.TaskID != 42 {
+		t.Fatalf("TaskID = %d", run.TaskID)
+	}
+
+	artifacts, err := s.ListRunArtifacts(run.ID)
+	if err != nil {
+		t.Fatalf("list artifacts: %v", err)
+	}
+	if len(artifacts) != 1 || artifacts[0].Kind != ArtifactKindResults ||
+		artifacts[0].Name != "build/test_detail.xml" || artifacts[0].Content != "<testsuites/>" {
+		t.Fatalf("artifact wrong: %+v", artifacts)
+	}
+
+	// Re-report without an artifact: the old artifact is replaced (gone).
+	if _, err := s.UpsertTestRun(&RunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		Kind:          RunKindUnit,
+		Total:         3,
+		Passed:        3,
+	}); err != nil {
+		t.Fatalf("second upsert: %v", err)
+	}
+	artifacts, err = s.ListRunArtifacts(run.ID)
+	if err != nil {
+		t.Fatalf("list artifacts after replace: %v", err)
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("old artifacts should be replaced: %+v", artifacts)
+	}
+}
+
+func TestUpsertTestRunInvalidArtifactKind(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+	_, err := s.UpsertTestRun(&RunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		Kind:          RunKindUnit,
+		Artifacts:     []ArtifactInput{{Kind: "screenshot"}},
+	})
+	if err == nil {
+		t.Fatal("invalid artifact kind should error")
+	}
+}
+
+func TestDeleteTestRunRemovesArtifacts(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+	run, err := s.UpsertTestRun(&RunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		Kind:          RunKindUnit,
+		Total:         1,
+		Artifacts:     []ArtifactInput{{Kind: ArtifactKindResults, Name: "r.xml", Content: "x"}},
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := s.DeleteTestRun(env.ID, commit.ID, RunKindUnit); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	artifacts, err := s.ListRunArtifacts(run.ID)
+	if err != nil {
+		t.Fatalf("list after delete: %v", err)
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("artifacts should be deleted with the run: %+v", artifacts)
+	}
+}
+
+func TestGetArtifact(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+	run, err := s.UpsertTestRun(&RunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		Kind:          RunKindUnit,
+		Artifacts:     []ArtifactInput{{Kind: ArtifactKindResults, Name: "r.json", Content: "{}"}},
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	list, _ := s.ListRunArtifacts(run.ID)
+	a, err := s.GetArtifact(list[0].ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if a.Content != "{}" || a.RunID != run.ID {
+		t.Fatalf("artifact wrong: %+v", a)
+	}
+}

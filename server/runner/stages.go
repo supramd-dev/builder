@@ -26,11 +26,15 @@ type BuildStageConfig struct {
 }
 
 // StageConfig is a test sub-task snapshot (unit / regression / future
-// performance stages): one command with its timeout and the environment.
+// performance stages): one command with its timeout, the environment and the
+// optional results files the runner fetches back after the command ran (a
+// run can produce several; legacy snapshots store a single string and still
+// decode).
 type StageConfig struct {
 	Command string            `json:"command"`
 	Timeout int               `json:"timeout"` // seconds
 	Env     map[string]string `json:"env,omitempty"`
+	Results ResultsPaths      `json:"results,omitempty"` // paths relative to the code dir (or absolute)
 }
 
 // RootConfig is the root task's Config snapshot: the merged matrix entry.

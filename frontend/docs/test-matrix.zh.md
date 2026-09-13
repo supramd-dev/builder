@@ -33,6 +33,7 @@ matrix:
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
       timeout: 600
+      results: "build/test_detail.xml"   # googletest 结果文件
     regression:
       command: "python3 run_regression.py --suite full"
       timeout: 1800
@@ -59,9 +60,10 @@ matrix:
 | matrix[].timeout             | 否       | 默认阶段超时秒数(默认 3600,上限 14400)。                          |
 | matrix[].env                 | 否       | 为所有阶段导出的额外环境变量。                                      |
 | matrix[].build               | 否       | 构建阶段(见下)。                                                   |
-| matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 timeout。                         |
-| matrix[].regression          | 否       | 回归测试阶段:至少有 command;可选 timeout。                         |
+| matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 timeout、results。               |
+| matrix[].regression          | 否       | 回归测试阶段:至少有 command;可选 timeout、results。               |
 | unit.command / regression.command | 是(每阶段) | 在代码目录中运行的 shell 命令。                                 |
+| unit.results / regression.results | 否 | 结果文件路径(或路径列表),runner 会在阶段结束后取回(见结果文件)。 |
 
 构建阶段有两种形式:
 
@@ -101,6 +103,40 @@ matrix:
    显示 ✗。
 4. **unit / regression**:阶段命令在代码目录中运行,各自受超时约束;完整
    输出流入任务日志,结果被存为一条测试运行。
+
+## 结果文件
+
+阶段命令可以产出结构化的结果文件 —— 默认是 googletest 的 XML
+(`--gtest_output=xml:`)或 JSON(`--gtest_output=json:`)格式,由测试
+程序自己写出。一次运行可能产出**多个**结果文件;`results` 接受单个
+路径或路径列表:
+
+```yaml
+unit:
+  command: "./build/unit_tests --gtest_output=xml:build/test_detail.xml"
+  results: "build/test_detail.xml"
+```
+
+```yaml
+unit:
+  command: "ctest --output-junit junit.xml && ./build/extra_tests --gtest_output=json:build/extra.json"
+  results: ["build/test_detail.xml", "build/extra.json"]
+```
+
+配置了 `results` 时,runner 会在命令结束后逐个取回这些文件,并:
+
+- 将每个文件内容**原样**存为各自独立的运行 artifact;
+- 仅从各文件根节点属性中提取聚合计数(总数 / 失败 / 跳过),跨所有
+  文件**求和**后用于矩阵格。
+
+每个测试项的明细 —— 名称、状态、耗时、失败信息 —— 由**浏览器**在打开
+运行详情页时解析展示;服务器不解析单个测试项。所有已存储的结果文件
+都按默认名称/格式解析;缺失或无法识别的文件会被跳过(阶段日志会注
+明),不影响运行结果 —— 运行仍记录命令的退出状态。路径相对于代码目
+录(绝对路径也可以)。
+
+该字段同样适用于回归阶段;回归报告还可以通过上报 API 额外提交逐测试
+的记录(状态、误差值、耗时)。
 
 ## 自定义摘要
 

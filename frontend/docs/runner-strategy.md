@@ -116,16 +116,35 @@ not reported a run yet (queued / running / failed-before-report).
 
 ## Report handling
 
-Each test stage records its run (status + summary + per-case results when
-the stage command reports them) for the dashboard. A graph's root is done
+Each test stage records its run for the dashboard: the status, a summary,
+the aggregate counts and — when the stage configured `results` files —
+each raw results file stored as its own artifact. A graph's root is done
 when all sub-tasks are done, failed otherwise.
 
 - A sub-task lands in **failed** (with the error on the task and in the
   task detail) when the SSH connection fails, the build fails or the stage
   command exits non-zero — the pass/fail of the *tests themselves* is
   visible on the dashboard, not in the task status.
+- A recorded run fails when the command exited non-zero **or** the parsed
+  results files report failed cases (ctest-style wrappers can swallow the
+  test binary's exit code).
+- Unit runs carry aggregate counts only (total / passed / failed /
+  skipped), summed across all configured results files. The per-case list
+  is parsed in the browser from the stored results files (see [the test
+  matrix](#/docs/test-matrix)); the run's `taskId` links back to the
+  stage's task log (stdout).
 - There is no automatic retry: re-push the commit or re-run the dispatch
   to retry.
+
+### Artifacts and the regression extension
+
+Result files live in one `test_artifacts` table keyed by run — a run (or a
+single case) can have several — with a `case_id` column that is 0 for
+run-level files. This is the extension point for regression tests: their
+per-case logs and series/plot data will be stored as `log` / `series`
+artifacts behind the same table, fetched by an "analyze" view in the
+browser, while per-case outcomes (status, error value, duration) go
+through the regular case-result rows.
 
 ## Prerequisites
 

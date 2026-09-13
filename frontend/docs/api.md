@@ -80,13 +80,39 @@ Results are reported with `POST /api/test-runs`:
 - `commitId` may be replaced by `"commitSha"` + `"commitRepo"`.
 - `startedAt` / `finishedAt` are optional (RFC 3339).
 - When `cases` are present the run status and counts are derived from
-  them. With no cases, an explicit `"status"` (`passed` | `failed`) and
-  a `"summary"` are stored directly — this is the simplified report path
-  (used by build runs, which have no per-case results).
+  them. With no cases, an explicit `"status"` (`passed` | `failed`), a
+  `"summary"` and optional aggregate counts (`"total"` / `"passed"` /
+  `"failed"` / `"skipped"`) are stored directly — the simplified report
+  path (build runs and unit runs, whose per-case detail lives in the
+  results-file artifact, not in the database).
+- Cases may carry `"durationMillis"` (regression reports).
 - Reporting again for the same (environment, commit, kind) replaces the
   stored result — the API is idempotent, so a flaky reporter can retry
   safely.
 - Deleting an environment also deletes its test runs.
+
+`GET /api/test-runs/{id}` returns the run with `taskId` (the stage
+sub-task whose log holds the stage's stdout; 0 for external reports),
+`skipped` count, `cases` (with `durationMillis`) and `artifacts` —
+references to stored files, e.g. the googletest results files the runner
+fetched back (a run can produce several):
+
+```json
+{
+  "id": 12, "kind": "unit", "status": "failed", "taskId": 77,
+  "total": 12, "passed": 9, "failed": 2, "skipped": 1,
+  "artifacts": [
+    {"id": 3, "caseId": 0, "kind": "results",
+     "name": "build/test_detail.xml", "size": 15832},
+    {"id": 4, "caseId": 0, "kind": "results",
+     "name": "build/extra.json", "size": 2101}
+  ]
+}
+```
+
+`GET /api/test-artifacts/{id}` returns one artifact's raw `content` —
+the browser-side results parsing and the upcoming regression "analyze"
+view fetch through it.
 
 ## Script execution (interactive)
 
@@ -121,10 +147,15 @@ POST /api/jobs/manual
   "ref": "master",                                    // optional: HEAD
   "buildCommand": "cmake . && cmake --build . -j8",   // optional: CMake default
   "unitCommand": "ctest -L unit",                     // optional: stage skipped
+  "unitResults": "build/test_detail.xml",             // optional: results file(s)
   "regressionCommand": "python3 run.py",              // optional: stage skipped
+  "regressionResults": "reg/results.json",            // optional: results file(s)
   "environmentIds": [1, 2]
 }
 ```
+
+The `unitResults` / `regressionResults` fields accept a single path or a
+list of paths — a run can produce several results files.
 
 - At least one stage command and one environment are required.
 - The ref is resolved to a concrete commit (`git ls-remote`) with the
@@ -161,7 +192,8 @@ created with the `adduser` CLI (see
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
 | POST   | `/api/test-runs`                | Report a test run result                      |
-| GET    | `/api/test-runs/{id}`           | One run's detail incl. per-case results       |
+| GET    | `/api/test-runs/{id}`           | One run's detail: cases, counts, artifacts    |
+| GET    | `/api/test-artifacts/{id}`      | One stored artifact's raw content             |
 | POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit (webhook-style, reads the YAML) |
 | POST   | `/api/jobs/manual`              | Dispatch a user-configured test (repo, ref, stage commands, environments; no YAML) |
 | GET    | `/api/jobs`                     | Recent task graphs (`?limit=`, monitoring; legacy job shape) |

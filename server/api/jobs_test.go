@@ -656,10 +656,13 @@ func TestManualTrigger(t *testing.T) {
 		t.Fatalf("no commands: expected 422, got %d, body %s", rec.Code, rec.Body.String())
 	}
 
-	// Happy path: build + unit on two environments, repo omitted (site default).
+	// Happy path: build + unit on two environments, repo omitted (site
+	// default). unitResults exercises the list form; a scalar string is
+	// also accepted (see the regression guard below).
 	rec = authed(http.MethodPost, "/api/jobs/manual", fmt.Sprintf(`{
 		"buildCommand": "make -j4",
-		"unitCommand": "ctest -L unit",
+		"unitCommand": "ctest -L unit --gtest_output",
+		"unitResults": ["build/test_detail.xml", "build/extra_results.json"],
 		"environmentIds": [%d, %d]
 	}`, envCPU.ID, envGPU.ID))
 	if rec.Code != http.StatusOK {
@@ -700,11 +703,24 @@ func TestManualTrigger(t *testing.T) {
 			t.Fatal(err)
 		}
 		kinds := map[string]bool{}
+		var unitResults []string
 		for i := range subs {
 			kinds[subs[i].Kind] = true
+			if subs[i].Kind == store.TaskKindUnit {
+				var sc struct {
+					Results []string `json:"results"`
+				}
+				if err := json.Unmarshal([]byte(subs[i].Config), &sc); err != nil {
+					t.Fatal(err)
+				}
+				unitResults = sc.Results
+			}
 		}
 		if !kinds[store.TaskKindBuild] || !kinds[store.TaskKindUnit] || kinds[store.TaskKindRegression] {
 			t.Fatalf("root %d sub-task kinds wrong: %v", root.ID, kinds)
+		}
+		if len(unitResults) != 2 || unitResults[0] != "build/test_detail.xml" || unitResults[1] != "build/extra_results.json" {
+			t.Fatalf("root %d unit results paths: want [build/test_detail.xml build/extra_results.json], got %v", root.ID, unitResults)
 		}
 	}
 

@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -24,19 +25,26 @@ const (
 
 // TestCaseResult is the outcome of a single test case within a run: the
 // error value of a regression case, or simply pass/fail for unit tests.
+// DurationMillis is a regression-report field (unit per-case timing lives in
+// the results-file artifact, parsed client-side).
 type TestCaseResult struct {
-	ID         int64   `gorm:"primaryKey"`
-	TestRunID  int64   `gorm:"index;not null"`
-	Name       string  `gorm:"not null"`
-	Status     string  `gorm:"not null"` // "passed" or "failed"
-	ErrorValue float64 `gorm:"not null;default:0"`
-	Message    string  `gorm:"not null;default:''"`
-	Position   int     `gorm:"not null;default:0"` // order within the run
+	ID             int64   `gorm:"primaryKey"`
+	TestRunID      int64   `gorm:"index;not null"`
+	Name           string  `gorm:"not null"`
+	Status         string  `gorm:"not null"` // "passed" or "failed"
+	ErrorValue     float64 `gorm:"not null;default:0"`
+	Message        string  `gorm:"not null;default:''"`
+	DurationMillis float64 `gorm:"column:duration_ms;not null;default:0"`
+	Position       int     `gorm:"not null;default:0"` // order within the run
 }
 
 // TestRun is the result of one test kind on one environment at one commit —
 // a cell of the dashboard matrix. The (environment, commit, kind) triple is
-// unique: reporting again for it replaces the stored result.
+// unique: reporting again for it replaces the stored result. TaskID links
+// the stage sub-task that produced the run (its task_logs hold the stage's
+// stdout; 0 = external report with no task). Unit runs carry aggregate
+// counts only — the per-case detail comes from the results-file artifact
+// parsed in the browser.
 type TestRun struct {
 	ID            int64  `gorm:"primaryKey"`
 	EnvironmentID int64  `gorm:"uniqueIndex:idx_test_runs_env_commit_kind;not null"`
@@ -47,23 +55,36 @@ type TestRun struct {
 	Total         int    `gorm:"not null;default:0"`
 	Passed        int    `gorm:"not null;default:0"`
 	Failed        int    `gorm:"not null;default:0"`
+	Skipped       int    `gorm:"not null;default:0"`
+	TaskID        int64  `gorm:"not null;default:0"`
 	StartedAt     time.Time
 	FinishedAt    time.Time
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 }
 
-// RunInput carries a test-run report as submitted by the reporter: the case
-// list plus optional timestamps and a simplified summary. Counts are derived
-// from the cases when any are present; when there are no cases the explicit
-// Status/Summary on RunInput is used directly (the worker's simplified path).
+// RunInput carries a test-run report as submitted by the reporter: case
+// results (regression reports), aggregate counts (the unit path: parsed from
+// the results file's root attributes, per-case data stays in Artifacts),
+// optional raw artifacts and a simplified summary. When cases are present
+// the counts are derived from them (Skipped stays 0); without cases the
+// explicit counts and Status are used directly. Overrides refines the
+// no-cases path: a failed override turns the run failed even when the
+// counts alone would pass (e.g. the test binary crashed after reporting).
 type RunInput struct {
 	EnvironmentID int64
 	CommitID      int64
 	Kind          string
+	TaskID        int64
 	Cases         []TestCaseResult
+	Total         int
+	Passed        int
+	Failed        int
+	Skipped       int
 	Status        string // used only when Cases is empty; defaults to passed
+	StatusFailed  bool   // no-cases path: force failed regardless of counts
 	Summary       string
+	Artifacts     []ArtifactInput
 	StartedAt     time.Time
 	FinishedAt    time.Time
 }
@@ -76,9 +97,11 @@ var ErrInvalidRunKind = errors.New("store: run kind must be regression, unit or 
 var ErrInvalidCaseStatus = errors.New("store: case status must be passed or failed")
 
 // UpsertTestRun stores a run report. If a run already exists for the
-// (environment, commit, kind) triple, its case results are replaced in a
-// transaction. The counts and status are derived from the cases: a run
-// passes when every case passes.
+// (environment, commit, kind) triple, its case results and artifacts are
+// replaced in a transaction. With cases, the counts/status are derived from
+// them (a run passes when every case passes); without cases the explicit
+// counts and status are stored (the aggregate unit path — optionally forced
+// failed through StatusFailed when the command exited non-zero).
 func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
 	if !RunKindValid(in.Kind) {
 		return nil, ErrInvalidRunKind
@@ -93,6 +116,11 @@ func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
 		in.Cases[i].TestRunID = 0 // set below for the run being written
 		in.Cases[i].ID = 0
 	}
+	for i := range in.Artifacts {
+		if !ArtifactKindValid(in.Artifacts[i].Kind) {
+			return nil, fmt.Errorf("store: invalid artifact kind %q", in.Artifacts[i].Kind)
+		}
+	}
 
 	var run TestRun
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
@@ -103,8 +131,11 @@ func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
 		}
 
 		if err == nil {
-			// Replace: drop the old case results, keep the same row.
+			// Replace: drop the old case results and artifacts, keep the row.
 			if err := tx.Where("test_run_id = ?", run.ID).Delete(&TestCaseResult{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("run_id = ?", run.ID).Delete(&TestArtifact{}).Error; err != nil {
 				return err
 			}
 		}
@@ -113,32 +144,41 @@ func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
 		run.EnvironmentID = in.EnvironmentID
 		run.CommitID = in.CommitID
 		run.Kind = in.Kind
+		run.TaskID = in.TaskID
 		run.StartedAt = in.StartedAt
 		run.FinishedAt = in.FinishedAt
 		run.Summary = in.Summary
-		run.Total = len(in.Cases)
-		run.Passed = 0
-		for i := range in.Cases {
-			if in.Cases[i].Status == StatusPassed {
-				run.Passed++
+		if len(in.Cases) > 0 {
+			run.Total = len(in.Cases)
+			run.Passed = 0
+			for i := range in.Cases {
+				if in.Cases[i].Status == StatusPassed {
+					run.Passed++
+				}
 			}
-		}
-		run.Failed = run.Total - run.Passed
-		if run.Total == 0 {
-			// No case-level results: the explicit status is authoritative
-			// (the simplified worker path reports a one-paragraph conclusion
-			// without per-case detail).
+			run.Failed = run.Total - run.Passed
+			run.Skipped = 0
+			run.Status = StatusFailed
+			if run.Failed == 0 {
+				run.Status = StatusPassed
+			}
+		} else {
+			// No case-level results: the explicit counts and status are
+			// authoritative (the aggregate unit path reports counts parsed
+			// from the results file root, per-case data stays in artifacts).
+			run.Total = in.Total
+			run.Passed = in.Passed
+			run.Failed = in.Failed
+			run.Skipped = in.Skipped
 			run.Status = in.Status
 			if run.Status == "" {
 				run.Status = StatusPassed
 			}
+			if in.StatusFailed {
+				run.Status = StatusFailed
+			}
 			if run.Status != StatusPassed && run.Status != StatusFailed {
 				return ErrInvalidCaseStatus
-			}
-		} else {
-			run.Status = StatusFailed
-			if run.Failed == 0 {
-				run.Status = StatusPassed
 			}
 		}
 
@@ -152,7 +192,7 @@ func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
 				return err
 			}
 		}
-		return nil
+		return replaceRunArtifacts(tx, run.ID, in.Artifacts)
 	})
 	if err != nil {
 		return nil, err
@@ -208,8 +248,9 @@ type EnvCommit struct {
 	Commit int64
 }
 
-// DeleteTestRun removes one run and its case results (requeue cleanup: a
-// stage dropped from a rebuilt graph must not leave its stale run behind).
+// DeleteTestRun removes one run and its case results and artifacts (requeue
+// cleanup: a stage dropped from a rebuilt graph must not leave its stale run
+// behind).
 func (s *Store) DeleteTestRun(envID, commitID int64, kind string) error {
 	return s.DB.Transaction(func(tx *gorm.DB) error {
 		var run TestRun
@@ -224,12 +265,16 @@ func (s *Store) DeleteTestRun(envID, commitID int64, kind string) error {
 		if err := tx.Where("test_run_id = ?", run.ID).Delete(&TestCaseResult{}).Error; err != nil {
 			return err
 		}
+		if err := tx.Where("run_id = ?", run.ID).Delete(&TestArtifact{}).Error; err != nil {
+			return err
+		}
 		return tx.Delete(&TestRun{}, run.ID).Error
 	})
 }
 
-// DeleteRunsForEnvironment removes all runs (and their case results) of an// environment, in a transaction. Called when an environment is deleted so no
-// dangling dashboard rows remain.
+// DeleteRunsForEnvironment removes all runs (and their case results and
+// artifacts) of an environment, in a transaction. Called when an environment
+// is deleted so no dangling dashboard rows remain.
 func (s *Store) DeleteRunsForEnvironment(envID int64) error {
 	return s.DB.Transaction(func(tx *gorm.DB) error {
 		var runIDs []int64
@@ -239,6 +284,9 @@ func (s *Store) DeleteRunsForEnvironment(envID int64) error {
 		}
 		if len(runIDs) > 0 {
 			if err := tx.Where("test_run_id IN ?", runIDs).Delete(&TestCaseResult{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("run_id IN ?", runIDs).Delete(&TestArtifact{}).Error; err != nil {
 				return err
 			}
 		}

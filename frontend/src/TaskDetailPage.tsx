@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { LoaderCircle } from 'lucide-react'
 import {
   getTask,
-  getTaskLogs,
   type SubTask,
   type TaskDetail,
   type TaskStatus,
 } from './api'
+import TaskLogView from './TaskLogView'
 import { TaskStatusText, commitUrl } from './StatusViews'
 
 interface Props {
@@ -138,7 +138,14 @@ function TaskDetail({
         />
       )}
 
-      {selected !== null && <TaskLogView taskId={selected} live={live} />}
+      {selected !== null && (
+        <section>
+          <h3 className="task-section-title">
+            Log {live && <span className="text-muted">(following…)</span>}
+          </h3>
+          <TaskLogView taskId={selected} live={live} />
+        </section>
+      )}
     </div>
   )
 }
@@ -193,77 +200,7 @@ function SubTaskList({
   )
 }
 
-// TaskLogView shows one sub-task's log, polling incrementally with after=
-// lastSeq while the parent task is live.
-function TaskLogView({ taskId, live }: { taskId: number; live: boolean }) {
-  const [text, setText] = useState('')
-  const [truncated, setTruncated] = useState(false)
-  const lastSeq = useRef(0)
-  const preRef = useRef<HTMLPreElement>(null)
-
-  useEffect(() => {
-    // New selection: reset the stream.
-    setText('')
-    setTruncated(false)
-    lastSeq.current = 0
-
-    let stop = false
-    async function poll() {
-      try {
-        const res = await getTaskLogs(taskId, lastSeq.current)
-        if (stop) return
-        lastSeq.current = res.lastSeq
-        if (res.chunks.length > 0) {
-          setText((cur) => {
-            const next = cur + res.chunks.map((c) => c.content).join('')
-            // Cap the rendered tail (full log lives server-side).
-            if (next.length > 512 * 1024) {
-              setTruncated(true)
-              return next.slice(next.length - 512 * 1024)
-            }
-            return next
-          })
-        }
-      } catch {
-        // Transient poll errors are ignored; the next tick retries.
-      }
-    }
-    poll()
-    const timer = setInterval(poll, 2000)
-    return () => {
-      stop = true
-      clearInterval(timer)
-    }
-  }, [taskId])
-
-  // Auto-scroll to the bottom on new output while following.
-  const stick = useRef(true)
-  useEffect(() => {
-    const pre = preRef.current
-    if (pre && stick.current) {
-      pre.scrollTop = pre.scrollHeight
-    }
-  }, [text])
-
-  return (
-    <section>
-      <h3 className="task-section-title">
-        Log {live && <span className="text-muted">(following…)</span>}
-      </h3>
-      <pre
-        ref={preRef}
-        className="task-log"
-        onScroll={(e) => {
-          const el = e.currentTarget
-          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-        }}
-      >
-        {truncated && <span className="text-muted">… earlier output trimmed (full log on the server) …{'\n'}</span>}
-        {text || (live ? 'waiting for output…' : '(no output)')}
-      </pre>
-    </section>
-  )
-}
+// TaskLogView lives in TaskLogView.tsx (shared with the run detail page).
 
 function statusGlyph(status: TaskStatus): string {
   switch (status) {

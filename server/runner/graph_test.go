@@ -65,13 +65,41 @@ func TestBuildTaskGraphShape(t *testing.T) {
 		t.Errorf("build snapshot timeout/env wrong: %+v", build)
 	}
 
-	// The unit snapshot carries the command and its own timeout.
+	// The unit snapshot carries the command, its own timeout and the
+	// configured results file.
 	var unit StageConfig
 	if err := json.Unmarshal([]byte(tasks[2].Config), &unit); err != nil {
 		t.Fatal(err)
 	}
 	if unit.Command != "ctest -L unit" || unit.Timeout != 100 {
 		t.Errorf("unit snapshot wrong: %+v", unit)
+	}
+	if len(unit.Results) != 0 {
+		t.Errorf("unit snapshot results should be empty when unset: %+v", unit)
+	}
+}
+
+func TestBuildTaskGraphResultsPassthrough(t *testing.T) {
+	entry := sampleEntry()
+	entry.Unit.Results = ResultsPaths{"build/test_detail.xml", "build/extra.json"}
+	entry.Regression.Results = ResultsPaths{"reg/results.json"}
+	tasks, err := BuildTaskGraph(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unit StageConfig
+	if err := json.Unmarshal([]byte(tasks[2].Config), &unit); err != nil {
+		t.Fatal(err)
+	}
+	if len(unit.Results) != 2 || unit.Results[0] != "build/test_detail.xml" || unit.Results[1] != "build/extra.json" {
+		t.Errorf("unit results not passed through: %+v", unit)
+	}
+	var reg StageConfig
+	if err := json.Unmarshal([]byte(tasks[3].Config), &reg); err != nil {
+		t.Fatal(err)
+	}
+	if len(reg.Results) != 1 || reg.Results[0] != "reg/results.json" {
+		t.Errorf("regression results not passed through: %+v", reg)
 	}
 }
 

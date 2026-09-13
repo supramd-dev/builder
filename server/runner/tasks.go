@@ -32,7 +32,9 @@ type ManualDispatch struct {
 	Ref               string
 	BuildCommand      string
 	UnitCommand       string
+	UnitResults       ResultsPaths // optional results file paths for the unit command
 	RegressionCommand string
+	RegressionResults ResultsPaths // optional results file paths for the regression command
 	EnvironmentIDs    []int64
 	Username          string
 }
@@ -177,10 +179,18 @@ func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnviron
 		entry.Build.Command = "cmake . && cmake --build . -j8"
 	}
 	if cmd := strings.TrimSpace(in.UnitCommand); cmd != "" {
-		entry.Unit = &EnvConfig{Command: cmd, Timeout: DefaultTimeoutSeconds}
+		entry.Unit = &EnvConfig{
+			Command: cmd,
+			Timeout: DefaultTimeoutSeconds,
+			Results: in.UnitResults.Clean(),
+		}
 	}
 	if cmd := strings.TrimSpace(in.RegressionCommand); cmd != "" {
-		entry.Regression = &EnvConfig{Command: cmd, Timeout: DefaultTimeoutSeconds}
+		entry.Regression = &EnvConfig{
+			Command: cmd,
+			Timeout: DefaultTimeoutSeconds,
+			Results: in.RegressionResults.Clean(),
+		}
 	}
 
 	graph, err := BuildTaskGraph(&entry)

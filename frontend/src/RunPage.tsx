@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import Editor, { type Monaco, type OnMount } from '@monaco-editor/react'
+import Editor, { type OnMount } from '@monaco-editor/react'
+import { defineMonacoTheme } from './monacoTheme'
 import {
   buildTest,
   execEnvironment,
@@ -136,7 +137,7 @@ function ExecTab({ onError }: RunPageProps) {
   // Configure the editor theme once Monaco loads.
   const handleEditorMount: OnMount = (editor, monaco) => {
     editorRef.current = editor
-    defineTheme(monaco)
+    defineMonacoTheme(monaco)
   }
 
   const run = async () => {
@@ -505,6 +506,18 @@ function BuildTestTab({ onError }: RunPageProps) {
 
 const DEFAULT_MANUAL_BUILD = 'cmake . && cmake --build . -j8'
 
+// splitPaths turns the comma/space-separated results-file input into a list
+// for the API (a run can produce several results files); a single entry is
+// sent as a scalar to keep the request readable.
+function splitPaths(input: string): string | string[] | undefined {
+  const parts = input
+    .split(/[,\s]+/)
+    .map((p) => p.trim())
+    .filter((p) => p !== '')
+  if (parts.length === 0) return undefined
+  return parts.length === 1 ? parts[0] : parts
+}
+
 // ManualTestTab dispatches a user-configured test: one repository (default:
 // the site config's code repository), an optional ref and the three stage
 // commands, run as task graphs (clone → build → unit → regression) by the
@@ -517,7 +530,9 @@ function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
   const [ref, setRef] = useState('')
   const [buildCommand, setBuildCommand] = useState('')
   const [unitCommand, setUnitCommand] = useState('')
+  const [unitResults, setUnitResults] = useState('')
   const [regressionCommand, setRegressionCommand] = useState('')
+  const [regressionResults, setRegressionResults] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [dispatched, setDispatched] = useState<number[]>([])
@@ -566,7 +581,9 @@ function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
         ref,
         buildCommand,
         unitCommand,
+        unitResults: splitPaths(unitResults),
         regressionCommand,
+        regressionResults: splitPaths(regressionResults),
         environmentIds: [...selected],
       })
       setDispatched(res.roots.map((r) => r.taskId))
@@ -666,6 +683,14 @@ function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
                     fontSize: '0.875rem',
                   }}
                 />
+                <input
+                  id="manual-unit-results"
+                  type="text"
+                  value={unitResults}
+                  onChange={(e) => setUnitResults(e.target.value)}
+                  placeholder="results file(s), e.g. build/test_detail.xml, build/extra.json (optional)"
+                  style={{ marginTop: '0.375rem' }}
+                />
               </div>
               <div className="form-group">
                 <label htmlFor="manual-reg">Regression test command</label>
@@ -680,6 +705,14 @@ function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
                     fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
                     fontSize: '0.875rem',
                   }}
+                />
+                <input
+                  id="manual-reg-results"
+                  type="text"
+                  value={regressionResults}
+                  onChange={(e) => setRegressionResults(e.target.value)}
+                  placeholder="results file(s), e.g. regression_results.json (optional)"
+                  style={{ marginTop: '0.375rem' }}
                 />
               </div>
             </div>
@@ -737,24 +770,5 @@ function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
   )
 }
 
-// defineTheme registers a sourcehut-flavored Monaco theme for light and
-// dark mode. Monaco themes cannot react to media queries, so both are
-// derived from the current color scheme at mount.
-function defineTheme(monaco: Monaco) {
-  const dark = window.matchMedia('(prefers-color-scheme: dark)').matches
-  monaco.editor.defineTheme('md-builder', {
-    base: dark ? 'vs-dark' : 'vs',
-    inherit: true,
-    rules: [
-      { token: 'comment', foreground: dark ? '6a9955' : '6a737d' },
-      { token: 'keyword', foreground: dark ? '3395ff' : '0640e0' },
-      { token: 'string', foreground: dark ? '2bb34b' : '1a7f37' },
-    ],
-    colors: {
-      'editor.background': dark ? '#131618' : '#ffffff',
-      'editorLineNumber.foreground': dark ? '#495057' : '#adb5bd',
-      'editor.lineHighlightBackground': dark ? '#1c1f23' : '#f8f9fa',
-      'editorGutter.background': dark ? '#131618' : '#ffffff',
-    },
-  })
-}
+// (The Monaco theme is defined in monacoTheme.ts, shared with the message
+// dialog's read-only viewer.)

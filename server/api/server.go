@@ -63,6 +63,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/dashboard/", s.requireAuth(s.handleDashboard))
 	mux.HandleFunc("/api/test-runs", s.requireAuth(s.handleTestRuns))
 	mux.HandleFunc("/api/test-runs/", s.requireAuth(s.handleTestRunItem))
+	mux.HandleFunc("/api/test-artifacts/", s.requireAuth(s.handleTestArtifact))
 
 	// Job scheduling: manual trigger and monitoring (requires an
 	// authenticated user).

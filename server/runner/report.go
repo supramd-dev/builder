@@ -23,13 +23,28 @@ const maxSummaryLen = 500
 // first MD-BUILDER-SUMMARY: line when present, otherwise "exit N" plus the
 // last lines of the output flattened to one line.
 func ExtractSummary(output string, exitCode int) string {
+	if line, ok := summaryLine(output); ok {
+		return truncateSummary(line)
+	}
+	return truncateSummary(fmt.Sprintf("exit %d; %s", exitCode, tailLine(output, 5)))
+}
+
+// hasSummaryLine reports whether the output carries a MD-BUILDER-SUMMARY
+// line (the stage's own conclusion, preferred over derived counts).
+func hasSummaryLine(output string) bool {
+	_, ok := summaryLine(output)
+	return ok
+}
+
+// summaryLine returns the text of the first MD-BUILDER-SUMMARY line.
+func summaryLine(output string) (string, bool) {
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if strings.HasPrefix(line, SummaryPrefix) {
-			return truncateSummary(strings.TrimSpace(strings.TrimPrefix(line, SummaryPrefix)))
+			return strings.TrimSpace(strings.TrimPrefix(line, SummaryPrefix)), true
 		}
 	}
-	return truncateSummary(fmt.Sprintf("exit %d; %s", exitCode, tailLine(output, 5)))
+	return "", false
 }
 
 // TailLine returns the last n lines of s, flattened to one line (used for
