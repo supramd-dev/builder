@@ -24,6 +24,7 @@ export interface TestEnvironment {
   username: string
   tags: string[]
   description: string
+  envScript: string
   enabled: boolean
   createdAt: string
   updatedAt: string
@@ -36,6 +37,7 @@ export interface EnvironmentInput {
   privateKey: string
   tags: string[]
   description: string
+  envScript: string
   enabled?: boolean
 }
 
@@ -315,7 +317,8 @@ export async function getFullDashboard(
 export interface CaseResult {
   id: number
   name: string
-  status: 'passed' | 'failed'
+  // "skipped" marks a case whose sub-task never ran (upstream failure).
+  status: 'passed' | 'failed' | 'skipped'
   errorValue: number
   message: string
   durationMillis: number

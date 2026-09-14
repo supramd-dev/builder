@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -17,10 +18,13 @@ const (
 	RunKindBuild      = "build"
 )
 
-// Test case / run statuses.
+// Test case / run statuses. StatusSkipped is a case-level status only (a
+// case whose sub-task was skipped because an upstream task failed); runs
+// themselves stay passed/failed.
 const (
-	StatusPassed = "passed"
-	StatusFailed = "failed"
+	StatusPassed  = "passed"
+	StatusFailed  = "failed"
+	StatusSkipped = "skipped"
 )
 
 // TestCaseResult is the outcome of a single test case within a run: the
@@ -93,8 +97,9 @@ type RunInput struct {
 // kinds (regression / unit / build).
 var ErrInvalidRunKind = errors.New("store: run kind must be regression, unit or build")
 
-// ErrInvalidCaseStatus is returned when a case status is not passed/failed.
-var ErrInvalidCaseStatus = errors.New("store: case status must be passed or failed")
+// ErrInvalidCaseStatus is returned when a case status is not one of
+// passed/failed/skipped.
+var ErrInvalidCaseStatus = errors.New("store: case status must be passed, failed or skipped")
 
 // UpsertTestRun stores a run report. If a run already exists for the
 // (environment, commit, kind) triple, its case results and artifacts are
@@ -221,6 +226,195 @@ func (s *Store) ListCaseResults(runID int64) ([]TestCaseResult, error) {
 		return nil, err
 	}
 	return cases, nil
+}
+
+// UpsertCaseResult stores the outcome of ONE regression case sub-task into
+// the run of its (environment, commit): the case row is replaced by name and
+// the run's counts/status/summary are recomputed across every case row seen
+// so far. Creates the run when the first case lands. The regression stages
+// run as one sub-task per case, so the run aggregates incrementally.
+func (s *Store) UpsertCaseResult(in *CaseResultInput) (*TestRun, *TestCaseResult, error) {
+	if in.Name == "" {
+		return nil, nil, errors.New("store: case name is required")
+	}
+	if in.Status != StatusPassed && in.Status != StatusFailed && in.Status != StatusSkipped {
+		return nil, nil, ErrInvalidCaseStatus
+	}
+	var run TestRun
+	var result TestCaseResult
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ?",
+			in.EnvironmentID, in.CommitID, RunKindRegression).First(&run).Error
+		if err != nil && err != ErrNotFound {
+			return err
+		}
+		if err == nil {
+			// Replace the existing case row (a re-run of the same case).
+			if err := tx.Where("test_run_id = ? AND name = ?", run.ID, in.Name).
+				Delete(&TestCaseResult{}).Error; err != nil {
+				return err
+			}
+		}
+
+		run.EnvironmentID = in.EnvironmentID
+		run.CommitID = in.CommitID
+		run.Kind = RunKindRegression
+		run.TaskID = in.TaskID
+		run.StartedAt = in.StartedAt
+		run.FinishedAt = in.FinishedAt
+		// The run row must exist (with its ID) before the case row links it.
+		if err := tx.Save(&run).Error; err != nil {
+			return err
+		}
+
+		result = TestCaseResult{
+			TestRunID:      run.ID,
+			Name:           in.Name,
+			Status:         in.Status,
+			Message:        in.Message,
+			DurationMillis: in.DurationMillis,
+		}
+		if err := tx.Create(&result).Error; err != nil {
+			return err
+		}
+
+		// Recompute the aggregate over every case row of the run.
+		var cases []TestCaseResult
+		if err := tx.Where("test_run_id = ?", run.ID).Find(&cases).Error; err != nil {
+			return err
+		}
+		run.Total = len(cases)
+		run.Passed, run.Failed, run.Skipped = 0, 0, 0
+		var passed, failed, skipped int
+		for i := range cases {
+			switch {
+			case cases[i].Status == StatusPassed:
+				passed++
+			case cases[i].Status == StatusSkipped:
+				skipped++
+			default:
+				failed++
+			}
+		}
+		run.Passed, run.Failed, run.Skipped = passed, failed, skipped
+		run.Status = StatusFailed
+		if run.Failed == 0 {
+			run.Status = StatusPassed
+		}
+		// While every recorded case is a skip placeholder (upstream failure
+		// before any case could run), the run displays as skipped too — the
+		// summary prefix is what the dashboard's display translation keys on.
+		if run.Total > 0 && passed == 0 && failed == 0 && skipped > 0 {
+			run.Status = StatusFailed
+		}
+		run.Summary = runSummaryFromCases(cases)
+		return tx.Save(&run).Error
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return &run, &result, nil
+}
+
+// runSummaryFromCases renders the run summary across its case rows: "3/4
+// cases passed" plus the failing case names (bounded), or the skipped
+// phrasing the dashboard translates into a skipped cell.
+func runSummaryFromCases(cases []TestCaseResult) string {
+	var passed, skipped int
+	var failed []string
+	for i := range cases {
+		switch {
+		case cases[i].Status == StatusPassed:
+			passed++
+		case cases[i].Status == StatusSkipped:
+			skipped++
+		default:
+			failed = append(failed, cases[i].Name)
+		}
+	}
+	if len(failed) == 0 {
+		if len(cases) > 0 && passed == 0 && skipped > 0 {
+			return "skipped: " + cases[0].Message
+		}
+		return fmt.Sprintf("%d/%d cases passed", passed, len(cases))
+	}
+	if len(failed) > 3 {
+		failed = append(failed[:3], "...")
+	}
+	return fmt.Sprintf("%d/%d cases passed; failed: %s", passed, len(cases), strings.Join(failed, ", "))
+}
+
+// CaseResultInput carries one regression case outcome to UpsertCaseResult.
+type CaseResultInput struct {
+	EnvironmentID  int64
+	CommitID       int64
+	TaskID         int64
+	Name           string
+	Status         string // passed | failed | skipped
+	Message        string
+	DurationMillis float64
+	StartedAt      time.Time
+	FinishedAt     time.Time
+}
+
+// AppendRunArtifacts adds artifacts to the run of (environment, commit,
+// kind) without touching its case rows (the per-case upsert owns those).
+// A case-scoped artifact links CaseID; 0 attaches it to the run.
+func (s *Store) AppendRunArtifacts(envID, commitID int64, kind string, artifacts []ArtifactInput) error {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		var run TestRun
+		if err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ?",
+			envID, commitID, kind).First(&run).Error; err != nil {
+			return err
+		}
+		for i := range artifacts {
+			if !ArtifactKindValid(artifacts[i].Kind) {
+				return fmt.Errorf("store: invalid artifact kind %q", artifacts[i].Kind)
+			}
+			a := TestArtifact{
+				RunID:   run.ID,
+				CaseID:  artifacts[i].CaseID,
+				Kind:    artifacts[i].Kind,
+				Name:    artifacts[i].Name,
+				Content: artifacts[i].Content,
+			}
+			if err := tx.Create(&a).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ResetRegressionRun clears the case rows and artifacts of the regression
+// run for (environment, commit) — a re-dispatch rebuilds the case set, so
+// stale rows of presets no longer in the matrix must go. Keeps the run row
+// itself (the unique index slot) with reset counts.
+func (s *Store) ResetRegressionRun(envID, commitID int64) error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		var run TestRun
+		if err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ?",
+			envID, commitID, RunKindRegression).First(&run).Error; err != nil {
+			if err == ErrNotFound {
+				return nil // nothing recorded yet
+			}
+			return err
+		}
+		if err := tx.Where("test_run_id = ?", run.ID).Delete(&TestCaseResult{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("run_id = ?", run.ID).Delete(&TestArtifact{}).Error; err != nil {
+			return err
+		}
+		updates := map[string]any{
+			"total": 0, "passed": 0, "failed": 0, "skipped": 0,
+			"status": StatusFailed, "summary": "",
+		}
+		return tx.Model(&TestRun{}).Where("id = ?", run.ID).Updates(updates).Error
+	})
 }
 
 // FindRunsByCommits returns runs of the given kind for the given environment

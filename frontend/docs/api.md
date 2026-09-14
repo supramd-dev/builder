@@ -184,6 +184,14 @@ created with the `adduser` CLI (see
 | GET    | `/api/environments/{id}`        | Get one environment                           |
 | PUT    | `/api/environments/{id}`        | Update one environment                        |
 | DELETE | `/api/environments/{id}`        | Delete one environment (and its test runs)    |
+
+Environment create/update bodies carry `name`, `host`, `username`,
+`privateKey`, `tags`, `description`, `enabled` and `envScript` (the
+environment setup script sourced before every stage — see
+[Test environments](#/docs/environments)). Unlike the private key (empty
+on update = keep), an omitted/empty `envScript` clears the script.
+Both fields round-trip: the private key is never echoed back, the env
+script is (it is not a secret).
 | POST   | `/api/environments/{id}/test`   | SSH connectivity check                        |
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |

@@ -40,9 +40,9 @@ func TestSchedulerRunsFullGraph(t *testing.T) {
 				}
 				t.Fatalf("root failed: %s\n%s", root.Error, strings.Join(detail, "\n"))
 			}
-			// Full chain ran: build + unit + regression scripts, in order.
-			if len(exec.scripts) != 3 {
-				t.Fatalf("want 3 scripts, got %d", len(exec.scripts))
+			// Full chain ran: build + unit + both case scripts, in order.
+			if len(exec.scripts) != 4 {
+				t.Fatalf("want 4 scripts, got %d", len(exec.scripts))
 			}
 			subs, _ := s.ListSubTasks(root.ID)
 			for _, sub := range subs {
@@ -78,7 +78,8 @@ func TestSchedulerSkipsOnFailure(t *testing.T) {
 		}
 		if root.Status == store.TaskFailed {
 			subs, _ := s.ListSubTasks(root.ID)
-			var unitState, regState string
+			var unitState string
+			regStates := map[string]int{}
 			for _, sub := range subs {
 				switch sub.Kind {
 				case store.TaskKindBuild:
@@ -88,11 +89,14 @@ func TestSchedulerSkipsOnFailure(t *testing.T) {
 				case store.TaskKindUnit:
 					unitState = sub.Status
 				case store.TaskKindRegression:
-					regState = sub.Status
+					regStates[sub.Status]++
 				}
 			}
-			if unitState != store.TaskSkipped || regState != store.TaskSkipped {
-				t.Errorf("stages should be skipped: unit=%s regression=%s", unitState, regState)
+			if unitState != store.TaskSkipped {
+				t.Errorf("unit should be skipped: %s", unitState)
+			}
+			if regStates[store.TaskSkipped] != 2 {
+				t.Errorf("both regression cases should be skipped: %v", regStates)
 			}
 			// The skipped stages got failed dashboard runs.
 			runs, _ := s.FindRunsByCommits(store.RunKindUnit,

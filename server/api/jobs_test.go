@@ -32,13 +32,16 @@ func newDispatchTestServer(t *testing.T, yaml string) (*Server, *store.Store) {
 	return apiServer, s
 }
 
-const dispatchYAML = `version: 1
+const dispatchYAML = `version: 2
+presets:
+  main:
+    command: "python3 run.py"
 matrix:
   - tags: [cpu]
     unit:
       command: "ctest -L unit"
     regression:
-      command: "python3 run.py"
+      use: [main]
   - tags: [gpu, cuda]
     unit:
       command: "ctest -L unit"
@@ -122,7 +125,7 @@ func TestWebhookDispatchesTasks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// clone + build + (unit) (+ regression for the cpu entry).
+		// clone + build + (unit) (+ regression case for the cpu entry).
 		want := 3
 		if r.Tags == "cpu" {
 			want = 4

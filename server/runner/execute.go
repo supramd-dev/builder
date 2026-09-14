@@ -41,8 +41,10 @@ func (s *Service) ExecuteTask(ctx context.Context, task *store.Task) error {
 		s.executeClone(ctx, task)
 	case store.TaskKindBuild:
 		s.executeBuild(ctx, task)
-	case store.TaskKindUnit, store.TaskKindRegression:
-		s.executeStage(ctx, task)
+	case store.TaskKindUnit:
+		s.executeUnit(ctx, task)
+	case store.TaskKindRegression:
+		s.executeCase(ctx, task)
 	default:
 		s.failTask(task, fmt.Sprintf("unknown task kind %q", task.Kind))
 	}
@@ -101,15 +103,20 @@ func (rc *rootContext) creds() *GitCredentials {
 }
 
 // scriptInput assembles the shared ScriptInput for sub-task scripts.
-func (rc *rootContext) scriptInput(task *store.Task, stageCommand string, timeout int) *ScriptInput {
+// workdir/case/timeout are the stage-specific fields.
+func (rc *rootContext) scriptInput(stageCommand, workdir, caseName string, timeout int) *ScriptInput {
 	return &ScriptInput{
-		CommitSHA:    rc.sha,
-		EnvName:      rc.env.Name,
-		EnvTags:      rc.env.Tags,
-		CodeDir:      rc.remoteCodeDir(),
-		Entry:        rc.entry,
-		StageCommand: stageCommand,
-		Timeout:      timeout,
+		CommitSHA:     rc.sha,
+		EnvName:       rc.env.Name,
+		EnvTags:       rc.env.Tags,
+		TaskDir:       RemoteTaskDir(rc.sha),
+		CodeDir:       rc.remoteCodeDir(),
+		EnvScriptName: rc.env.EnvScriptName(),
+		Entry:         rc.entry,
+		StageCommand:  stageCommand,
+		Workdir:       workdir,
+		CaseName:      caseName,
+		Timeout:       timeout,
 	}
 }
 
@@ -120,7 +127,9 @@ func (rc *rootContext) remoteCodeDir() string {
 }
 
 // executeClone implements the clone sub-task: server-side clone of the code
-// repository, tar stream upload to the remote workspace.
+// repository, tar stream upload to the remote workspace, then (when the
+// environment carries one) the env setup script written next to the code so
+// every later stage can source it.
 func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 	rc, ok := s.loadRootContext(task)
 	if !ok {
@@ -151,15 +160,51 @@ func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 	}
 	fmt.Fprintf(logw, "uploaded %.1f MiB to %s:%s\n", float64(uploaded)/(1024*1024), rc.env.Host, remoteDir)
 
+	if err := s.writeEnvScript(ctx, rc, logw); err != nil {
+		s.failTaskLogged(task, logw, fmt.Sprintf("env script upload failed: %v", err))
+		return
+	}
+
 	if err := s.Store.FinishTask(task.ID, store.TaskDone, ""); err != nil {
 		log.Printf("runner: task %d: finish: %v", task.ID, err)
 	}
 }
 
+// writeEnvScript materializes the environment's setup script on the remote
+// host at $TASK_DIR/md-builder-env-<hash>.sh. An environment without a
+// script is fine — a warning names it so the log explains why stages run
+// without environment setup.
+func (s *Service) writeEnvScript(ctx context.Context, rc *rootContext, logw *LogWriter) error {
+	if rc.env.EnvScriptName() == "" {
+		fmt.Fprintf(logw, "warning: environment %s has no env script; stages will run without one\n", rc.env.Name)
+		return nil
+	}
+	name := rc.env.EnvScriptName()
+	var script strings.Builder
+	w := func(format string, args ...any) { fmt.Fprintf(&script, format+"\n", args...) }
+	w("#!/usr/bin/env bash")
+	w("# environment setup script of %s (written by md-builder)", rc.env.Name)
+	w("%s", rc.env.EnvScript)
+
+	// The task dir carries a $HOME reference — double-quote so the remote
+	// shell expands it (single quotes would create a literal "$HOME" path).
+	dir := RemoteTaskDir(rc.sha)
+	remote := fmt.Sprintf("mkdir -p %s && cat > %s && chmod +x %s",
+		shellExpand(dir), shellExpand(dir+"/"+name), shellExpand(dir+"/"+name))
+
+	h := envToSSHHost(rc.env)
+	res := s.SSH.RunScript(ctx, h, remote, script.String(), fetchResultsTimeout, logw, logw)
+	if res.ExitCode != 0 {
+		return fmt.Errorf("write %s failed (exit %d)", name, res.ExitCode)
+	}
+	fmt.Fprintf(logw, "wrote env script %s\n", name)
+	return nil
+}
+
 // executeBuild implements the build sub-task: generate the build script and
-// run it in the code directory on the remote host. The outcome is recorded
-// as a "build" test run so the dashboard can show per-environment build
-// results next to the unit/regression kinds.
+// run it in the configured workdir on the remote host. The outcome is
+// recorded as a "build" test run so the dashboard can show per-environment
+// build results next to the unit/regression kinds.
 func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	rc, ok := s.loadRootContext(task)
 	if !ok {
@@ -174,7 +219,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	logw := NewLogWriter(s.Store, task.ID)
 	defer logw.Close()
 
-	script, err := BuildBuildScript(rc.scriptInput(task, "", stage.Timeout))
+	script, err := BuildScript(rc.scriptInput("", stage.Workdir, "", stage.Timeout))
 	if err != nil {
 		s.failTaskLogged(task, logw, err.Error())
 		return
@@ -199,10 +244,10 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
 }
 
-// executeStage implements a test sub-task (unit / regression): run the
-// stage command remotely, fetch the configured results file back (aggregate
-// counts + raw artifact), then record the TestRun for the dashboard.
-func (s *Service) executeStage(ctx context.Context, task *store.Task) {
+// executeUnit implements the unit test sub-task: run the stage command in
+// its workdir, fetch the configured results files back (aggregate counts +
+// raw artifacts), then record the TestRun for the dashboard.
+func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 	rc, ok := s.loadRootContext(task)
 	if !ok {
 		return
@@ -216,7 +261,7 @@ func (s *Service) executeStage(ctx context.Context, task *store.Task) {
 	logw := NewLogWriter(s.Store, task.ID)
 	defer logw.Close()
 
-	script, err := BuildStageScript(rc.scriptInput(task, stage.Command, stage.Timeout))
+	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, "", stage.Timeout))
 	if err != nil {
 		s.failTaskLogged(task, logw, err.Error())
 		return
@@ -225,36 +270,7 @@ func (s *Service) executeStage(ctx context.Context, task *store.Task) {
 	h := envToSSHHost(rc.env)
 	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
 
-	// The results files (when configured) are fetched in separate short
-	// sessions so their bytes are stored verbatim alongside the stage log —
-	// one artifact per file, counts summed across all of them.
-	var counts struct{ total, failed, skipped int }
-	var artifacts []store.ArtifactInput
-	for _, path := range stage.Results.Clean() {
-		if res.ExitCode < 0 {
-			break // the session never ran; nothing to fetch
-		}
-		content, fetchErr := s.fetchResultsFile(ctx, h, rc, path)
-		switch {
-		case fetchErr != nil:
-			fmt.Fprintf(logw, "results file %s: %v; skipping counts\n", path, fetchErr)
-		case content == "":
-			fmt.Fprintf(logw, "results file %s: not found or empty; skipping counts\n", path)
-		default:
-			artifacts = append(artifacts, store.ArtifactInput{
-				Kind:    store.ArtifactKindResults,
-				Name:    path,
-				Content: content,
-			})
-			if total, failed, skipped, ok := ExtractGTestCounts([]byte(content)); ok {
-				counts.total += total
-				counts.failed += failed
-				counts.skipped += skipped
-			} else {
-				fmt.Fprintf(logw, "results file %s: unrecognized format; storing file without counts\n", path)
-			}
-		}
-	}
+	counts, artifacts := s.fetchStageResults(ctx, h, rc, task, stage.Workdir, stage.Results, logw, res.ExitCode)
 
 	logw.Flush() // the summary is derived from the persisted log
 
@@ -280,18 +296,137 @@ func (s *Service) executeStage(ctx context.Context, task *store.Task) {
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
 }
 
+// executeCase implements one regression case sub-task: run the preset's
+// command in its workdir, fetch the results files, then record the case
+// row (and its artifacts) into the run's aggregated regression result.
+func (s *Service) executeCase(ctx context.Context, task *store.Task) {
+	rc, ok := s.loadRootContext(task)
+	if !ok {
+		return
+	}
+	var stage CaseStageConfig
+	if err := json.Unmarshal([]byte(task.Config), &stage); err != nil {
+		s.failTask(task, fmt.Sprintf("case config snapshot is invalid: %v", err))
+		return
+	}
+
+	logw := NewLogWriter(s.Store, task.ID)
+	defer logw.Close()
+
+	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, stage.Case, stage.Timeout))
+	if err != nil {
+		s.failTaskLogged(task, logw, err.Error())
+		return
+	}
+
+	h := envToSSHHost(rc.env)
+	started := time.Now()
+	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
+	finished := time.Now()
+
+	// The case's results files (when configured) are fetched back verbatim
+	// and attached to the case row.
+	_, artifacts := s.fetchStageResults(ctx, h, rc, task, stage.Workdir, stage.Results, logw, res.ExitCode)
+
+	logw.Flush() // the case message is derived from the persisted log
+	output := s.readLogTail(task.ID)
+
+	status := store.StatusFailed
+	if res.ExitCode == 0 {
+		status = store.StatusPassed
+	}
+	message := ExtractSummary(output, res.ExitCode)
+	if res.ExitCode < 0 {
+		message = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
+	}
+
+	// The case row first (the run aggregates over its cases), then the
+	// artifacts linked to it.
+	_, caseRow, err := s.Store.UpsertCaseResult(&store.CaseResultInput{
+		EnvironmentID:  task.EnvironmentID,
+		CommitID:       task.CommitID,
+		TaskID:         task.ID,
+		Name:           stage.Case,
+		Status:         status,
+		Message:        message,
+		DurationMillis: float64(finished.Sub(started).Milliseconds()),
+		StartedAt:      started,
+		FinishedAt:     finished,
+	})
+	if err != nil {
+		log.Printf("runner: task %d: record case %s: %v", task.ID, stage.Case, err)
+	} else if len(artifacts) > 0 {
+		for i := range artifacts {
+			artifacts[i].CaseID = caseRow.ID
+		}
+		if err := s.Store.AppendRunArtifacts(task.EnvironmentID, task.CommitID, store.RunKindRegression, artifacts); err != nil {
+			log.Printf("runner: task %d: append case artifacts: %v", task.ID, err)
+		}
+	}
+
+	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
+}
+
+// stageCounts is the aggregate a stage's results files yielded.
+type stageCounts struct{ total, failed, skipped int }
+
+// fetchStageResults reads the configured results files back from the remote
+// host and returns the summed aggregate counts plus the artifact inputs
+// (run-scoped for unit; the caller links them to the case). Relative paths
+// resolve against the stage's workdir. Nothing runs when the session never
+// started (exitCode < 0).
+func (s *Service) fetchStageResults(ctx context.Context, h SSHHost, rc *rootContext, task *store.Task,
+	workdir string, results ResultsPaths, logw *LogWriter, exitCode int) (stageCounts, []store.ArtifactInput) {
+	var counts stageCounts
+	var artifacts []store.ArtifactInput
+	for _, path := range results.Clean() {
+		if exitCode < 0 {
+			break // the session never ran; nothing to fetch
+		}
+		content, fetchErr := s.fetchResultsFile(ctx, h, rc, path, workdir)
+		switch {
+		case fetchErr != nil:
+			fmt.Fprintf(logw, "results file %s: %v; skipping counts\n", path, fetchErr)
+		case content == "":
+			fmt.Fprintf(logw, "results file %s: not found or empty; skipping counts\n", path)
+		default:
+			artifacts = append(artifacts, store.ArtifactInput{
+				Kind:    store.ArtifactKindResults,
+				Name:    path,
+				Content: content,
+			})
+			if total, failed, skipped, ok := ExtractGTestCounts([]byte(content)); ok {
+				counts.total += total
+				counts.failed += failed
+				counts.skipped += skipped
+			} else {
+				fmt.Fprintf(logw, "results file %s: unrecognized format; storing file without counts\n", path)
+			}
+		}
+	}
+	return counts, artifacts
+}
+
 // fetchResultsFile cats the configured results file on the remote host
-// (relative paths resolve against the code directory), capped at
-// maxArtifactBytes. The fetched bytes are written to the returned string;
-// a scratch writer swallows the (unexpected) stderr without polluting the
-// stage log.
-func (s *Service) fetchResultsFile(ctx context.Context, h SSHHost, rc *rootContext, path string) (string, error) {
+// (relative paths resolve against the stage's workdir, falling back to the
+// code directory), capped at maxArtifactBytes. The fetched bytes are
+// written to the returned string; a scratch writer swallows the
+// (unexpected) stderr without polluting the stage log.
+func (s *Service) fetchResultsFile(ctx context.Context, h SSHHost, rc *rootContext, path, workdir string) (string, error) {
 	var script strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&script, format+"\n", args...) }
 	w("#!/usr/bin/env bash")
 	w("set -uo pipefail")
 	if !strings.HasPrefix(path, "/") {
-		w("cd %s || exit 1", shellExpand(rc.remoteCodeDir()))
+		wd := strings.TrimSpace(workdir)
+		switch {
+		case wd == "":
+			w("cd %s || exit 1", shellExpand(rc.remoteCodeDir()))
+		case strings.HasPrefix(wd, "/"):
+			w("cd %s || exit 1", shellExpand(wd))
+		default:
+			w("cd %s || exit 1", shellExpand(rc.remoteCodeDir()+"/"+strings.TrimPrefix(wd, "/")))
+		}
 	}
 	w("head -c %d %s", maxArtifactBytes, shq(path))
 	var out, errOut strings.Builder

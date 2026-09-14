@@ -38,9 +38,12 @@ type TestArtifact struct {
 }
 
 // ArtifactInput is an artifact as submitted with a run report (the runner's
-// fetched results file, or a future regression reporter's log/series file).
+// fetched results file, or a per-case log/series file). CaseID links the
+// artifact to one case row (per-case results files); 0 attaches it to the
+// run as a whole.
 type ArtifactInput struct {
 	Kind    string // ArtifactKindResults / ArtifactKindLog / ArtifactKindSeries
+	CaseID  int64
 	Name    string
 	Content string
 }
@@ -72,6 +75,7 @@ func replaceRunArtifacts(tx *gorm.DB, runID int64, artifacts []ArtifactInput) er
 	for i := range artifacts {
 		a := TestArtifact{
 			RunID:   runID,
+			CaseID:  artifacts[i].CaseID,
 			Kind:    artifacts[i].Kind,
 			Name:    artifacts[i].Name,
 			Content: artifacts[i].Content,

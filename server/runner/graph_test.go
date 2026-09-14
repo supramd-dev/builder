@@ -16,9 +16,9 @@ func sampleEntry() *MergedEntry {
 		Env:     map[string]string{"CC": "gcc"},
 		Build:   BuildConfig{Generator: GeneratorCMake, CMakeFlags: "-DX=1", Threads: 4},
 		Unit:    &EnvConfig{Command: "ctest -L unit", Timeout: 100},
-		Regression: &EnvConfig{
-			Command: "python3 run.py",
-			Timeout: 200,
+		Regression: []RegressionCase{
+			{Name: "heat", Command: "python3 run_heat.py", Timeout: 200},
+			{Name: "poisson", Command: "python3 run_poisson.py", Timeout: 0},
 		},
 	}
 }
@@ -28,14 +28,21 @@ func TestBuildTaskGraphShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 4 {
-		t.Fatalf("want 4 nodes (clone, build, unit, regression), got %d", len(tasks))
+	if len(tasks) != 5 { // clone, build, unit, regression:heat, regression:poisson
+		t.Fatalf("want 5 nodes (clone, build, unit, 2 cases), got %d", len(tasks))
 	}
-	wantKinds := []string{store.TaskKindClone, store.TaskKindBuild, store.TaskKindUnit, store.TaskKindRegression}
+	wantKinds := []string{
+		store.TaskKindClone, store.TaskKindBuild, store.TaskKindUnit,
+		store.TaskKindRegression, store.TaskKindRegression,
+	}
 	for i, kind := range wantKinds {
 		if tasks[i].Kind != kind {
 			t.Errorf("node %d kind: want %s, got %s", i, kind, tasks[i].Kind)
 		}
+	}
+	// Case nodes are named after their presets.
+	if tasks[3].Name != "regression: heat" || tasks[4].Name != "regression: poisson" {
+		t.Errorf("case node names: %q %q", tasks[3].Name, tasks[4].Name)
 	}
 	// clone has no dependencies: the root is a container, not a gate (it
 	// only reaches a terminal state once every sub-task has).
@@ -46,8 +53,8 @@ func TestBuildTaskGraphShape(t *testing.T) {
 	if len(tasks[1].Deps) != 1 || tasks[1].Deps[0] != store.TaskSubPlaceholderBase+0 {
 		t.Errorf("build deps: %v", tasks[1].Deps)
 	}
-	// unit/regression depend on build (index 1).
-	for _, i := range []int{2, 3} {
+	// unit and both cases depend on build (index 1).
+	for _, i := range []int{2, 3, 4} {
 		if len(tasks[i].Deps) != 1 || tasks[i].Deps[0] != store.TaskSubPlaceholderBase+1 {
 			t.Errorf("node %d deps: %v", i, tasks[i].Deps)
 		}
@@ -65,24 +72,38 @@ func TestBuildTaskGraphShape(t *testing.T) {
 		t.Errorf("build snapshot timeout/env wrong: %+v", build)
 	}
 
-	// The unit snapshot carries the command, its own timeout and the
-	// configured results file.
+	// The unit snapshot carries the command, its own timeout and workdir.
 	var unit StageConfig
 	if err := json.Unmarshal([]byte(tasks[2].Config), &unit); err != nil {
 		t.Fatal(err)
 	}
-	if unit.Command != "ctest -L unit" || unit.Timeout != 100 {
+	if unit.Command != "ctest -L unit" || unit.Timeout != 100 || unit.Workdir != "" {
 		t.Errorf("unit snapshot wrong: %+v", unit)
 	}
-	if len(unit.Results) != 0 {
-		t.Errorf("unit snapshot results should be empty when unset: %+v", unit)
+
+	// The case snapshots carry the preset name, command and timeout.
+	var heat CaseStageConfig
+	if err := json.Unmarshal([]byte(tasks[3].Config), &heat); err != nil {
+		t.Fatal(err)
+	}
+	if heat.Case != "heat" || heat.Command != "python3 run_heat.py" || heat.Timeout != 200 {
+		t.Errorf("heat case snapshot wrong: %+v", heat)
+	}
+	var poisson CaseStageConfig
+	if err := json.Unmarshal([]byte(tasks[4].Config), &poisson); err != nil {
+		t.Fatal(err)
+	}
+	// Timeout 0 on the case falls back to the entry timeout (300).
+	if poisson.Timeout != 300 {
+		t.Errorf("poisson timeout should default to entry timeout: %d", poisson.Timeout)
 	}
 }
 
 func TestBuildTaskGraphResultsPassthrough(t *testing.T) {
 	entry := sampleEntry()
 	entry.Unit.Results = ResultsPaths{"build/test_detail.xml", "build/extra.json"}
-	entry.Regression.Results = ResultsPaths{"reg/results.json"}
+	entry.Regression[0].Results = ResultsPaths{"reg/results.json"}
+	entry.Regression[0].Workdir = "regression/heat"
 	tasks, err := BuildTaskGraph(entry)
 	if err != nil {
 		t.Fatal(err)
@@ -94,12 +115,12 @@ func TestBuildTaskGraphResultsPassthrough(t *testing.T) {
 	if len(unit.Results) != 2 || unit.Results[0] != "build/test_detail.xml" || unit.Results[1] != "build/extra.json" {
 		t.Errorf("unit results not passed through: %+v", unit)
 	}
-	var reg StageConfig
-	if err := json.Unmarshal([]byte(tasks[3].Config), &reg); err != nil {
+	var heat CaseStageConfig
+	if err := json.Unmarshal([]byte(tasks[3].Config), &heat); err != nil {
 		t.Fatal(err)
 	}
-	if len(reg.Results) != 1 || reg.Results[0] != "reg/results.json" {
-		t.Errorf("regression results not passed through: %+v", reg)
+	if len(heat.Results) != 1 || heat.Results[0] != "reg/results.json" || heat.Workdir != "regression/heat" {
+		t.Errorf("case results/workdir not passed through: %+v", heat)
 	}
 }
 
@@ -129,27 +150,55 @@ func TestBuildTaskGraphNil(t *testing.T) {
 	}
 }
 
-func TestBuildBuildScriptCMake(t *testing.T) {
+func TestBuildScriptCMake(t *testing.T) {
 	in := &ScriptInput{
 		CommitSHA: "abcdef123456",
 		EnvName:   "cpu-node",
 		EnvTags:   "cpu",
+		TaskDir:   "$HOME/.md-builder/tasks/abcdef123456",
 		CodeDir:   "$HOME/.md-builder/tasks/abcdef123456/code",
 		Entry:     sampleEntry(),
 		Timeout:   120,
 	}
-	script, err := BuildBuildScript(in)
+	script, err := BuildScript(in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
 		"set -uo pipefail",
-		`CODE="$HOME/.md-builder/tasks/abcdef123456/code"`,
-		`cd "$CODE" || exit 1`,
+		`export MD_TASK_DIR="$HOME/.md-builder/tasks/abcdef123456"`,
+		`export MD_CODE_DIR="$HOME/.md-builder/tasks/abcdef123456/code"`,
+		`cd "$MD_CODE_DIR" || exit 1`,
 		"timeout 120 cmake -DX=1 . && timeout 120 cmake --build . -j4",
+		"export CC='gcc'",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func TestBuildScriptCMakeOutOfSource(t *testing.T) {
+	in := &ScriptInput{
+		TaskDir: "$HOME/.md-builder/tasks/abcdef123456",
+		CodeDir: "$HOME/.md-builder/tasks/abcdef123456/code",
+		Entry: &MergedEntry{
+			Tags:  []string{"cpu"},
+			Build: BuildConfig{Generator: GeneratorCMake, CMakeFlags: "-DX=1", Threads: 4},
+		},
+		Workdir: "build",
+		Timeout: 120,
+	}
+	script, err := BuildScript(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`cd "$MD_CODE_DIR/build" || exit 1`,
+		`timeout 120 cmake -DX=1 "$MD_CODE_DIR" && timeout 120 cmake --build . -j4`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("out-of-source script missing %q:\n%s", want, script)
 		}
 	}
 }
@@ -159,9 +208,11 @@ func TestBuildStageScriptAndExports(t *testing.T) {
 		CommitSHA:    "abcdef123456",
 		EnvName:      "cpu-node",
 		EnvTags:      "cpu,mpi",
+		TaskDir:      "$HOME/.md-builder/tasks/abcdef123456",
 		CodeDir:      "$HOME/.md-builder/tasks/abcdef123456/code",
 		Entry:        sampleEntry(),
 		StageCommand: "ctest -L unit",
+		Workdir:      "tests/unit",
 		Timeout:      90,
 	}
 	script, err := BuildStageScript(in)
@@ -169,8 +220,9 @@ func TestBuildStageScriptAndExports(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`CODE="$HOME/.md-builder/tasks/abcdef123456/code"`,
-		`cd "$CODE" || exit 1`,
+		`export MD_TASK_DIR="$HOME/.md-builder/tasks/abcdef123456"`,
+		`export MD_CODE_DIR="$HOME/.md-builder/tasks/abcdef123456/code"`,
+		`cd "$MD_CODE_DIR/tests/unit" || exit 1`,
 		"timeout 90 bash -c 'ctest -L unit'",
 	} {
 		if !strings.Contains(script, want) {
@@ -178,7 +230,81 @@ func TestBuildStageScriptAndExports(t *testing.T) {
 		}
 	}
 
-	// The MD_* exports render deterministically (sorted env keys).
+	// The MD_* exports render deterministically (sorted env keys); the case
+	// script additionally exports MD_CASE.
+	caseIn := &ScriptInput{
+		CommitSHA:    "abcdef123456",
+		EnvName:      "cpu-node",
+		EnvTags:      "cpu,mpi",
+		TaskDir:      "$HOME/.md-builder/tasks/abcdef123456",
+		CodeDir:      "$HOME/.md-builder/tasks/abcdef123456/code",
+		Entry:        sampleEntry(),
+		StageCommand: "python3 run_heat.py",
+		CaseName:     "heat",
+		Timeout:      90,
+	}
+	caseScript, err := BuildStageScript(caseIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"export MD_COMMIT='abcdef123456'",
+		"export MD_ENV_NAME='cpu-node'",
+		"export MD_ENV_TAGS='cpu,mpi'",
+		`export MD_TASK_DIR="$HOME/.md-builder/tasks/abcdef123456"`,
+		`export MD_CODE_DIR="$HOME/.md-builder/tasks/abcdef123456/code"`,
+		"export MD_CASE='heat'",
+		"export CC='gcc'",
+	} {
+		if !strings.Contains(caseScript, want) {
+			t.Errorf("case script exports missing %q:\n%s", want, caseScript)
+		}
+	}
+}
+
+func TestBuildStageScriptEnvScriptSource(t *testing.T) {
+	in := &ScriptInput{
+		TaskDir:       "$HOME/.md-builder/tasks/abcdef123456",
+		CodeDir:       "$HOME/.md-builder/tasks/abcdef123456/code",
+		Entry:         sampleEntry(),
+		StageCommand:  "ctest -L unit",
+		EnvScriptName: "md-builder-env-abc123def456.sh",
+		Timeout:       90,
+	}
+	script, err := BuildStageScript(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`ENV_SCRIPT="$MD_TASK_DIR/md-builder-env-abc123def456.sh"`,
+		`if [ -f "$ENV_SCRIPT" ]; then . "$ENV_SCRIPT"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("env-script block missing %q:\n%s", want, script)
+		}
+	}
+
+	// Without an env script the block is absent.
+	in.EnvScriptName = ""
+	script, err = BuildStageScript(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, "ENV_SCRIPT") {
+		t.Errorf("no env script configured: block should be absent:\n%s", script)
+	}
+}
+
+// ExportEnv keeps its exported signature for tests (the preamble helper).
+func TestExportEnvShape(t *testing.T) {
+	in := &ScriptInput{
+		CommitSHA: "abcdef123456",
+		EnvName:   "cpu-node",
+		EnvTags:   "cpu,mpi",
+		TaskDir:   "$HOME/.md-builder/tasks/abcdef123456",
+		CodeDir:   "$HOME/.md-builder/tasks/abcdef123456/code",
+		Entry:     sampleEntry(),
+	}
 	var b strings.Builder
 	ExportEnv(func(f string, args ...any) { fmt.Fprintf(&b, f, args...) }, in)
 	out := b.String()
@@ -186,6 +312,7 @@ func TestBuildStageScriptAndExports(t *testing.T) {
 		"export MD_COMMIT='abcdef123456'",
 		"export MD_ENV_NAME='cpu-node'",
 		"export MD_ENV_TAGS='cpu,mpi'",
+		`export MD_TASK_DIR="$HOME/.md-builder/tasks/abcdef123456"`,
 		`export MD_CODE_DIR="$HOME/.md-builder/tasks/abcdef123456/code"`,
 		"export CC='gcc'",
 	} {

@@ -6,10 +6,14 @@ On every push the server reads it at the pushed commit (git show
 <sha>:md-builder.yaml), so matrix changes take effect on the commit
 that introduces them.
 
+A fully commented, copy-paste starting point lives in the md-builder
+source tree as
+[md-builder.example.yaml](https://github.com/genshen/md-builder/blob/main/md-builder.example.yaml).
+
 ## Full example
 
 ```yaml
-version: 1
+version: 2
 
 # Optional defaults, merged into every matrix entry (maps merge key-wise,
 # scalars are overridden per entry).
@@ -21,6 +25,20 @@ defaults:
     generator: cmake            # cmake (default) | script
     cmake_flags: "-DCMAKE_BUILD_TYPE=Release"
     threads: 8                  # cmake --build -j
+
+# Regression presets: shared test cases referenced by matrix entries.
+# Each preset is one regression case — how to run it and which results
+# files to collect.
+presets:
+  heat:
+    description: Heat equation convergence
+    command: "python3 run_heat.py"
+    workdir: "regression/heat"        # relative to the code directory
+    timeout: 1800
+    results: "out.xml"
+  poisson:
+    command: "python3 run_poisson.py --nt 200"
+    results: ["poisson.xml", "poisson.log"]
 
 # Required: the matrix. Each entry names the tags an environment must
 # carry; dispatch picks one matching enabled environment per entry.
@@ -37,9 +55,7 @@ matrix:
       timeout: 600
       results: "build/test_detail.xml"   # googletest results file
     regression:
-      command: "python3 run_regression.py --suite full"
-      timeout: 1800
-
+      use: [heat, poisson]          # which presets run here (empty = all)
   - tags: [gpu, cuda]
     env:
       CC: clang
@@ -48,24 +64,29 @@ matrix:
       command: "./build.sh --cuda"
     unit:
       command: "ctest --test-dir build -L unit"
+    regression:
+      disable: [heat]           # run every preset except heat
 ```
 
 ## Field reference
 
 | Field                        | Required | Description                                                        |
 |------------------------------|----------|--------------------------------------------------------------------|
-| version                      | yes      | Must be 1.                                                          |
+| version                      | yes      | Must be 2.                                                          |
 | defaults                     | no       | Entry-level defaults: timeout, env, build, unit, regression.        |
+| presets                      | no       | Shared regression cases (see below).                               |
 | matrix                       | yes      | One or more entries; each entry needs tags and at least one stage.  |
 | matrix[].tags                | yes      | Tags selecting the environment (see [Test environments](#/docs/environments)). Must be unique per entry. |
 | matrix[].description         | no       | Human-readable label.                                               |
 | matrix[].timeout             | no       | Default stage timeout in seconds (default 3600, capped at 14400).   |
 | matrix[].env                 | no       | Extra environment variables exported for all stages.                |
 | matrix[].build               | no       | Build stage (see below).                                            |
-| matrix[].unit                | no       | Unit test stage: at least command; optional timeout, results.        |
-| matrix[].regression          | no       | Regression test stage: at least command; optional timeout, results.  |
-| unit.command / regression.command | yes (per stage) | Shell command run in the code directory.                    |
-| unit.results / regression.results | no | Results file path (or list of paths) the runner fetches back (see Results files). |
+| matrix[].unit                | no       | Unit test stage: at least command; optional workdir, timeout, results. |
+| matrix[].regression          | no       | Regression selection: use and/or disable referencing presets.       |
+| unit.command                 | yes (per stage) | Shell command (see Built-in environment variables).          |
+| unit.workdir                 | no       | Directory the command runs in (see Working directories).            |
+| unit.results                 | no       | Results file path (or list) the runner fetches back (see Results files). |
+| unit.timeout                 | no       | Stage timeout overriding defaults.                                  |
 
 The build stage has two forms:
 
@@ -74,49 +95,137 @@ The build stage has two forms:
 | build.generator     | cmake (default) or script.                                                  |
 | build.cmake_flags   | Flags passed to cmake (cmake generator only).                               |
 | build.threads       | Parallel build jobs (default 8).                                            |
-
+| build.workdir       | Build directory (cmake: out-of-source build, script: command workdir).      |
 | build.command       | Shell command (script generator only).                                      |
 
 Every timeout bounds the stage via the remote `timeout` command; the
 whole SSH session gets the sum of the stage timeouts plus 15 minutes of
 slack.
 
-## Validation rules
+## Regression presets
 
-- `version` must be 1; `matrix` must be non-empty.
-- Each entry needs non-empty `tags` and at least one of `unit` /
-  `regression`, each with a `command`.
-- Duplicate tag sets across entries are rejected.
-- `build.generator` must be `cmake` or `script`; `script` requires
-  `build.command`.
+Regression tests are defined **once**, in the top-level `presets` map,
+and referenced from each matrix entry — the same case does not need to
+be repeated per platform:
 
-Invalid YAML fails dispatch: the push is recorded and
-`dispatchError` surfaces in the webhook response (see
-[Webhooks](#/docs/webhooks)), but no tasks are created.
+```yaml
+presets:
+  heat:
+    description: Heat equation convergence
+    command: "python3 run_heat.py"
+    workdir: "regression/heat"
+    timeout: 1800
+    results: "out.xml"
+```
 
-## What the runner does
+| Field                | Required | Description                                                   |
+|----------------------|----------|---------------------------------------------------------------|
+| presets.<name>.command | yes    | Shell command running the case.                              |
+| presets.<name>.description | no | Human-readable label.                                         |
+| presets.<name>.workdir | no    | Directory the command runs in (see Working directories).     |
+| presets.<name>.timeout | no     | Case timeout (falls back to defaults/matrix timeout).        |
+| presets.<name>.results | no     | Results files to collect (see Results files).                |
 
-Each matched entry becomes a task graph (see
-[Runner and tasks](#/docs/runner-strategy)); the stages run in order:
+Each referenced preset becomes its **own sub-task** in the task graph
+(“regression: heat”), which runs after the build with its own timeout,
+its own log and its own case row in the regression run. The cases run
+independently — one failing case does not stop the others — and the
+matrix cell aggregates all cases of the entry.
 
-1. **clone**: the *server* clones the code repository at the pushed
-   commit, packs the working tree into a tarball and extracts it on the
-   environment into ~/.md-builder/tasks/<sha12>/code.
-2. **build**: a generated script exports MD_COMMIT, MD_ENV_NAME,
-   MD_ENV_TAGS, MD_CODE_DIR (`…/code`) plus the yaml env variables, then
-   runs the build stage in the code directory.
-3. If the build (or the clone) fails, the dependent test stages are
-   marked skipped and the dashboard shows ✗.
-4. **unit / regression**: the stage command runs in the code directory,
-   each under its timeout; the full output streams into the task log and
-   the outcome is stored as a test run.
+A matrix entry selects presets with `regression.use` and
+`regression.disable`:
+
+- **use**: the list of preset names to run. When omitted or empty,
+  **every preset runs** (in name order).
+- **disable**: preset names removed from the used set — handy with an
+  empty use (“everything except poisson”).
+- Names in `use` or `disable` that do not exist in `presets` fail
+  validation.
+
+### Pass / fail of a case
+
+A case's verdict is its **command's exit status** — nothing else:
+
+- **exit 0 → passed**; any non-zero exit → failed. That includes the
+  timeout (the runner wraps the command in the remote `timeout`, which
+  exits 124) and a failed `cd` into the workdir.
+- An SSH-level failure (host unreachable, session dropped) fails the
+  case the same way, with the transport error as the case's note.
+- The preset's `results` files **never flip the verdict** — they are
+  stored as artifacts of the case (per-case detail parsed in the
+  browser). This differs from the unit stage, where results files
+  reporting failed cases also fail the run.
+- An `MD-BUILDER-SUMMARY:` line only becomes the case's note; it cannot
+  turn a non-zero exit into a pass.
+
+The entry's regression run (the matrix cell) aggregates its cases: any
+failed case → the cell shows ✗, every case passed → ✓. Cases run
+independently — one failing case does not stop the others. When the
+clone or build fails, every case is recorded as **skipped** (⤼) with the
+upstream error as its note.
+
+## Built-in environment variables
+
+Every stage script (build, unit, regression case) exports these before
+the stage command runs — the commands can rely on them:
+
+| Variable       | Meaning                                                        |
+|----------------|----------------------------------------------------------------|
+| MD_COMMIT      | Full commit SHA under test.                                     |
+| MD_ENV_NAME    | Name of the environment the stage runs on.                      |
+| MD_ENV_TAGS    | Comma-separated tags of that environment.                       |
+| MD_TASK_DIR    | Remote task directory (~/.md-builder/tasks/<sha12>).            |
+| MD_CODE_DIR    | Code directory — MD_TASK_DIR/code.                              |
+| MD_CASE        | Case name (regression case scripts only).                       |
+
+The yaml `env` variables are exported right after the MD_* variables,
+so a command can override neither (they are exported earlier — see the
+env setup script below for the override point).
+
+```yaml
+unit:
+  command: "$MD_CODE_DIR/build/unit_tests --gtest_output=xml:$MD_CODE_DIR/build/test_detail.xml"
+```
+
+## Environment setup script
+
+Each **environment** (configured on the site, not in the yaml) may
+carry an env setup script — the script content is edited in the
+environment settings form and stored on the server. On dispatch it is
+written to the task dir as `md-builder-env-<hash>.sh` and **sourced by
+every stage script** before the stage command (module loads, compiler
+exports, virtualenv activation, …):
+
+- **present**: every stage script runs `. md-builder-env-<hash>.sh`
+  first; anything the script exports is visible to the build, unit and
+  regression commands (it runs last in the preamble, so it can even
+  override the built-in and yaml variables).
+- **absent**: the stage scripts log a warning and run without it.
+
+See [Test environments](#/docs/environments).
+
+## Working directories
+
+`build.workdir`, `unit.workdir` and `presets.<name>.workdir` set the
+directory a stage command runs in:
+
+- **empty** (default): the code directory (MD_CODE_DIR).
+- **relative**: MD_CODE_DIR/<workdir> — the directory must exist in the
+  repository (the runner does not create it).
+- **absolute**: used as-is on the remote host.
+
+For the cmake build generator a workdir turns the build into an
+**out-of-source build**: cmake is configured in the workdir with the
+source directory as argument and built there, leaving the source tree
+clean.
 
 ## Results files
 
-A stage command may produce structured results files — by default the
-googletest XML (`--gtest_output=xml:`) or JSON (`--gtest_output=json:`)
-format, which the test binary writes itself. A run can produce several of
-them; `results` accepts a single path or a list:
+A stage command (unit or a regression preset) may produce structured
+results files — by default the googletest XML (`--gtest_output=xml:`)
+or JSON (`--gtest_output=json:`) format, which the test binary writes
+itself. A run can produce several of them; `results` accepts a single
+path or a list:
 
 ```yaml
 unit:
@@ -142,12 +251,52 @@ The per-case list — name, status, duration, failure message — is parsed
 interprets individual cases. Every stored results file is parsed by its
 default name/format; files that are missing or unrecognized are skipped
 (noted in the stage log) and do not fail the run — it still records the
-command's exit status. Paths are relative to the code directory (absolute
-paths work too).
+command's exit status. Paths are relative to the stage's working
+directory (absolute paths work too).
 
-The same field works for regression stages, and regression reports may
-additionally submit per-case rows (status, error value, duration) through
-the reporting API.
+For the **unit** stage the parsed counts matter to the verdict: failed
+cases in the results file fail the run even when the command exited zero
+(ctest-style wrappers can swallow the test binary's exit code). For
+**regression presets** the files are display-only — the case's verdict is
+its command's exit status (see Pass / fail of a case).
+
+## Validation rules
+
+- `version` must be 2; `matrix` must be non-empty.
+- Each entry needs non-empty `tags` and at least one of `unit` /
+  `regression` (or its presets expansion), with a `command`.
+- Duplicate tag sets across entries are rejected.
+- `build.generator` must be `cmake` or `script`; `script` requires
+  `build.command`.
+- Every preset needs a `command`; names in `use` / `disable` must
+  reference defined presets.
+
+Invalid YAML fails dispatch: the push is recorded and
+`dispatchError` surfaces in the webhook response (see
+[Webhooks](#/docs/webhooks)), but no tasks are created.
+
+## What the runner does
+
+Each matched entry becomes a task graph (see
+[Runner and tasks](#/docs/runner-strategy)); the stages run in order:
+
+1. **clone**: the *server* clones the code repository at the pushed
+   commit, packs the working tree into a tarball and extracts it on the
+   environment into ~/.md-builder/tasks/<sha12>/code. The env setup
+   script is written into the task dir.
+2. **build**: a generated script exports MD_COMMIT, MD_ENV_NAME,
+   MD_ENV_TAGS, MD_TASK_DIR, MD_CODE_DIR plus the yaml env variables,
+   sources the env setup script (if any) and runs the build stage in
+   its working directory.
+3. If the build (or the clone) fails, the dependent test stages are
+   marked skipped and the dashboard shows ✗.
+4. **unit**: the stage command runs in its working directory under its
+   timeout; the full output streams into the task log and the outcome
+   is stored as a test run.
+5. **regression: one sub-task per selected preset** — each case command
+   runs after the build (exporting MD_CASE), collects its own results
+   files and records its own case row; the matrix cell shows the
+   aggregate across cases.
 
 ## Custom summaries
 
@@ -159,4 +308,5 @@ MD-BUILDER-SUMMARY: all 8 tests passed, max rel err 3.2e-7
 
 The text after the prefix becomes the run summary shown on the dashboard.
 Without it, the summary is the exit code plus the last lines of the stage
-log (truncated to 500 characters).
+log (truncated to 500 characters). For a regression case the summary
+line becomes the case row's note.

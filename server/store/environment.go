@@ -1,7 +1,10 @@
 package store
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -20,8 +23,24 @@ type TestEnvironment struct {
 	Tags        string `gorm:"not null;default:''"` // comma-separated, lowercased labels (e.g. "cpu,mpi")
 	Description string `gorm:"not null;default:''"`
 	Enabled     bool   `gorm:"not null;default:true"` // whether jobs may be dispatched here
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// EnvScript is the bash environment-setup script sourced before every
+	// stage (build/unit/regression case) on this environment: module loads,
+	// compiler exports, environment-specific paths. Empty = no script (the
+	// runner warns in the task log). Not secret — returned in full by the API.
+	EnvScript  string `gorm:"type:text;not null;default:''"`
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// EnvScriptName derives the on-host file name for the environment script:
+// md-builder-env-<hash12>.sh, hashed from the content so edits are visible
+// in logs and stale files never collide.
+func (e *TestEnvironment) EnvScriptName() string {
+	if strings.TrimSpace(e.EnvScript) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(e.EnvScript))
+	return fmt.Sprintf("md-builder-env-%s.sh", hex.EncodeToString(sum[:])[:12])
 }
 
 // ErrMissingOwner is returned when a record requires an owning user.

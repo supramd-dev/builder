@@ -166,6 +166,12 @@ POST /api/jobs/manual
 | PUT    | `/api/environments/{id}`        | 更新单个环境                                  |
 | DELETE | `/api/environments/{id}`        | 删除单个环境(及其测试运行)                  |
 | POST   | `/api/environments/{id}/test`   | SSH 连通性检查                                |
+
+环境的创建/更新请求体包含 `name`、`host`、`username`、`privateKey`、
+`tags`、`description`、`enabled` 和 `envScript`(在每个阶段之前被
+source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。与私钥
+不同(更新时留空 = 保留原值),`envScript` 省略或留空即清除脚本。两个
+字段的回显行为也不同:私钥永不回显,环境脚本会原样返回(它不是机密)。
 | PUT    | `/api/environments/{id}/enabled`| 启用/停用(`{"enabled": bool}`)               |
 | POST   | `/api/environments/{id}/exec`   | 运行 shell 命令(`{"command": string}`)       |
 | POST   | `/api/environments/{id}/script` | 运行脚本(`{"language", "script"}`)           |

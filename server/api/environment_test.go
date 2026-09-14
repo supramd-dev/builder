@@ -159,6 +159,37 @@ func TestEnvironmentAPIFlow(t *testing.T) {
 		t.Fatalf("get: expected 200, got %d", rec.Code)
 	}
 
+	// --- env script round-trips verbatim through the API ---
+	envScript := "#!/usr/bin/env bash\nmodule load gcc/13\nexport CXX=g++\n"
+	rec = authed(aliceCookie, http.MethodPut, fmt.Sprintf("/api/environments/%d", created.ID), fmt.Sprintf(
+		`{"name":"cpu-node-2","host":"10.0.0.9","username":"runner2","privateKey":"","description":"renamed","envScript":%q}`, envScript))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update with envScript: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"envScript":"`) {
+		t.Fatalf("update response should echo envScript: %s", rec.Body.String())
+	}
+	rec = authed(aliceCookie, http.MethodGet, fmt.Sprintf("/api/environments/%d", created.ID), "")
+	var withScript struct {
+		EnvScript string `json:"envScript"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &withScript); err != nil {
+		t.Fatalf("decode get: %v", err)
+	}
+	if withScript.EnvScript != envScript {
+		t.Fatalf("envScript should round-trip verbatim, got %q", withScript.EnvScript)
+	}
+	// An update that omits envScript clears it (it is not secret, so there
+	// is no "keep the old one" special case like the private key).
+	rec = authed(aliceCookie, http.MethodPut, fmt.Sprintf("/api/environments/%d", created.ID),
+		`{"name":"cpu-node-2","host":"10.0.0.9","username":"runner2","privateKey":"","description":"renamed"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update without envScript: expected 200, got %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "module load") {
+		t.Fatalf("envScript should be cleared when omitted: %s", rec.Body.String())
+	}
+
 	// --- foreign access is 404 ---
 	rec = authed(bobCookie, http.MethodGet, fmt.Sprintf("/api/environments/%d", created.ID), "")
 	if rec.Code != http.StatusNotFound {

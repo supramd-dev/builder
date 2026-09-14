@@ -16,7 +16,7 @@ import (
 )
 
 // ConfigVersion is the only supported md-builder.yaml schema version.
-const ConfigVersion = 1
+const ConfigVersion = 2
 
 // MaxTimeoutSeconds is the hard per-command timeout cap (4h).
 const MaxTimeoutSeconds = 4 * 3600
@@ -33,11 +33,13 @@ const (
 	GeneratorScript = "script"
 )
 
-// EnvConfig is a test stage: unit or regression.
+// EnvConfig is a test stage: unit, or one regression preset.
 type EnvConfig struct {
-	Command string       `yaml:"command" json:"command"`
-	Timeout int          `yaml:"timeout,omitempty" json:"timeout,omitempty"` // seconds; 0 = use default
-	Results ResultsPaths `yaml:"results,omitempty" json:"results,omitempty"` // googletest results files (XML/JSON) produced by the command
+	Command     string       `yaml:"command" json:"command"`
+	Description string       `yaml:"description,omitempty" json:"description,omitempty"` // preset label (regression presets)
+	Workdir     string       `yaml:"workdir,omitempty" json:"workdir,omitempty"`        // relative to the code dir; empty = code dir
+	Timeout     int          `yaml:"timeout,omitempty" json:"timeout,omitempty"`        // seconds; 0 = use default
+	Results     ResultsPaths `yaml:"results,omitempty" json:"results,omitempty"`        // googletest results files (XML/JSON) produced by the command
 }
 
 // ResultsPaths is a list of results file paths. A run (or a single case) can
@@ -125,6 +127,15 @@ type BuildConfig struct {
 	CMakeFlags string `yaml:"cmake_flags,omitempty" json:"cmake_flags,omitempty"`
 	Threads    int    `yaml:"threads,omitempty" json:"threads,omitempty"`
 	Command    string `yaml:"command,omitempty" json:"command,omitempty"` // generator: script
+	Workdir    string `yaml:"workdir,omitempty" json:"workdir,omitempty"` // build directory; empty = in-source (code dir)
+}
+
+// RegressionUse is the matrix entry's regression stanza: it references
+// presets by name instead of inlining commands. Empty use = every preset;
+// disable drops named cases from the used set.
+type RegressionUse struct {
+	Use     []string `yaml:"use,omitempty" json:"use,omitempty"`
+	Disable []string `yaml:"disable,omitempty" json:"disable,omitempty"`
 }
 
 // EntryConfig is one matrix entry, before defaults are merged in.
@@ -134,15 +145,28 @@ type EntryConfig struct {
 	Env         map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	Build       BuildConfig       `yaml:"build,omitempty" json:"build,omitempty"`
 	Unit        *EnvConfig        `yaml:"unit,omitempty" json:"unit,omitempty"`
-	Regression  *EnvConfig        `yaml:"regression,omitempty" json:"regression,omitempty"`
+	Regression  *RegressionUse   `yaml:"regression,omitempty" json:"regression,omitempty"`
 	Timeout     int               `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
 // rawConfig mirrors md-builder.yaml before defaults merging.
 type rawConfig struct {
-	Version  int           `yaml:"version"`
-	Defaults *EntryConfig  `yaml:"defaults,omitempty"`
-	Matrix   []EntryConfig `yaml:"matrix"`
+	Version  int                     `yaml:"version"`
+	Defaults *EntryConfig            `yaml:"defaults,omitempty"`
+	Presets  map[string]*EnvConfig   `yaml:"presets,omitempty"` // shared regression cases
+	Matrix   []EntryConfig           `yaml:"matrix"`
+}
+
+// RegressionCase is one effective regression case of a merged entry: a
+// preset selected by the entry's use/disable, resolved to its final command,
+// workdir, timeout and results files. Each becomes its own sub-task.
+type RegressionCase struct {
+	Name        string       `json:"name"` // preset name
+	Description string       `json:"description,omitempty"`
+	Command     string       `json:"command"`
+	Workdir     string       `json:"workdir,omitempty"`
+	Timeout     int          `json:"timeout"`
+	Results     ResultsPaths `json:"results,omitempty"`
 }
 
 // MergedEntry is an entry with defaults applied — the config snapshot stored
@@ -153,7 +177,7 @@ type MergedEntry struct {
 	Env         map[string]string `json:"env,omitempty"`
 	Build       BuildConfig       `json:"build"`
 	Unit        *EnvConfig        `json:"unit,omitempty"`
-	Regression  *EnvConfig        `json:"regression,omitempty"`
+	Regression  []RegressionCase `json:"regression,omitempty"`
 	Timeout     int               `json:"timeout"`
 }
 
@@ -170,6 +194,11 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 	if len(raw.Matrix) == 0 {
 		return nil, fmt.Errorf("md-builder.yaml: matrix must not be empty")
 	}
+	for name, p := range raw.Presets {
+		if p == nil || strings.TrimSpace(p.Command) == "" {
+			return nil, fmt.Errorf("md-builder.yaml: preset %q needs a command", name)
+		}
+	}
 
 	seen := map[string]bool{}
 	out := make([]MergedEntry, 0, len(raw.Matrix))
@@ -183,9 +212,6 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		}
 		if entry.Unit != nil && strings.TrimSpace(entry.Unit.Command) == "" {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d has unit without a command", i+1)
-		}
-		if entry.Regression != nil && strings.TrimSpace(entry.Regression.Command) == "" {
-			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d has regression without a command", i+1)
 		}
 		if entry.Build.Generator != "" && entry.Build.Generator != GeneratorCMake && entry.Build.Generator != GeneratorScript {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d: build.generator must be cmake or script", i+1)
@@ -201,33 +227,99 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		}
 		seen[key] = true
 
-		out = append(out, mergeDefaults(raw.Defaults, &entry, tags))
+		merged, err := mergeDefaults(raw.Defaults, raw.Presets, &entry, tags)
+		if err != nil {
+			return nil, err
+		}
+		if merged.Unit == nil && len(merged.Regression) == 0 {
+			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d resolves to no stage (unit missing, regression selects no preset)", i+1)
+		}
+		out = append(out, merged)
 	}
 	return out, nil
 }
 
+// expandRegression resolves the entry's use/disable against the presets into
+// the effective ordered case list. Empty use selects every preset (name
+// order for determinism); disable drops named cases from the selection.
+func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, defaults *EntryConfig) ([]RegressionCase, error) {
+	if use == nil {
+		return nil, nil
+	}
+
+	names := use.Use
+	if len(names) == 0 {
+		for name := range presets {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+	}
+	disabled := map[string]bool{}
+	for _, d := range use.Disable {
+		disabled[strings.TrimSpace(d)] = true
+	}
+
+	var cases []RegressionCase
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if disabled[name] {
+			continue
+		}
+		p, ok := presets[name]
+		if !ok || p == nil {
+			return nil, fmt.Errorf("md-builder.yaml: regression.use references unknown preset %q", name)
+		}
+		c := RegressionCase{
+			Name:        name,
+			Description: p.Description,
+			Command:     p.Command,
+			Workdir:     p.Workdir,
+			Timeout:     p.Timeout,
+			Results:     p.Results,
+		}
+		if c.Timeout == 0 {
+			c.Timeout = defaultTimeoutFor(defaults, nil)
+		}
+		if c.Timeout > MaxTimeoutSeconds {
+			c.Timeout = MaxTimeoutSeconds
+		}
+		cases = append(cases, c)
+	}
+	// disable entries naming a preset NOT in the used set are still valid
+	// (they are no-ops), but a disable of an unknown name hints at a typo.
+	for _, d := range use.Disable {
+		d = strings.TrimSpace(d)
+		if _, ok := presets[d]; !ok && d != "" {
+			return nil, fmt.Errorf("md-builder.yaml: regression.disable references unknown preset %q", d)
+		}
+	}
+	return cases, nil
+}
+
 // mergeDefaults applies defaults onto an entry: env maps are merged key-wise
-// (entry wins), scalars are taken from the entry when set.
-func mergeDefaults(defaults, entry *EntryConfig, tags []string) MergedEntry {
+// (entry wins), scalars are taken from the entry when set, and the
+// regression use/disable is expanded against the presets.
+func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *EntryConfig, tags []string) (MergedEntry, error) {
 	m := MergedEntry{
 		Tags:        tags,
 		Description: entry.Description,
 		Unit:        entry.Unit,
-		Regression:  entry.Regression,
 	}
 	if m.Unit != nil {
 		c := *m.Unit
 		m.Unit = &c
 	}
-	if m.Regression != nil {
-		c := *m.Regression
-		m.Regression = &c
+	if m.Unit != nil && m.Unit.Workdir == "" && defaults != nil && defaults.Unit != nil {
+		m.Unit.Workdir = defaults.Unit.Workdir
 	}
 	if m.Unit != nil && m.Unit.Timeout == 0 {
 		m.Unit.Timeout = defaultTimeoutFor(defaults, entry)
 	}
-	if m.Regression != nil && m.Regression.Timeout == 0 {
-		m.Regression.Timeout = defaultTimeoutFor(defaults, entry)
+
+	var err error
+	m.Regression, err = expandRegression(presets, entry.Regression, defaults)
+	if err != nil {
+		return MergedEntry{}, err
 	}
 
 	m.Env = map[string]string{}
@@ -259,6 +351,9 @@ func mergeDefaults(defaults, entry *EntryConfig, tags []string) MergedEntry {
 		if build.Threads == 0 {
 			build.Threads = defaults.Build.Threads
 		}
+		if build.Workdir == "" {
+			build.Workdir = defaults.Build.Workdir
+		}
 	}
 	if build.Generator == "" {
 		build.Generator = GeneratorCMake
@@ -267,7 +362,7 @@ func mergeDefaults(defaults, entry *EntryConfig, tags []string) MergedEntry {
 		build.Threads = DefaultBuildThreads
 	}
 	m.Build = build
-	return m
+	return m, nil
 }
 
 // defaultTimeoutFor resolves the per-command timeout (seconds): entry's own
@@ -292,12 +387,13 @@ func defaultTimeoutFor(defaults *EntryConfig, entry *EntryConfig) int {
 
 // resolveStageTimeout picks the stage's own timeout, else the entry/defaults
 // top-level timeout, else the package default, capped at the hard max.
-func resolveStageTimeout(stage *EnvConfig, entry *MergedEntry) int {
-	if stage != nil && stage.Timeout > 0 {
-		if stage.Timeout > MaxTimeoutSeconds {
+// sec is the stage's own resolved timeout (0 = fall through).
+func resolveStageTimeout(sec int, entry *MergedEntry) int {
+	if sec > 0 {
+		if sec > MaxTimeoutSeconds {
 			return MaxTimeoutSeconds
 		}
-		return stage.Timeout
+		return sec
 	}
 	t := entry.Timeout
 	if t == 0 {

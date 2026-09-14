@@ -42,6 +42,7 @@ export default function CaseDetailPage({ runId, caseResult, onBack }: Props) {
   }, [runId])
 
   const failed = caseResult.status === 'failed'
+  const skipped = caseResult.status === 'skipped'
   const url = repo ? commitUrl(repo.repoUrl ?? undefined, repo.sha ?? '') : ''
   return (
     <div>
@@ -82,8 +83,12 @@ export default function CaseDetailPage({ runId, caseResult, onBack }: Props) {
         <dl className="dash-summary">
           <div>
             <dt>Status</dt>
-            <dd className={failed ? 'text-danger' : 'text-success'}>
-              {failed ? '✗ failed' : '✓ passed'}
+            <dd
+              className={
+                failed ? 'text-danger' : skipped ? 'text-warn' : 'text-success'
+              }
+            >
+              {failed ? '✗ failed' : skipped ? '⤼ skipped' : '✓ passed'}
             </dd>
           </div>
           <div>

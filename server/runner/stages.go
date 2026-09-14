@@ -17,24 +17,36 @@ type CloneConfig struct{}
 
 // BuildStageConfig is the build sub-task snapshot.
 type BuildStageConfig struct {
-	Generator  string            `json:"generator"` // "cmake" | "script"
+	Generator  string            `json:"generator"`           // "cmake" | "script"
 	CMakeFlags string            `json:"cmakeFlags,omitempty"`
 	Threads    int               `json:"threads,omitempty"`
 	Command    string            `json:"command,omitempty"` // generator: script
+	Workdir    string            `json:"workdir,omitempty"` // build directory (empty = in-source)
 	Timeout    int               `json:"timeout"`           // seconds
 	Env        map[string]string `json:"env,omitempty"`     // exported for the stage
 }
 
-// StageConfig is a test sub-task snapshot (unit / regression / future
-// performance stages): one command with its timeout, the environment and the
-// optional results files the runner fetches back after the command ran (a
-// run can produce several; legacy snapshots store a single string and still
-// decode).
+// StageConfig is the unit sub-task snapshot: one command with its workdir,
+// timeout, environment and the optional results files the runner fetches
+// back after the command ran (a run can produce several; legacy snapshots
+// store a single string and still decode).
 type StageConfig struct {
 	Command string            `json:"command"`
+	Workdir string            `json:"workdir,omitempty"`
 	Timeout int               `json:"timeout"` // seconds
 	Env     map[string]string `json:"env,omitempty"`
-	Results ResultsPaths      `json:"results,omitempty"` // paths relative to the code dir (or absolute)
+	Results ResultsPaths      `json:"results,omitempty"` // paths relative to the workdir (or absolute)
+}
+
+// CaseStageConfig is one regression case sub-task snapshot: the preset name
+// plus the resolved command, workdir, timeout and results files.
+type CaseStageConfig struct {
+	Case    string            `json:"case"` // preset name
+	Command string            `json:"command"`
+	Workdir string            `json:"workdir,omitempty"`
+	Timeout int               `json:"timeout"`
+	Env     map[string]string `json:"env,omitempty"`
+	Results ResultsPaths      `json:"results,omitempty"`
 }
 
 // RootConfig is the root task's Config snapshot: the merged matrix entry.

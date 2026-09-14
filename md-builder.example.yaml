@@ -1,0 +1,205 @@
+# md-builder.yaml — example configuration (schema version 2)
+#
+# Copy this file to the ROOT of the code repository under test and adapt
+# it. md-builder reads it at every pushed commit, so matrix changes take
+# effect on the commit that introduces them (no server restart).
+#
+# Full field reference: the "Test matrix (YAML)" page in the server's
+# built-in Documentation, or frontend/docs/test-matrix.md in the source
+# tree.
+#
+# How a push is dispatched:
+#   1. Every matrix entry's tags are matched against the registered test
+#      environments; one matching environment runs the entry.
+#   2. Each entry becomes a task graph:
+#        clone → build → unit (optional)
+#                       └→ regression: <preset>  (one sub-task per case)
+#   3. Every stage runs on the remote environment over SSH, inside the
+#      working directory you configure (workdir), with the environment
+#      setup script of that environment sourced first (module loads,
+#      compiler exports — configured per environment on the server, not
+#      here).
+
+version: 2
+
+# ---------------------------------------------------------------------------
+# defaults (optional)
+# ---------------------------------------------------------------------------
+# Merged into every matrix entry below: maps (env) merge key-wise — the
+# entry wins on conflicts —, scalars are taken from the entry when set
+# there, otherwise the value here applies.
+defaults:
+  # Fallback timeout for any stage that does not set its own (seconds).
+  # Hard cap: 14400 (4 h).
+  timeout: 3600
+
+  # Environment variables exported by every stage script of every entry
+  # (before the environment's own setup script runs, so that script can
+  # still override them).
+  env:
+    OMP_NUM_THREADS: "4"
+
+  # Build defaults for every entry (same fields as matrix[].build).
+  build:
+    generator: cmake                 # cmake (default) | script
+    cmake_flags: "-DCMAKE_BUILD_TYPE=Release"
+    threads: 8                       # cmake --build -j
+
+# ---------------------------------------------------------------------------
+# presets (optional) — shared regression test cases
+# ---------------------------------------------------------------------------
+# Regression cases are defined ONCE here and referenced by matrix entries
+# with regression.use / regression.disable. Each referenced preset runs
+# as its own sub-task ("regression: <name>") after the build, with its
+# own workdir, timeout and results files; all cases of an entry share one
+# regression run on the dashboard (one cell, per-case rows inside).
+#
+# Fields per preset:
+#   command     (required) shell command running the case
+#   description (optional) human-readable label
+#   workdir     (optional) directory the command runs in, relative to the
+#                          code root; absolute paths pass through as-is
+#   timeout     (optional) seconds; falls back to defaults.timeout
+#   results     (optional) results file(s) fetched back — a single path
+#                          or a list; googletest XML/JSON by default
+presets:
+  heat:
+    description: Heat equation convergence (2nd-order scheme)
+    command: "./run_heat.py --nt 500 --tol 1e-5"
+    workdir: "regression/heat"       # runs in <code>/regression/heat
+    timeout: 1800
+    results: "out.xml"               # relative to the preset workdir
+
+  poisson:
+    description: Poisson solver, multigrid vs direct
+    command: "python3 run_poisson.py --grid 128"
+    workdir: "regression/poisson"
+    results: ["poisson.xml", "poisson.log"]   # several files: a list
+
+  eos-table:
+    description: Equation-of-state table spot checks
+    command: "./check_eos $MD_CODE_DIR/data/eos/*.tbl"
+    timeout: 600
+    # No workdir: runs in the code root. No results: pass/fail by exit
+    # code plus the MD-BUILDER-SUMMARY line only.
+
+# ---------------------------------------------------------------------------
+# matrix (required)
+# ---------------------------------------------------------------------------
+# One entry per environment slot: tags select the environment (superset
+# match — an environment tagged [cpu, mpi] satisfies [cpu]; among several
+# matches the one with fewest extra tags wins). Tag sets must be unique
+# across entries.
+matrix:
+  # --- entry 1: the plain CPU build -------------------------------------
+  - tags: [cpu]
+    description: Generic CPU build (gcc)
+
+    # Extra variables for this entry's stages only, merged over
+    # defaults.env.
+    env:
+      CC: gcc
+      CXX: g++
+
+    build:
+      # generator defaults to cmake; flags/threads inherit defaults.build
+      # and can be extended per entry:
+      cmake_flags: "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF"
+      # workdir: "build"              # set this for an out-of-source
+                                      # build: cmake is configured and
+                                      # built in <code>/build with the
+                                      # source tree as argument
+
+    unit:
+      # Required. Runs in the code dir by default (workdir below moves
+      # it). Everything a bash line can do, including && chains.
+      command: "ctest --test-dir build -L unit --output-on-failure"
+      timeout: 600                    # overrides defaults.timeout
+      results: "build/test_detail.xml"   # googletest XML written by the
+                                         # test binary itself
+      # workdir: "tests"              # optional, like presets
+
+    regression:
+      # Which presets run on this entry:
+      #   use      — the named presets (omit/empty = ALL presets,
+      #              name-sorted)
+      #   disable  — presets removed from that selection ("everything
+      #              except …")
+      # Names must exist in presets above, otherwise dispatch fails.
+      use: [heat, poisson]
+
+  # --- entry 2: MPI cluster build ----------------------------------------
+  - tags: [cpu, mpi]
+    description: MPI parallel build
+
+    env:
+      CC: mpicc
+      CXX: mpicxx
+      OMP_NUM_THREADS: "1"            # overrides defaults.env
+
+    build:
+      cmake_flags: "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=ON"
+      threads: 16
+      workdir: "build"                # out-of-source build
+
+    unit:
+      command: "mpirun -np 4 ./build/unit_tests --gtest_output=xml:build/unit_mpi.xml"
+      results: "build/unit_mpi.xml"
+
+    regression:
+      use: [heat, poisson, eos-table]
+
+  # --- entry 3: GPU build, script-based ----------------------------------
+  - tags: [gpu, cuda]
+    description: CUDA build (non-cmake project)
+
+    env:
+      CC: nvcc
+
+    build:
+      generator: script               # custom command instead of cmake
+      command: "./build.sh --cuda -j8"
+      workdir: "build"                # the script runs in <code>/build
+
+    unit:
+      command: "./build/unit_tests --gtest_output=xml:build/unit_cuda.xml"
+      results: "build/unit_cuda.xml"
+
+    regression:
+      # Every preset except heat (which needs a CPU-only reference run):
+      disable: [heat]
+
+# ---------------------------------------------------------------------------
+# Notes on the environment the commands run in
+# ---------------------------------------------------------------------------
+# Built-in variables exported by every stage script (before your env
+# script runs — the env script may override them):
+#   MD_COMMIT    full commit SHA under test
+#   MD_ENV_NAME  name of the environment this stage runs on
+#   MD_ENV_TAGS  comma-separated tags of that environment
+#   MD_TASK_DIR  ~/.md-builder/tasks/<sha12> on the environment
+#   MD_CODE_DIR  $MD_TASK_DIR/code — the extracted source tree
+#   MD_CASE      preset name (regression case sub-tasks only)
+#
+# The environment setup script (md-builder-env-*.sh) is configured PER
+# ENVIRONMENT on the server (Runner Envs → edit), not in this file: it is
+# written into the task dir at clone time and sourced by every stage
+# script before the stage command. Use it for module loads and compiler
+# exports. An environment without one simply logs a warning.
+#
+# Results files (results) are fetched back after the command, stored
+# verbatim as run artifacts, and their aggregate counts feed the matrix
+# cell; the per-case detail is parsed in the browser. Paths are relative
+# to the stage's workdir. Missing or unrecognized files are skipped with
+# a note in the stage log — they never fail the run by themselves.
+#
+# Custom summaries: any stage command may print one line
+#   MD-BUILDER-SUMMARY: <text>
+# and <text> becomes the run summary (for regression presets, the case
+# row's note). Without it the summary is the exit code plus the log tail.
+#
+# Verdicts: a regression case passes iff its command exits 0 — timeout
+# (exit 124), SSH failure or any other non-zero exit fails the case, and
+# its results files never flip the verdict (they are display-only). The
+# unit stage additionally fails when its results files report failed
+# cases. The matrix cell aggregates an entry's cases: any failed case → ✗.

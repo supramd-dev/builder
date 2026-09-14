@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -134,7 +135,13 @@ func newExecuteFixture(t *testing.T, yaml string) (*Service, *store.Store, *fake
 	return svc, s, exec, cloner, claimed
 }
 
-const execYAML = `version: 1
+const execYAML = `version: 2
+presets:
+  heat:
+    command: "python3 run_heat.py"
+    timeout: 120
+  poisson:
+    command: "python3 run_poisson.py"
 matrix:
   - tags: [cpu]
     build:
@@ -143,8 +150,7 @@ matrix:
       command: "ctest -L unit"
       timeout: 60
     regression:
-      command: "python3 run.py"
-      timeout: 120
+      use: [heat, poisson]
 `
 
 // runUntilStage drives the fixture's claimed clone task, then claims and
@@ -172,7 +178,7 @@ func runUntilStage(t *testing.T, svc *Service, s *store.Store, cloneTask *store.
 	}
 }
 
-const resultsYAML = `version: 1
+const resultsYAML = `version: 2
 matrix:
   - tags: [cpu]
     build:
@@ -182,7 +188,7 @@ matrix:
       results: "build/test_detail.xml"
 `
 
-const multiResultsYAML = `version: 1
+const multiResultsYAML = `version: 2
 matrix:
   - tags: [cpu]
     unit:
@@ -190,6 +196,25 @@ matrix:
       results:
         - "build/test_detail.xml"
         - "build/extra_results.json"
+`
+
+// caseResultsYAML exercises the per-case regression path: two presets with
+// their own results files.
+const caseResultsYAML = `version: 2
+presets:
+  heat:
+    command: "python3 run_heat.py"
+    workdir: "regression/heat"
+    results: "out.xml"
+  poisson:
+    command: "python3 run_poisson.py"
+matrix:
+  - tags: [cpu]
+    unit:
+      command: "ctest -L unit"
+    regression:
+      use: [heat]
+      disable: [poisson]
 `
 
 // TestExecuteStageFetchesResultsFile: a configured results file is fetched,
@@ -387,25 +412,31 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 		t.Errorf("build run wrong: %+v", bRun)
 	}
 
-	// 3. unit + regression (both claimable, build done)
-	for _, want := range []string{store.TaskKindUnit, store.TaskKindRegression} {
+	// 3. unit + both regression cases (claimable once build is done)
+	claimOrder := map[string]int{}
+	for i := 0; i < 3; i++ {
 		st, err := s.ClaimReadyTask()
 		if err != nil || st == nil {
-			t.Fatalf("claim %s: %v %v", want, st, err)
+			t.Fatalf("claim stage %d: %v %v", i, st, err)
 		}
-		if st.Kind != want {
-			t.Fatalf("want %s, got %s", want, st.Kind)
+		if st.Kind != store.TaskKindUnit && st.Kind != store.TaskKindRegression {
+			t.Fatalf("want a stage, got %s", st.Kind)
 		}
 		if err := svc.ExecuteTask(ctx, st); err != nil {
 			t.Fatal(err)
 		}
 		got, _ := s.GetTask(st.ID)
 		if got.Status != store.TaskDone {
-			t.Errorf("%s should be done: %+v", want, got)
+			t.Errorf("%s should be done: %+v", st.Kind, got)
 		}
+		claimOrder[st.Name]++
+	}
+	if claimOrder["unit tests"] != 1 || claimOrder["regression: heat"] != 1 || claimOrder["regression: poisson"] != 1 {
+		t.Errorf("stage set wrong: %+v", claimOrder)
 	}
 
-	// Both test runs recorded as passed.
+	// Both test runs recorded as passed; the regression run aggregates the
+	// two case rows.
 	envs := []int64{cloneTask.EnvironmentID}
 	commits := []int64{cloneTask.CommitID}
 	runs, err := s.FindRunsByCommits(store.RunKindUnit, envs, commits)
@@ -419,21 +450,36 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression, envs, commits)
 	reg, ok := regRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
 	if !ok || reg.Status != store.StatusPassed {
-		t.Errorf("regression run wrong: %+v", reg)
+		t.Fatalf("regression run wrong: %+v", reg)
+	}
+	if reg.Total != 2 || reg.Passed != 2 || reg.Failed != 0 {
+		t.Errorf("regression run should aggregate 2 passed cases: %+v", reg)
+	}
+	cases, _ := s.ListCaseResults(reg.ID)
+	if len(cases) != 2 || cases[0].Name != "heat" || cases[1].Name != "poisson" {
+		t.Errorf("case rows wrong: %+v", cases)
 	}
 
 	// The build script used the configured cmake flags; the stage scripts
 	// used their commands under timeout. Only build and the stages go
 	// through RunScript (the clone uploads a tar instead), so scripts[0] is
-	// the build, [1] and [2] are the stages.
-	if len(exec.scripts) != 3 {
-		t.Fatalf("want 3 scripts, got %d", len(exec.scripts))
+	// the build, [1..3] are the unit and case scripts.
+	if len(exec.scripts) != 4 {
+		t.Fatalf("want 4 scripts, got %d", len(exec.scripts))
 	}
 	if !strings.Contains(exec.scripts[0], "cmake -DEXEC=1 .") {
 		t.Errorf("build script wrong:\n%s", exec.scripts[0])
 	}
 	if !strings.Contains(exec.scripts[1], "timeout 60 bash -c 'ctest -L unit'") {
 		t.Errorf("unit script wrong:\n%s", exec.scripts[1])
+	}
+	// The case scripts carry their preset command and MD_CASE export.
+	joined := strings.Join(exec.scripts[2:], "\n---\n")
+	if !strings.Contains(joined, "timeout 120 bash -c 'python3 run_heat.py'") {
+		t.Errorf("heat case script wrong:\n%s", joined)
+	}
+	if !strings.Contains(joined, "export MD_CASE='heat'") || !strings.Contains(joined, "export MD_CASE='poisson'") {
+		t.Errorf("case scripts should export MD_CASE:\n%s", joined)
 	}
 }
 
@@ -478,6 +524,29 @@ func TestExecuteCloneFailureSkipsDownstream(t *testing.T) {
 	unit, ok := runs[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
 	if !ok || unit.Status != store.StatusFailed || !strings.Contains(unit.Summary, "skipped") {
 		t.Errorf("skipped unit run wrong: %+v", unit)
+	}
+	// The regression cases were recorded as skipped case rows; the run
+	// summary surfaces as "skipped:" (the dashboard translation).
+	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression,
+		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
+	reg, ok := regRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
+	if !ok {
+		t.Fatal("skipped regression run missing")
+	}
+	if reg.Total != 2 || reg.Passed != 0 || reg.Failed != 0 || reg.Skipped != 2 {
+		t.Errorf("skipped case aggregate wrong: %+v", reg)
+	}
+	if !strings.HasPrefix(reg.Summary, "skipped:") {
+		t.Errorf("all-skipped run summary should start with skipped:: %q", reg.Summary)
+	}
+	cases, _ := s.ListCaseResults(reg.ID)
+	if len(cases) != 2 {
+		t.Fatalf("want 2 skipped case rows, got %d", len(cases))
+	}
+	for _, c := range cases {
+		if c.Status != store.StatusSkipped {
+			t.Errorf("case %s should be skipped: %s", c.Name, c.Status)
+		}
 	}
 }
 
@@ -613,8 +682,8 @@ func TestRedeployRebuildsGraph(t *testing.T) {
 	}
 
 	subs, _ := s.ListSubTasks(root.ID)
-	if len(subs) != 4 {
-		t.Fatalf("redeploy should rebuild 4 sub-tasks, got %d", len(subs))
+	if len(subs) != 5 { // clone, build, unit, 2 regression cases
+		t.Fatalf("redeploy should rebuild 5 sub-tasks, got %d", len(subs))
 	}
 	for _, sub := range subs {
 		if sub.Status != store.TaskPending {
@@ -629,4 +698,197 @@ func TestRedeployRebuildsGraph(t *testing.T) {
 		t.Error("old clone task row should be gone")
 	}
 	_ = cloner
+}
+
+// TestExecuteCaseRunsPreset: a regression case sub-task runs the preset
+// command in its workdir, sources the env script, fetches its results file
+// and records a case row with a case-scoped artifact.
+func TestExecuteCaseRunsPreset(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, caseResultsYAML)
+	// The case command's script carries the preset command; the fetch
+	// script cats the results path.
+	exec.outcome["out.xml"] = 0
+	exec.output["out.xml"] = sampleGTestXML
+
+	ctx := context.Background()
+	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
+		t.Fatal(err)
+	}
+	// The clone log warns: the fixture environment has no env script.
+	logs, _ := s.ReadTaskLogs(cloneTask.ID, 0)
+	var cloneLog string
+	for _, l := range logs {
+		cloneLog += l.Content
+	}
+	if !strings.Contains(cloneLog, "no env script") {
+		t.Errorf("clone log should warn about the missing env script: %q", cloneLog)
+	}
+	// No env-script write ran (only the clone tar upload uses CloneAndUpload;
+	// RunScript calls: none for the script write).
+	for _, sc := range exec.scripts {
+		if strings.Contains(sc, "md-builder-env-") && strings.Contains(sc, "cat >") {
+			t.Errorf("env script write should be skipped without a configured script")
+		}
+	}
+
+	// build, unit, then the heat case.
+	for i := 0; i < 3; i++ {
+		st, err := s.ClaimReadyTask()
+		if err != nil || st == nil {
+			t.Fatalf("claim %d: %v %v", i, st, err)
+		}
+		if err := svc.ExecuteTask(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The heat case ran with its workdir and only poisson stayed out.
+	caseScriptSeen, unitOnly := false, false
+	for _, sc := range exec.scripts {
+		if strings.Contains(sc, "run_heat.py") {
+			caseScriptSeen = true
+			if !strings.Contains(sc, `cd "$MD_CODE_DIR/regression/heat"`) {
+				t.Errorf("heat case should cd into its workdir:\n%s", sc)
+			}
+		}
+		if strings.Contains(sc, "run_poisson.py") {
+			t.Errorf("poisson was disabled: its script should not run")
+		}
+		if strings.Contains(sc, "ctest -L unit") {
+			unitOnly = true
+		}
+	}
+	if !caseScriptSeen || !unitOnly {
+		t.Errorf("scripts seen wrong: case=%v unit=%v", caseScriptSeen, unitOnly)
+	}
+
+	// The regression run carries exactly the heat case, passed, with its
+	// artifact linked to the case row.
+	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression,
+		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
+	reg, ok := regRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
+	if !ok {
+		t.Fatal("regression run missing")
+	}
+	if reg.Total != 1 || reg.Passed != 1 || reg.Status != store.StatusPassed {
+		t.Errorf("case run aggregate wrong: %+v", reg)
+	}
+	cases, _ := s.ListCaseResults(reg.ID)
+	if len(cases) != 1 || cases[0].Name != "heat" || cases[0].Status != store.StatusPassed {
+		t.Fatalf("case rows wrong: %+v", cases)
+	}
+	if cases[0].DurationMillis < 0 || cases[0].Message == "" {
+		t.Errorf("case row should carry duration and message: %+v", cases[0])
+	}
+	artifacts, _ := s.ListRunArtifacts(reg.ID)
+	if len(artifacts) != 1 || artifacts[0].Name != "out.xml" || artifacts[0].CaseID != cases[0].ID {
+		t.Errorf("case artifact should link the case row: %+v (case %d)", artifacts, cases[0].ID)
+	}
+}
+
+// TestExecuteCaseFailureMarksRunFailed: one failing case fails the
+// aggregated regression run while the other case stays passed.
+func TestExecuteCaseFailureMarksRunFailed(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
+	exec.outcome["python3 run_heat.py"] = 1
+	exec.output["python3 run_heat.py"] = "max rel err 1e-3 exceeds 1e-5\nMD-BUILDER-SUMMARY: heat: err 1e-3 > 1e-5\n"
+
+	ctx := context.Background()
+	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ { // build + unit + 2 cases
+		st, err := s.ClaimReadyTask()
+		if err != nil || st == nil {
+			t.Fatalf("claim %d: %v %v", i, st, err)
+		}
+		if err := svc.ExecuteTask(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression,
+		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
+	reg, ok := regRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
+	if !ok {
+		t.Fatal("regression run missing")
+	}
+	if reg.Total != 2 || reg.Passed != 1 || reg.Failed != 1 || reg.Status != store.StatusFailed {
+		t.Errorf("mixed case aggregate wrong: %+v", reg)
+	}
+	if !strings.Contains(reg.Summary, "heat") {
+		t.Errorf("summary should name the failing case: %q", reg.Summary)
+	}
+	// The failed heat case row carries the MD-BUILDER-SUMMARY message.
+	cases, _ := s.ListCaseResults(reg.ID)
+	for _, c := range cases {
+		if c.Name == "heat" {
+			if c.Status != store.StatusFailed || !strings.Contains(c.Message, "err 1e-3") {
+				t.Errorf("heat case row wrong: %+v", c)
+			}
+		}
+	}
+}
+
+// TestExecuteEnvScriptWrittenAndSourced: a configured environment script
+// is written by the clone task and sourced by every later stage script.
+func TestExecuteEnvScriptWrittenAndSourced(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
+	// Configure an env script on the environment.
+	env, err := s.GetEnvironmentAny(cloneTask.EnvironmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.EnvScript = "module load gcc/13\nexport CXX=g++\n"
+	if err := s.UpdateEnvironment(env); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
+		t.Fatal(err)
+	}
+	logs, _ := s.ReadTaskLogs(cloneTask.ID, 0)
+	var cloneLog string
+	for _, l := range logs {
+		cloneLog += l.Content
+	}
+	if !strings.Contains(cloneLog, "wrote env script md-builder-env-") {
+		t.Errorf("clone log should record the env script write: %q", cloneLog)
+	}
+
+	// One recorded script is the env-script body itself (the RunScript stdin).
+	writeSeen := false
+	for _, sc := range exec.scripts {
+		if strings.Contains(sc, "environment setup script of") && strings.Contains(sc, "module load gcc/13") && strings.Contains(sc, "export CXX=g++") {
+			writeSeen = true
+		}
+	}
+	if !writeSeen {
+		t.Errorf("env script write script not seen: %+v", exec.scripts)
+	}
+
+	// Run the rest; every stage script sources the env script.
+	for i := 0; i < 4; i++ {
+		st, err := s.ClaimReadyTask()
+		if err != nil || st == nil {
+			t.Fatalf("claim %d: %v %v", i, st, err)
+		}
+		if err := svc.ExecuteTask(ctx, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	name := env.EnvScriptName()
+	if name == "" {
+		t.Fatal("EnvScriptName should be derived from the content")
+	}
+	sourced := 0
+	for _, sc := range exec.scripts {
+		if strings.Contains(sc, fmt.Sprintf(". \"$ENV_SCRIPT\"")) && strings.Contains(sc, name) {
+			sourced++
+		}
+	}
+	if sourced != 4 { // build + unit + 2 cases
+		t.Errorf("every stage script should source the env script: %d of %d", sourced, len(exec.scripts))
+	}
 }

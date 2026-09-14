@@ -12,6 +12,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"os"
 	"strconv"
@@ -140,9 +141,12 @@ func (s *Service) runClaimed(ctx context.Context, task *store.Task) {
 	}
 }
 
-// recordSkippedRuns writes failed TestRun rows for skipped unit/regression
-// sub-tasks so the dashboard shows ✗ instead of a blank cell. (A skipped
-// build needs no row: the failed build itself records its own run.)
+// recordSkippedRuns writes the dashboard rows for skipped unit/regression
+// sub-tasks so the matrix shows ✗ instead of a blank cell. A skipped unit
+// stage gets a failed run; a skipped regression case sub-task gets a
+// skipped case row (the run aggregates them — all-skipped surfaces as the
+// "skipped:" summary the dashboard translates). A skipped build needs no
+// row: the failed build itself records its own run.
 func (s *Service) recordSkippedRuns(failed *store.Task) {
 	subs, err := s.Store.ListSubTasks(failed.RootID)
 	if err != nil {
@@ -150,21 +154,38 @@ func (s *Service) recordSkippedRuns(failed *store.Task) {
 	}
 	for i := range subs {
 		sub := &subs[i]
-		if sub.Kind != store.TaskKindUnit && sub.Kind != store.TaskKindRegression {
-			continue
-		}
 		if sub.Status != store.TaskSkipped {
 			continue
 		}
-		input := &store.RunInput{
-			EnvironmentID: sub.EnvironmentID,
-			CommitID:      sub.CommitID,
-			Kind:          sub.Kind,
-			Status:        store.StatusFailed,
-			Summary:       "skipped: " + failed.Name + " failed: " + failed.Error,
-		}
-		if _, err := s.Store.UpsertTestRun(input); err != nil {
-			log.Printf("runner: task %d: record skipped %s run: %v", sub.ID, sub.Kind, err)
+		switch sub.Kind {
+		case store.TaskKindUnit:
+			input := &store.RunInput{
+				EnvironmentID: sub.EnvironmentID,
+				CommitID:      sub.CommitID,
+				Kind:          sub.Kind,
+				Status:        store.StatusFailed,
+				Summary:       "skipped: " + failed.Name + " failed: " + failed.Error,
+			}
+			if _, err := s.Store.UpsertTestRun(input); err != nil {
+				log.Printf("runner: task %d: record skipped %s run: %v", sub.ID, sub.Kind, err)
+			}
+		case store.TaskKindRegression:
+			// The preset name comes from the sub-task's case snapshot.
+			name := sub.Name
+			var stage CaseStageConfig
+			if err := json.Unmarshal([]byte(sub.Config), &stage); err == nil && stage.Case != "" {
+				name = stage.Case
+			}
+			if _, _, err := s.Store.UpsertCaseResult(&store.CaseResultInput{
+				EnvironmentID: sub.EnvironmentID,
+				CommitID:      sub.CommitID,
+				TaskID:        sub.ID,
+				Name:          name,
+				Status:        store.StatusSkipped,
+				Message:       failed.Name + " failed: " + failed.Error,
+			}); err != nil {
+				log.Printf("runner: task %d: record skipped case %s: %v", sub.ID, name, err)
+			}
 		}
 	}
 }

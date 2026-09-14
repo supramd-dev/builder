@@ -15,7 +15,8 @@ import (
 )
 
 // environmentJSON is the wire representation of a test environment. The
-// private key is accepted on create/update but never returned in full.
+// private key is accepted on create/update but never returned in full; the
+// env script is not secret and round-trips verbatim.
 type environmentJSON struct {
 	ID          int64    `json:"id"`
 	Name        string   `json:"name"`
@@ -24,6 +25,7 @@ type environmentJSON struct {
 	PrivateKey  string   `json:"privateKey,omitempty"` // write-only; masked on read
 	Tags        []string `json:"tags"`                 // lowercased labels used for job matching
 	Description string   `json:"description"`
+	EnvScript   string   `json:"envScript"` // bash setup script sourced before every stage
 	Enabled     bool     `json:"enabled"`
 	CreatedAt   string   `json:"createdAt"`
 	UpdatedAt   string   `json:"updatedAt"`
@@ -37,6 +39,7 @@ type environmentInput struct {
 	PrivateKey  string   `json:"privateKey"`
 	Tags        []string `json:"tags"`
 	Description string   `json:"description"`
+	EnvScript   string   `json:"envScript"`
 	Enabled     *bool    `json:"enabled"` // pointer so omitted means "keep current" on update
 }
 
@@ -155,6 +158,7 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request, user 
 		PrivateKey:  in.PrivateKey,
 		Tags:        strings.Join(in.Tags, ","),
 		Description: in.Description,
+		EnvScript:   in.EnvScript,
 		Enabled:     true, // new environments start enabled unless overridden below
 	}
 	if in.Enabled != nil {
@@ -207,6 +211,7 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request, user 
 	env.PrivateKey = in.PrivateKey
 	env.Tags = strings.Join(in.Tags, ",")
 	env.Description = in.Description
+	env.EnvScript = in.EnvScript
 	if in.Enabled != nil {
 		env.Enabled = *in.Enabled
 	}
@@ -429,6 +434,7 @@ func toEnvironmentJSON(env *store.TestEnvironment) environmentJSON {
 		Username:    env.Username,
 		Tags:        env.TagList(),
 		Description: env.Description,
+		EnvScript:   env.EnvScript,
 		Enabled:     env.Enabled,
 		CreatedAt:   env.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:   env.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),

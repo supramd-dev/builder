@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"gorm.io/gorm"
@@ -428,5 +429,201 @@ func TestGetArtifact(t *testing.T) {
 	}
 	if a.Content != "{}" || a.RunID != run.ID {
 		t.Fatalf("artifact wrong: %+v", a)
+	}
+}
+
+func TestUpsertCaseResultAggregatesIncrementally(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+
+	// First case creates the run.
+	run, res, err := s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "heat", Status: StatusPassed, Message: "max rel err 2e-9",
+		DurationMillis: 1200,
+	})
+	if err != nil {
+		t.Fatalf("upsert case: %v", err)
+	}
+	if res.ID == 0 || res.TestRunID != run.ID {
+		t.Fatalf("case row should link the run: %+v", res)
+	}
+	if run.Total != 1 || run.Passed != 1 || run.Status != StatusPassed {
+		t.Fatalf("first case aggregate wrong: %+v", run)
+	}
+
+	// Second case aggregates into the same run.
+	run, _, err = s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "poisson", Status: StatusFailed, Message: "err 1e-3 > 1e-5",
+	})
+	if err != nil {
+		t.Fatalf("upsert case: %v", err)
+	}
+	if run.Total != 2 || run.Passed != 1 || run.Failed != 1 || run.Status != StatusFailed {
+		t.Fatalf("two-case aggregate wrong: %+v", run)
+	}
+	if !strings.Contains(run.Summary, "poisson") {
+		t.Fatalf("summary should name the failed case: %q", run.Summary)
+	}
+
+	// A skipped case (upstream failure) counts as skipped, not failed.
+	run, _, err = s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "laplace", Status: StatusSkipped, Message: "build failed",
+	})
+	if err != nil {
+		t.Fatalf("upsert case: %v", err)
+	}
+	if run.Total != 3 || run.Skipped != 1 || run.Failed != 1 {
+		t.Fatalf("mixed aggregate wrong: %+v", run)
+	}
+
+	// Re-running one case replaces its row (no duplicate).
+	run, _, err = s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "poisson", Status: StatusPassed,
+	})
+	if err != nil {
+		t.Fatalf("upsert case: %v", err)
+	}
+	if run.Total != 3 || run.Passed != 2 || run.Failed != 0 || run.Status != StatusPassed {
+		t.Fatalf("replace-by-name aggregate wrong: %+v", run)
+	}
+	cases, err := s.ListCaseResults(run.ID)
+	if err != nil {
+		t.Fatalf("list cases: %v", err)
+	}
+	if len(cases) != 3 {
+		t.Fatalf("expected 3 case rows after replace, got %d", len(cases))
+	}
+
+	// Validation: empty name and invalid status are rejected.
+	if _, _, err := s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "", Status: StatusPassed,
+	}); err == nil {
+		t.Fatal("empty case name should error")
+	}
+	if _, _, err := s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "x", Status: "bogus",
+	}); err == nil {
+		t.Fatal("invalid case status should error")
+	}
+}
+
+func TestUpsertCaseResultAllSkipped(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+
+	run, _, err := s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "heat", Status: StatusSkipped, Message: "clone failed: no route to host",
+	})
+	if err != nil {
+		t.Fatalf("upsert case: %v", err)
+	}
+	run, _, err = s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "poisson", Status: StatusSkipped, Message: "clone failed: no route to host",
+	})
+	if err != nil {
+		t.Fatalf("upsert case: %v", err)
+	}
+	if run.Total != 2 || run.Skipped != 2 || run.Passed != 0 {
+		t.Fatalf("all-skipped aggregate wrong: %+v", run)
+	}
+	if !strings.HasPrefix(run.Summary, "skipped: ") {
+		t.Fatalf("summary should carry the skipped prefix: %q", run.Summary)
+	}
+}
+
+func TestAppendRunArtifacts(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+
+	run, heatCase, err := s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "heat", Status: StatusPassed,
+	})
+	if err != nil {
+		t.Fatalf("upsert case: %v", err)
+	}
+
+	// A run-scoped and a case-scoped artifact.
+	if err := s.AppendRunArtifacts(env.ID, commit.ID, RunKindRegression, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "all.log", Content: "log"},
+		{Kind: ArtifactKindResults, Name: "out.xml", Content: "<x/>", CaseID: heatCase.ID},
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	artifacts, err := s.ListRunArtifacts(run.ID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(artifacts) != 2 {
+		t.Fatalf("expected 2 artifacts, got %d", len(artifacts))
+	}
+	for _, a := range artifacts {
+		if a.Name == "out.xml" && a.CaseID != heatCase.ID {
+			t.Errorf("case artifact should link the case row: %+v", a)
+		}
+		if a.Name == "all.log" && a.CaseID != 0 {
+			t.Errorf("run artifact should not link a case: %+v", a)
+		}
+	}
+
+	// Unknown kind is rejected.
+	if err := s.AppendRunArtifacts(env.ID, commit.ID, RunKindRegression, []ArtifactInput{
+		{Kind: "bogus", Name: "x"},
+	}); err == nil {
+		t.Fatal("invalid artifact kind should error")
+	}
+	// Missing run is an error (ErrNotFound).
+	if err := s.AppendRunArtifacts(env.ID, commit.ID+999, RunKindUnit, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "x"},
+	}); err == nil {
+		t.Fatal("missing run should error")
+	}
+}
+
+func TestResetRegressionRun(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+
+	run, _, err := s.UpsertCaseResult(&CaseResultInput{
+		EnvironmentID: env.ID, CommitID: commit.ID,
+		Name: "heat", Status: StatusPassed,
+	})
+	if err != nil {
+		t.Fatalf("upsert case: %v", err)
+	}
+	if err := s.AppendRunArtifacts(env.ID, commit.ID, RunKindRegression, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "out.xml", Content: "<x/>"},
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	if err := s.ResetRegressionRun(env.ID, commit.ID); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	got, err := s.GetTestRun(run.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Total != 0 || got.Passed != 0 || got.Summary != "" {
+		t.Fatalf("run should be reset: %+v", got)
+	}
+	if cases, _ := s.ListCaseResults(run.ID); len(cases) != 0 {
+		t.Fatalf("case rows should be gone, got %d", len(cases))
+	}
+	if artifacts, _ := s.ListRunArtifacts(run.ID); len(artifacts) != 0 {
+		t.Fatalf("artifacts should be gone, got %d", len(artifacts))
+	}
+
+	// Resetting a never-recorded run is a no-op, not an error.
+	if err := s.ResetRegressionRun(env.ID, commit.ID+999); err != nil {
+		t.Fatalf("reset missing run: %v", err)
 	}
 }

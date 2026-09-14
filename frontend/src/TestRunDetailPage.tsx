@@ -347,6 +347,8 @@ function CaseTable({
               <td>
                 {c.status === 'passed' ? (
                   <span className="text-success">✓ passed</span>
+                ) : c.status === 'skipped' ? (
+                  <span className="text-warn">⤼ skipped</span>
                 ) : (
                   <span className="text-danger">✗ failed</span>
                 )}

@@ -53,7 +53,8 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 		CMakeFlags: entry.Build.CMakeFlags,
 		Threads:    entry.Build.Threads,
 		Command:    entry.Build.Command,
-		Timeout:    resolveStageTimeout(nil, entry),
+		Workdir:    entry.Build.Workdir,
+		Timeout:    resolveStageTimeout(0, entry),
 		Env:        entry.Env,
 	})
 	if err != nil {
@@ -66,9 +67,17 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 		Deps:   []int64{store.TaskSubPlaceholderBase + 0},
 	})
 
-	// 2+: test stages, each depending on build.
+	// 2+: test stages, each depending on build. Regression expands to one
+	// sub-task per case (preset) — independent logs, parallel execution and
+	// per-case cells on the graph page.
 	if entry.Unit != nil {
-		cfg, err := stageConfig(entry, entry.Unit)
+		cfg, err := marshalJSON(StageConfig{
+			Command: entry.Unit.Command,
+			Workdir: entry.Unit.Workdir,
+			Timeout: resolveStageTimeout(entry.Unit.Timeout, entry),
+			Env:     entry.Env,
+			Results: entry.Unit.Results,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -79,14 +88,22 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 			Deps:   []int64{store.TaskSubPlaceholderBase + 1},
 		})
 	}
-	if entry.Regression != nil {
-		cfg, err := stageConfig(entry, entry.Regression)
+	for i := range entry.Regression {
+		c := &entry.Regression[i]
+		cfg, err := marshalJSON(CaseStageConfig{
+			Case:    c.Name,
+			Command: c.Command,
+			Workdir: c.Workdir,
+			Timeout: resolveStageTimeout(c.Timeout, entry),
+			Env:     entry.Env,
+			Results: c.Results,
+		})
 		if err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, GraphTask{
 			Kind:   store.TaskKindRegression,
-			Name:   "regression tests",
+			Name:   "regression: " + c.Name,
 			Config: cfg,
 			Deps:   []int64{store.TaskSubPlaceholderBase + 1},
 		})
@@ -95,16 +112,4 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 		return nil, fmt.Errorf("entry defines no stages (unit/regression/build)")
 	}
 	return tasks, nil
-}
-
-// stageConfig marshals the per-stage snapshot: command, timeout, results
-// file and the entry's environment (the script exports it).
-func stageConfig(entry *MergedEntry, stage *EnvConfig) (string, error) {
-	cfg := StageConfig{
-		Command: stage.Command,
-		Timeout: resolveStageTimeout(stage, entry),
-		Env:     entry.Env,
-		Results: stage.Results,
-	}
-	return marshalJSON(cfg)
 }

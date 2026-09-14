@@ -19,6 +19,7 @@ export default function EnvironmentForm({ existing, onSaved, onCancel }: Props) 
     username: existing?.username ?? '',
     tags: existing?.tags ?? [],
     description: existing?.description ?? '',
+    envScript: existing?.envScript ?? '',
     privateKey: '',
     enabled: existing?.enabled ?? true,
   })
@@ -129,6 +130,26 @@ export default function EnvironmentForm({ existing, onSaved, onCancel }: Props) 
           onChange={(e) => setForm({ ...form, description: e.target.value })}
           placeholder="CPU pool / MPI / GPU environment notes"
         />
+      </div>
+
+      <div className="form-group">
+        <label htmlFor="env-script">
+          Environment setup script (md-builder-env-*.sh)
+        </label>
+        <textarea
+          id="env-script"
+          className="form-control"
+          rows={5}
+          value={form.envScript}
+          onChange={(e) => setForm({ ...form, envScript: e.target.value })}
+          placeholder={'module load gcc/13\nexport CXX=g++'}
+          style={{ fontFamily: 'monospace', fontSize: '0.875rem' }}
+        />
+        <span className="text-muted">
+          Sourced before every build / unit / regression command on this
+          environment. Leave empty to skip (a warning is logged). The script
+          is written to the task dir on the remote host.
+        </span>
       </div>
 
       <div className="form-group">

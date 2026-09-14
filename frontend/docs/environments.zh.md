@@ -1,8 +1,8 @@
 # 测试环境
 
-在 **运行环境**(Runner Envs)中注册运行测试的机器:名称、SSH 主机、SSH 用户名和
-SSH 私钥。用 **Test** 验证连通性,用 **Run command** 交互式地尝试命令,
-或在机器上派发一次手动测试(见 [Runner 与任务](#/docs/runner-strategy))。
+在 **运行环境**(Runner Envs)中注册运行测试的机器:名称、SSH 主机、SSH 用户名、
+SSH 私钥,以及环境设置脚本。用 **Test** 验证连通性,用 **Run command** 交互式地
+尝试命令,或在机器上派发一次手动测试(见 [Runner 与任务](#/docs/runner-strategy))。
 
 服务器通过 SSH 连接环境以上传源码(一个 tar 流,解压到
 `~/.md-builder/tasks/<sha12>`)并运行构建/测试脚本 —— 见
@@ -32,3 +32,23 @@ SSH 私钥。用 **Test** 验证连通性,用 **Run command** 交互式地尝试
 - 每个条目只在一个环境上运行;若没有环境匹配,该条目被跳过(计入
   派发响应的 entriesSkipped,不算错误)。
 - 环境**启用**后才能接收任务;停用的环境在仪表板上保持置灰。
+
+## 环境设置脚本
+
+每个环境可以携带一段 bash **环境设置脚本**(在环境表单中编辑)。派发时
+它被写入任务目录,文件名为 `md-builder-env-<hash>.sh`(哈希由内容决定,
+因此编辑脚本会改变文件名),并且被**每个阶段脚本** —— 构建、单元测试和
+每个回归用例 —— 在阶段命令运行之前 source:
+
+```bash
+module load gcc/13 openmpi/4.1
+export CXX=mpicxx
+source /opt/profiles/intel.sh
+```
+
+用它完成 module 加载、编译器导出、virtualenv 激活 —— 阶段命令所需的
+一切环境准备。因为它在脚本导言的最后运行,甚至可以覆盖内置变量和
+yaml 变量(见[内置环境变量](#/docs/test-matrix))。
+
+没有脚本的环境也没问题:阶段脚本会记录一条警告(`env script ... not
+found`)并照常运行。

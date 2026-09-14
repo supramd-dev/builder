@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -12,6 +13,17 @@ import (
 
 	"gorm.io/gorm"
 )
+
+// countKind counts the sub-tasks of one kind (the regression case count).
+func countKind(subs []store.Task, kind string) int {
+	n := 0
+	for i := range subs {
+		if subs[i].Kind == kind {
+			n++
+		}
+	}
+	return n
+}
 
 // defaultCommits is the number of recent commits (dashboard columns) returned
 // when the client does not ask for a specific count.
@@ -359,22 +371,40 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 					store.RunKindRegression: store.TaskKindRegression,
 				}[kind]
 				for i := range graph.Subs {
-					if graph.Subs[i].Kind == taskKind {
-						sub := &graph.Subs[i]
-						st := fullStageJSON{
-							Kind:   kind,
-							TaskID: sub.ID, // the stage sub-task: its detail page has the log
-							Status: liveSubStatus(sub),
-						}
-						if st.Status == "" {
-							continue // stage not part of this graph (no run, not queued)
-						}
-						if sub.Status == store.TaskFailed {
-							st.Error = sub.Error
-						}
-						row.Stages[envID] = append(row.Stages[envID], st)
-						break
+					if graph.Subs[i].Kind != taskKind {
+						continue
 					}
+					sub := &graph.Subs[i]
+					st := fullStageJSON{
+						Kind:   kind,
+						TaskID: sub.ID, // the stage sub-task: its detail page has the log
+						Status: liveSubStatus(sub),
+					}
+					if st.Status == "" {
+						continue // stage not part of this graph (no run, not queued)
+					}
+					if sub.Status == store.TaskFailed {
+						st.Error = sub.Error
+					}
+					// Multiple regression case sub-tasks: keep the most
+					// severe state (first failing, else first active) and
+					// summarize the case count.
+					if existing := row.Stages[envID]; kind == store.RunKindRegression && len(existing) > 0 {
+						prev := &existing[len(existing)-1]
+						if st.Status == store.StatusFailed || prev.Status != store.StatusFailed {
+							if st.Status == store.StatusFailed || prev.Status == "" {
+								prev.TaskID = st.TaskID
+								prev.Status = st.Status
+								prev.Error = st.Error
+							}
+						}
+						prev.Summary = fmt.Sprintf("%d cases", countKind(graph.Subs, taskKind))
+						continue
+					}
+					if kind == store.RunKindRegression {
+						st.Summary = fmt.Sprintf("%d cases", countKind(graph.Subs, taskKind))
+					}
+					row.Stages[envID] = append(row.Stages[envID], st)
 				}
 			}
 		}
@@ -846,51 +876,72 @@ func toRunCellJSON(run *store.TestRun, status string) *runCellJSON {
 // the stage this dashboard view is about (build/unit/regression): the cell
 // mirrors that sub-task's own state — a running root with a queued unit
 // stage shows "pending" on the unit dashboard, a running build stage shows
-// "running". When the graph has no sub-task of that kind (the graph simply
-// does not include the stage — e.g. a manual dispatch with only a build
-// command), the cell is nil: the stage was never requested, so the matrix
-// shows "—" rather than inventing a failure. When the stage failed before
-// any report, the sub-task errors hint at what broke.
+// "running". Regression expands to one sub-task per case; their states are
+// aggregated (failed > running > pending > skipped > done). When the graph
+// has no sub-task of that kind (the graph simply does not include the
+// stage — e.g. a manual dispatch with only a build command), the cell is
+// nil: the stage was never requested, so the matrix shows "—" rather than
+// inventing a failure. When the stage failed before any report, the
+// sub-task errors hint at what broke.
 func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON {
-	// The sub-task whose kind matches this view (build/unit/regression).
+	// The sub-tasks whose kind matches this view (build/unit/regression).
 	stageKind := map[string]string{
 		store.RunKindBuild:      store.TaskKindBuild,
 		store.RunKindUnit:       store.TaskKindUnit,
 		store.RunKindRegression: store.TaskKindRegression,
 	}[kind]
 	cell := &runCellJSON{RunID: 0, TaskID: root.ID, Trigger: root.Trigger}
-	var status, errMsg string
-	found := false
+	var matched []store.Task
 	for i := range subs {
-		if subs[i].Kind != stageKind {
-			continue
+		if subs[i].Kind == stageKind {
+			matched = append(matched, subs[i])
 		}
-		// The stage exists: mirror its own state (pending stays pending,
-		// running stays running, failed stays failed). The root aggregate
-		// must not bleed into a per-stage cell. The cell links to the
-		// stage sub-task itself (its detail page shows the log).
-		cell.TaskID = subs[i].ID
-		status = subs[i].Status
-		errMsg = subs[i].Error
-		found = true
-		break
 	}
-	if !found {
+	if len(matched) == 0 {
 		return nil // the graph has no such stage: nothing to show
 	}
-	switch status {
-	case store.TaskPending:
-		cell.Status = "pending"
-	case store.TaskRunning:
-		cell.Status = "running"
-	case store.TaskSkipped:
-		// The stage never ran: an upstream task failed (the runner's
-		// skip-dependents path). Displayed like a run-level skipped.
-		cell.Status = "skipped"
-		cell.Error = errMsg
-	default: // stage/root failed (or finished without a report)
+
+	// Aggregate the matched sub-tasks: any failure fails, any activity runs,
+	// all-queued stays pending, all-skipped surfaces as skipped.
+	rank := func(status string) int {
+		switch status {
+		case store.TaskFailed:
+			return 4
+		case store.TaskRunning:
+			return 3
+		case store.TaskPending:
+			return 2
+		case store.TaskSkipped:
+			return 1
+		default:
+			return 0 // done
+		}
+	}
+	best := 0
+	for i := range matched {
+		if r := rank(matched[i].Status); r > best {
+			best = r
+		}
+	}
+	if best == 0 {
+		best = 1 // every stage finished but no run landed yet
+	}
+	// The cell links to the first sub-task of this stage whose own state
+	// decides the aggregate (a failing case, the running one, ...), so the
+	// click lands on the most relevant log.
+	pick := &matched[0]
+	for i := range matched {
+		if rank(matched[i].Status) == best {
+			pick = &matched[i]
+			break
+		}
+	}
+	cell.TaskID = pick.ID
+	status := pick.Status
+	switch best {
+	case 4:
 		cell.Status = store.StatusFailed
-		cell.Error = errMsg
+		cell.Error = pick.Error
 		if cell.Error == "" {
 			// Prefer the first failed sub-task's error (clone/build failures
 			// are more actionable than the root's derived status).
@@ -903,6 +954,17 @@ func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON
 				}
 			}
 		}
+	case 3:
+		cell.Status = "running"
+	case 2:
+		cell.Status = "pending"
+	default:
+		if status == store.TaskSkipped {
+			cell.Status = "skipped"
+		} else {
+			cell.Status = "pending" // finished, run not landed yet
+		}
+		cell.Error = pick.Error
 	}
 	if root.StartedAt != nil {
 		cell.StartedAt = root.StartedAt.UTC().Format(time.RFC3339)

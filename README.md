@@ -74,6 +74,9 @@ http://localhost:8080/#/docs). The Markdown sources live in
 [frontend/docs/](frontend/docs/) and are embedded into the frontend
 bundle at build time.
 
+A fully commented example of the md-builder.yaml test matrix (schema
+version 2) lives at [md-builder.example.yaml](md-builder.example.yaml).
+
 ## Authentication
 
 There is **no registration UI**. Users are created via the `adduser` CLI

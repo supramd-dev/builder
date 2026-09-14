@@ -15,7 +15,7 @@
 #   SKIP_SETUP set to 1 to skip user creation (user must already exist)
 #   MD_BUILDER_BIN prebuilt server binary for adduser (default: go run)
 #   DSN        SQLite/Postgres DSN the server uses, for user creation
-#              (default: <project root>/md-builder.db)
+#              (default: <project root>/server/md-builder.db)
 #
 # Exit code 0 = all checks passed, 1 = at least one check failed.
 
@@ -27,7 +27,9 @@ PASSWORD="${PASSWORD:-smoke-pass-123}"
 EMAIL="${EMAIL:-smoke@example.com}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DSN="${DSN:-$ROOT/md-builder.db}"
+# The server's default DSN is relative to its own working directory
+# (server/), so match that when the server runs via `make dev-backend`.
+DSN="${DSN:-$ROOT/server/md-builder.db}"
 
 CJAR="$(mktemp)"
 trap 'rm -f "$CJAR" /tmp/api-smoke-*.json' EXIT
@@ -157,6 +159,30 @@ body_code=$(req PUT "/api/environments/$ENV_ID" \
 check "update environment 200" "$(tail -n1 <<<"$body_code")" "200"
 check "update persisted name" \
   "$(head -n1 <<<"$body_code" | jq -r .name)" "smoke-node-2"
+
+# Env setup script round-trips verbatim (it is not a secret). Compared
+# through a file: the shell's $(...) strips trailing newlines, the env
+# script may legitimately end with one.
+ENV_SCRIPT_BODY='module load gcc/13
+export CXX=g++
+'
+body_code=$(req PUT "/api/environments/$ENV_ID" "$(jq -n --arg id "$ENV_ID" --arg s "$ENV_SCRIPT_BODY" \
+  '{name:"smoke-node-2",host:"203.0.113.2",username:"runner2",privateKey:"",description:"updated",envScript:$s}')")
+check "update envScript 200" "$(tail -n1 <<<"$body_code")" "200"
+body_code=$(req GET "/api/environments/$ENV_ID")
+check "envScript get 200" "$(tail -n1 <<<"$body_code")" "200"
+head -n1 <<<"$body_code" | jq -j .envScript > /tmp/api-smoke-envscript.json
+if cmp -s /tmp/api-smoke-envscript.json <(printf '%s' "$ENV_SCRIPT_BODY"); then
+  check "envScript round-trips" ok ok
+else
+  check "envScript round-trips" \
+    "$(cat /tmp/api-smoke-envscript.json)" "$ENV_SCRIPT_BODY"
+fi
+# Omitting envScript clears it.
+body_code=$(req PUT "/api/environments/$ENV_ID" \
+  '{"name":"smoke-node-2","host":"203.0.113.2","username":"runner2","privateKey":"","description":"updated"}')
+check "envScript cleared when omitted" \
+  "$(head -n1 <<<"$body_code" | jq -r .envScript)" ""
 
 # ---------------------------------------------------------------------------
 # 3. Connectivity test

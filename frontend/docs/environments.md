@@ -1,9 +1,9 @@
 # Test environments
 
 Register the machines that run the tests under **Runner Envs**: name,
-SSH host, SSH username and an SSH private key. Use **Test** to verify
-connectivity, **Run command** to try commands interactively or dispatch
-a manual test on the machine (see
+SSH host, SSH username, an SSH private key and an environment setup
+script. Use **Test** to verify connectivity, **Run command** to try
+commands interactively or dispatch a manual test on the machine (see
 [Runner and tasks](#/docs/runner-strategy)).
 
 The server connects over SSH to upload the sources (a tar stream extracted
@@ -38,3 +38,26 @@ environment whose tags include all of them. Rules:
   response, not an error).
 - Environments must be **enabled** to receive tasks; disabled ones stay
   greyed out on the dashboard.
+
+## Environment setup script
+
+Each environment may carry a bash **env setup script** (edited in the
+environment form). On dispatch it is written into the task dir as
+`md-builder-env-<hash>.sh` (the hash is derived from the content, so
+editing the script changes the file name) and **sourced by every stage
+script** — build, unit test and each regression case — before the stage
+command runs:
+
+```bash
+module load gcc/13 openmpi/4.1
+export CXX=mpicxx
+source /opt/profiles/intel.sh
+```
+
+Use it for module loads, compiler exports, virtualenv activation —
+anything the stage commands assume. Because it runs last in the script
+preamble, it can even override the built-in and yaml variables (see
+[Built-in environment variables](#/docs/test-matrix)).
+
+An environment without a script is fine: stage scripts log a warning
+(`env script ... not found`) and run without it.
