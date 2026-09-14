@@ -142,10 +142,11 @@ presets:
     timeout: 120
   poisson:
     command: "python3 run_poisson.py"
+defaults:
+  build:
+    command: "cmake -DEXEC=1 . && cmake --build ."
 matrix:
   - tags: [cpu]
-    build:
-      cmake_flags: "-DEXEC=1"
     unit:
       command: "ctest -L unit"
       timeout: 60
@@ -179,16 +180,20 @@ func runUntilStage(t *testing.T, svc *Service, s *store.Store, cloneTask *store.
 }
 
 const resultsYAML = `version: 2
+defaults:
+  build:
+    command: "cmake -DEXEC=1 . && cmake --build ."
 matrix:
   - tags: [cpu]
-    build:
-      cmake_flags: "-DEXEC=1"
     unit:
       command: "ctest -L unit --output-junit junit.xml"
       results: "build/test_detail.xml"
 `
 
 const multiResultsYAML = `version: 2
+defaults:
+  build:
+    command: "cmake ."
 matrix:
   - tags: [cpu]
     unit:
@@ -201,6 +206,9 @@ matrix:
 // caseResultsYAML exercises the per-case regression path: two presets with
 // their own results files.
 const caseResultsYAML = `version: 2
+defaults:
+  build:
+    command: "cmake ."
 presets:
   heat:
     command: "python3 run_heat.py"
@@ -460,14 +468,14 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 		t.Errorf("case rows wrong: %+v", cases)
 	}
 
-	// The build script used the configured cmake flags; the stage scripts
-	// used their commands under timeout. Only build and the stages go
-	// through RunScript (the clone uploads a tar instead), so scripts[0] is
-	// the build, [1..3] are the unit and case scripts.
+	// The build script ran the configured command; the stage scripts used
+	// their commands under timeout. Only build and the stages go through
+	// RunScript (the clone uploads a tar instead), so scripts[0] is the
+	// build, [1..3] are the unit and case scripts.
 	if len(exec.scripts) != 4 {
 		t.Fatalf("want 4 scripts, got %d", len(exec.scripts))
 	}
-	if !strings.Contains(exec.scripts[0], "cmake -DEXEC=1 .") {
+	if !strings.Contains(exec.scripts[0], "bash -c 'cmake -DEXEC=1 . && cmake --build .'") {
 		t.Errorf("build script wrong:\n%s", exec.scripts[0])
 	}
 	if !strings.Contains(exec.scripts[1], "timeout 60 bash -c 'ctest -L unit'") {
@@ -555,8 +563,8 @@ func TestExecuteCloneFailureSkipsDownstream(t *testing.T) {
 // stages still get their own rows.
 func TestExecuteBuildFailureRecordsFailedBuildRun(t *testing.T) {
 	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
-	exec.outcome["cmake -DEXEC=1"] = 1
-	exec.output["cmake -DEXEC=1"] = "CMake Error at CMakeLists.txt:9 (message):\n  bad toolchain\n"
+	exec.outcome["cmake -DEXEC=1 ."] = 1
+	exec.output["cmake -DEXEC=1 ."] = "CMake Error at CMakeLists.txt:9 (message):\n  bad toolchain\n"
 
 	ctx := context.Background()
 	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {

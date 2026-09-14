@@ -305,7 +305,7 @@ function ExecTab({ onError }: RunPageProps) {
 
 // --- Manual test tab (dispatch build/unit/regression graphs) ---------------
 
-const DEFAULT_MANUAL_BUILD = 'cmake . && cmake --build . -j8'
+const DEFAULT_MANUAL_BUILD = 'cmake . && cmake --build . -j8' // placeholder example only
 
 // splitPaths turns the comma/space-separated results-file input into a list
 // for the API (a run can produce several results files); a single entry is
@@ -468,7 +468,7 @@ function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
                     fontSize: '0.875rem',
                   }}
                 />
-                <small className="text-muted">Empty uses the CMake default.</small>
+                <small className="text-muted">Empty skips the build stage.</small>
               </div>
               <div className="form-group">
                 <label htmlFor="manual-unit">Unit test command</label>

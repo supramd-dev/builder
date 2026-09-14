@@ -2,14 +2,15 @@ package runner
 
 import (
 	"fmt"
+	"strings"
 
 	"md-builder/server/store"
 )
 
 // Task graph construction: a merged matrix entry becomes a small DAG of
-// sub-tasks under a root task. The graph shape is fixed today
-// (clone → build → {unit, regression}) but the construction is data-driven
-// so future kinds (performance tests) only extend the node list.
+// sub-tasks under a root task. The shape is data-driven (build is optional;
+// test stages depend on build when present, else on clone) so future kinds
+// (performance tests) only extend the node list.
 
 // GraphTask is one node of the constructed graph before persistence: its
 // kind, display name, per-stage config snapshot and dependencies expressed
@@ -45,31 +46,33 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 		Config: "{}",
 	})
 
-	// 1: build — required (the test stages run in the code directory it
-	// produces). The full entry snapshot is stored so the executor can
-	// export env vars and pick the build recipe.
-	buildJSON, err := marshalJSON(BuildStageConfig{
-		Generator:  entry.Build.Generator,
-		CMakeFlags: entry.Build.CMakeFlags,
-		Threads:    entry.Build.Threads,
-		Command:    entry.Build.Command,
-		Workdir:    entry.Build.Workdir,
-		Timeout:    resolveStageTimeout(0, entry),
-		Env:        entry.Env,
-	})
-	if err != nil {
-		return nil, err
+	// 1: build — optional (a code tree that builds itself, or a manual
+	// dispatch without a build stage, skips it). The full entry snapshot is
+	// stored so the executor can export env vars. Test stages depend on
+	// build when present, else on clone.
+	testDep := store.TaskSubPlaceholderBase + 0 // clone
+	if cmd := strings.TrimSpace(entry.Build.Command); cmd != "" {
+		buildJSON, err := marshalJSON(BuildStageConfig{
+			Command: cmd,
+			Workdir: entry.Build.Workdir,
+			Timeout: resolveStageTimeout(0, entry),
+			Env:     entry.Env,
+		})
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, GraphTask{
+			Kind:   store.TaskKindBuild,
+			Name:   "build",
+			Config: buildJSON,
+			Deps:   []int64{store.TaskSubPlaceholderBase + 0},
+		})
+		testDep = store.TaskSubPlaceholderBase + 1 // build
 	}
-	tasks = append(tasks, GraphTask{
-		Kind:   store.TaskKindBuild,
-		Name:   fmt.Sprintf("build (%s)", entry.Build.Generator),
-		Config: buildJSON,
-		Deps:   []int64{store.TaskSubPlaceholderBase + 0},
-	})
 
-	// 2+: test stages, each depending on build. Regression expands to one
-	// sub-task per case (preset) — independent logs, parallel execution and
-	// per-case cells on the graph page.
+	// 2+: test stages, each depending on build (or clone). Regression
+	// expands to one sub-task per case (preset) — independent logs,
+	// parallel execution and per-case cells on the graph page.
 	if entry.Unit != nil {
 		cfg, err := marshalJSON(StageConfig{
 			Command: entry.Unit.Command.Clean(),
@@ -85,7 +88,7 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 			Kind:   store.TaskKindUnit,
 			Name:   "unit tests",
 			Config: cfg,
-			Deps:   []int64{store.TaskSubPlaceholderBase + 1},
+			Deps:   []int64{testDep},
 		})
 	}
 	for i := range entry.Regression {
@@ -105,7 +108,7 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 			Kind:   store.TaskKindRegression,
 			Name:   "regression: " + c.Name,
 			Config: cfg,
-			Deps:   []int64{store.TaskSubPlaceholderBase + 1},
+			Deps:   []int64{testDep},
 		})
 	}
 	if len(tasks) == 1 {

@@ -122,6 +122,9 @@ func TestMultiCommandScriptBash(t *testing.T) {
 // graph snapshot → generated script.
 func TestCommandListThroughGraph(t *testing.T) {
 	entries, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "cmake ."
 presets:
   heat:
     command: ["make prepare", "mpirun ./run_heat"]

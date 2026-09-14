@@ -478,13 +478,13 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 	root := &store.Task{
 		Kind: store.TaskKindRoot, Name: "test " + commit.SHA, Status: store.TaskDone,
 		CommitID: commit.ID, EnvironmentID: env.ID, Tags: env.Tags,
-		Config: `{"build":{"generator":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
+		Config: `{"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
 	}
 	// The graph always carries all four nodes: clone ← root, build ← clone,
 	// unit/regression ← build.
 	clone := &store.Task{Kind: store.TaskKindClone, Name: "clone repositories",
 		CommitID: commit.ID, EnvironmentID: env.ID}
-	build := &store.Task{Kind: store.TaskKindBuild, Name: "build (ninja)",
+	build := &store.Task{Kind: store.TaskKindBuild, Name: "build",
 		CommitID: commit.ID, EnvironmentID: env.ID}
 	unitT := &store.Task{Kind: store.TaskKindUnit, Name: "unit tests",
 		CommitID: commit.ID, EnvironmentID: env.ID}
@@ -597,11 +597,11 @@ func seedLiveGraph(s *store.Store, env *store.TestEnvironment, commitID int64, p
 	root := &store.Task{
 		Kind: store.TaskKindRoot, Name: "test " + commit.SHA[:7], Status: store.TaskPending,
 		CommitID: commitID, EnvironmentID: env.ID, Tags: env.Tags,
-		Config: `{"build":{"generator":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
+		Config: `{"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
 	}
 	clone := &store.Task{Kind: store.TaskKindClone, Name: "clone repositories",
 		CommitID: commitID, EnvironmentID: env.ID}
-	build := &store.Task{Kind: store.TaskKindBuild, Name: "build (ninja)",
+	build := &store.Task{Kind: store.TaskKindBuild, Name: "build",
 		CommitID: commitID, EnvironmentID: env.ID}
 	unitT := &store.Task{Kind: store.TaskKindUnit, Name: "unit tests",
 		CommitID: commitID, EnvironmentID: env.ID}

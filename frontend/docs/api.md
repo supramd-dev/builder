@@ -145,7 +145,7 @@ POST /api/jobs/manual
 {
   "repo": "https://gitlab.example.com/group/code",   // optional: site default
   "ref": "master",                                    // optional: HEAD
-  "buildCommand": "cmake . && cmake --build . -j8",   // optional: CMake default
+  "buildCommand": "cmake . && cmake --build . -j8",   // optional; empty = no build stage
   "unitCommand": "ctest -L unit",                     // optional: stage skipped
   "unitResults": "build/test_detail.xml",             // optional: results file(s)
   "regressionCommand": "python3 run.py",              // optional: stage skipped

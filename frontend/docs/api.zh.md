@@ -129,7 +129,7 @@ POST /api/jobs/manual
 {
   "repo": "https://gitlab.example.com/group/code",   // 可选:默认站点配置
   "ref": "master",                                    // 可选:HEAD
-  "buildCommand": "cmake . && cmake --build . -j8",   // 可选:CMake 默认值
+  "buildCommand": "cmake . && cmake --build . -j8",   // 可选;留空 = 无构建阶段
   "unitCommand": "ctest -L unit",                     // 可选:阶段跳过
   "unitResults": "build/test_detail.xml",             // 可选:结果文件
   "regressionCommand": "python3 run.py",              // 可选:阶段跳过

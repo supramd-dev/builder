@@ -27,10 +27,8 @@ commands are determined, and in how repeated triggers are recorded.
   (any other address can be given), an optional branch / tag / commit is
   resolved to a concrete commit before dispatch (empty = HEAD), and the
   build / unit / regression commands come from the form: an empty stage
-  is simply not part of the graph (its matrix cells show "—"), an empty
-  build command falls back to the CMake default
-  (`cmake . && cmake --build . -j8`), and each stage runs with the
-  default timeout (1 h). Any subset of the enabled environments can be
+  is simply not part of the graph (its matrix cells show "—"), and each
+  stage runs with the default timeout (1 h). Any subset of the enabled environments can be
   selected (all are preselected); one graph is created per environment.
   Unlike webhook pushes, every manual dispatch records a **fresh commit
   row**: re-running the same ref gives each attempt its own matrix row
@@ -47,7 +45,7 @@ A graph is a root task plus a small DAG of sub-tasks:
 ```
 root (test <sha> on <environment>)
  └─ clone repositories          # server clones, uploads a tar over SSH
-     └─ build                   # cmake or custom script, in its workdir
+     └─ build                   # the build command, in its workdir
          ├─ unit tests          # per-stage command, own timeout
          ├─ regression: heat    # one sub-task per selected preset
          └─ regression: poisson
@@ -90,9 +88,8 @@ root (test <sha> on <environment>)
   environment's env setup script into the task dir (if configured). The
   remote host needs **no git and no repository access**.
 - **build**: a bash script generated from the config snapshot is streamed
-  to the environment over SSH (`bash -s`) and runs cmake (or the custom
-  build command) in the stage's working directory (out-of-source when
-  `build.workdir` is set), bounded by the configured timeout via the
+  to the environment over SSH (`bash -s`) and runs the build command in
+  the stage's working directory, bounded by the configured timeout via the
   remote `timeout` command (details in
   [The test matrix](#/docs/test-matrix)). The outcome is recorded as a
   "build" test run, shown on the dashboard's build matrix.

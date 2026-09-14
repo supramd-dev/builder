@@ -20,8 +20,7 @@
   自定义的测试 —— 不需要 YAML,也不需要推送。仓库默认取站点配置的
   代码仓库(也可以填写其他地址覆盖);可选的分支 / 标签 / 提交会在派发
   前解析为具体提交(留空 = HEAD);构建 / 单元 / 回归命令来自表单:
-  留空的阶段直接不进入图(矩阵单元格显示"—"),构建命令留空则使用
-  CMake 默认值(`cmake . && cmake --build . -j8`),各阶段按默认超时
+  留空的阶段直接不进入图(矩阵单元格显示"—"),每个阶段按默认超时
   (1 小时)运行。可以勾选任意已启用环境的子集(默认全选),每个环境
   创建一条图。与 webhook 推送不同,每次手动派发都会记录**一条新的
   commit 行**:重跑同一 ref 时,每次尝试都有自己的矩阵行(commit
@@ -37,7 +36,7 @@
 ```
 root (test <sha> on <environment>)
  └─ clone repositories          # 服务器克隆,经 SSH 上传 tar
-     └─ build                   # cmake 或自定义脚本,在其 workdir 中
+     └─ build                   # 构建命令,在其 workdir 中
          ├─ unit tests          # 每阶段命令,独立超时
          ├─ regression: heat    # 每个选中的预设一个子任务
          └─ regression: poisson
@@ -75,7 +74,7 @@ root (test <sha> on <environment>)
   已配置)写入任务目录。远程主机**不需要 git,也不需要任何仓库访问
   权限**。
 - **build**:根据配置快照生成的 bash 脚本经 SSH 流式送到环境
-  (`bash -s`),在阶段的工作目录中运行 cmake(或自定义构建命令)
+  (`bash -s`),在阶段的工作目录中运行构建命令
   (设置了 `build.workdir` 时为源外构建),由远程 `timeout` 命令按配置
   的超时约束(细节见[测试矩阵](#/docs/test-matrix))。构建结果会记录
   为一条 "build" 测试运行,显示在仪表板的构建矩阵上。

@@ -3,7 +3,6 @@ package runner
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"md-builder/server/store"
@@ -11,7 +10,7 @@ import (
 
 // TestDispatchManual checks the manual dispatch path: one graph per
 // environment, manual trigger flag, the recorded commit and the per-stage
-// command snapshots (an empty build command falls back to the default
+// command snapshots (an empty build command means no build node)
 // cmake recipe; empty stages are omitted).
 func TestDispatchManual(t *testing.T) {
 	s, err := store.Open("file::memory:?cache=shared")
@@ -87,9 +86,9 @@ func TestDispatchManual(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// clone + build (default command) + unit; no regression.
-		if len(subs) != 3 ||
-			subs[0].Kind != store.TaskKindClone || subs[1].Kind != store.TaskKindBuild {
+		// clone + unit; no build (no build command given) and no regression.
+		if len(subs) != 2 ||
+			subs[0].Kind != store.TaskKindClone || subs[1].Kind != store.TaskKindUnit {
 			t.Fatalf("root %d: unexpected first sub-tasks (%d nodes)", root.ID, len(subs))
 		}
 		var kinds []string
@@ -100,25 +99,10 @@ func TestDispatchManual(t *testing.T) {
 			t.Fatalf("root %d: kinds %v", root.ID, kinds)
 		}
 
-		// The build snapshot carries the default cmake command; the unit
-		// snapshot carries the given command.
-		var rootCfg RootConfig
-		if err := json.Unmarshal([]byte(root.Config), &rootCfg); err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(rootCfg.Entry.Build.Command, "cmake") {
-			t.Errorf("root %d: build command %q, want the cmake default", root.ID, rootCfg.Entry.Build.Command)
-		}
+		// The unit snapshot carries the given command; there is no build
+		// snapshot (no build command was dispatched).
 		for i := range subs {
 			switch subs[i].Kind {
-			case store.TaskKindBuild:
-				var bc BuildStageConfig
-				if err := json.Unmarshal([]byte(subs[i].Config), &bc); err != nil {
-					t.Fatal(err)
-				}
-				if bc.Command != rootCfg.Entry.Build.Command {
-					t.Errorf("root %d: build snapshot command %q", root.ID, bc.Command)
-				}
 			case store.TaskKindUnit:
 				var sc StageConfig
 				if err := json.Unmarshal([]byte(subs[i].Config), &sc); err != nil {

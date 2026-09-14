@@ -14,7 +14,7 @@ func sampleEntry() *MergedEntry {
 		Tags:    []string{"cpu"},
 		Timeout: 300,
 		Env:     map[string]string{"CC": "gcc"},
-		Build:   BuildConfig{Generator: GeneratorCMake, CMakeFlags: "-DX=1", Threads: 4},
+		Build:   BuildConfig{Command: "cmake -DX=1 . && cmake --build . -j4"},
 		Unit:    &EnvConfig{Command: CommandList{"ctest -L unit"}, Timeout: 100},
 		Regression: []RegressionCase{
 			{Name: "heat", Command: CommandList{"python3 run_heat.py"}, Timeout: 200},
@@ -60,12 +60,12 @@ func TestBuildTaskGraphShape(t *testing.T) {
 		}
 	}
 
-	// The build snapshot carries the recipe and env.
+	// The build snapshot carries the command and env.
 	var build BuildStageConfig
 	if err := json.Unmarshal([]byte(tasks[1].Config), &build); err != nil {
 		t.Fatal(err)
 	}
-	if build.Generator != GeneratorCMake || build.CMakeFlags != "-DX=1" || build.Threads != 4 {
+	if build.Command != "cmake -DX=1 . && cmake --build . -j4" {
 		t.Errorf("build snapshot wrong: %+v", build)
 	}
 	if build.Timeout != 300 || build.Env["CC"] != "gcc" {
@@ -124,9 +124,11 @@ func TestBuildTaskGraphResultsPassthrough(t *testing.T) {
 	}
 }
 
-func TestBuildTaskGraphScriptBuild(t *testing.T) {
+// A build command is whatever the yaml author chose — the snapshot passes
+// it through verbatim; no recipe is generated server-side.
+func TestBuildTaskGraphBuildCommandPassthrough(t *testing.T) {
 	entry := sampleEntry()
-	entry.Build = BuildConfig{Generator: GeneratorScript, Command: "./build.sh --cuda"}
+	entry.Build = BuildConfig{Command: "./build.sh --cuda"}
 	entry.Regression = nil
 	tasks, err := BuildTaskGraph(entry)
 	if err != nil {
@@ -140,7 +142,28 @@ func TestBuildTaskGraphScriptBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	if build.Command != "./build.sh --cuda" {
-		t.Errorf("script build snapshot wrong: %+v", build)
+		t.Errorf("build snapshot wrong: %+v", build)
+	}
+}
+
+// Without a build command the graph omits the build node and the test
+// stages depend on the clone directly.
+func TestBuildTaskGraphNoBuild(t *testing.T) {
+	entry := sampleEntry()
+	entry.Build = BuildConfig{}
+	entry.Regression = nil
+	tasks, err := BuildTaskGraph(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 { // clone, unit
+		t.Fatalf("want 2 nodes (clone, unit), got %d", len(tasks))
+	}
+	if tasks[1].Kind != store.TaskKindUnit {
+		t.Fatalf("node 1 kind: %s", tasks[1].Kind)
+	}
+	if len(tasks[1].Deps) != 1 || tasks[1].Deps[0] != store.TaskSubPlaceholderBase+0 {
+		t.Errorf("unit must depend on clone: %v", tasks[1].Deps)
 	}
 }
 
@@ -150,7 +173,9 @@ func TestBuildTaskGraphNil(t *testing.T) {
 	}
 }
 
-func TestBuildScriptCMake(t *testing.T) {
+// The build command runs verbatim under timeout, in the workdir like any
+// other stage (an out-of-source cmake is just `cmake <src>` written by hand).
+func TestBuildScript(t *testing.T) {
 	in := &ScriptInput{
 		CommitSHA: "abcdef123456",
 		EnvName:   "cpu-node",
@@ -169,7 +194,7 @@ func TestBuildScriptCMake(t *testing.T) {
 		`export MD_TASK_DIR="$HOME/.md-builder/tasks/abcdef123456"`,
 		`export MD_CODE_DIR="$HOME/.md-builder/tasks/abcdef123456/code"`,
 		`cd "$MD_CODE_DIR" || exit 1`,
-		"timeout 120 cmake -DX=1 . && timeout 120 cmake --build . -j4",
+		"timeout 120 bash -c 'cmake -DX=1 . && cmake --build . -j4'",
 		"export CC='gcc'",
 	} {
 		if !strings.Contains(script, want) {
@@ -178,13 +203,15 @@ func TestBuildScriptCMake(t *testing.T) {
 	}
 }
 
-func TestBuildScriptCMakeOutOfSource(t *testing.T) {
+// A build command with a workdir runs there — the same workdir semantics
+// as unit/regression stages.
+func TestBuildScriptWorkdir(t *testing.T) {
 	in := &ScriptInput{
 		TaskDir: "$HOME/.md-builder/tasks/abcdef123456",
 		CodeDir: "$HOME/.md-builder/tasks/abcdef123456/code",
 		Entry: &MergedEntry{
 			Tags:  []string{"cpu"},
-			Build: BuildConfig{Generator: GeneratorCMake, CMakeFlags: "-DX=1", Threads: 4},
+			Build: BuildConfig{Command: `cmake "$MD_CODE_DIR" && cmake --build .`},
 		},
 		Workdir: "build",
 		Timeout: 120,
@@ -195,10 +222,10 @@ func TestBuildScriptCMakeOutOfSource(t *testing.T) {
 	}
 	for _, want := range []string{
 		`cd "$MD_CODE_DIR/build" || exit 1`,
-		`timeout 120 cmake -DX=1 "$MD_CODE_DIR" && timeout 120 cmake --build . -j4`,
+		`timeout 120 bash -c 'cmake "$MD_CODE_DIR" && cmake --build .'`,
 	} {
 		if !strings.Contains(script, want) {
-			t.Errorf("out-of-source script missing %q:\n%s", want, script)
+			t.Errorf("workdir build script missing %q:\n%s", want, script)
 		}
 	}
 }

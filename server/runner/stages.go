@@ -17,13 +17,10 @@ type CloneConfig struct{}
 
 // BuildStageConfig is the build sub-task snapshot.
 type BuildStageConfig struct {
-	Generator  string            `json:"generator"`           // "cmake" | "script"
-	CMakeFlags string            `json:"cmakeFlags,omitempty"`
-	Threads    int               `json:"threads,omitempty"`
-	Command    string            `json:"command,omitempty"` // generator: script
-	Workdir    string            `json:"workdir,omitempty"` // build directory (empty = in-source)
-	Timeout    int               `json:"timeout"`           // seconds
-	Env        map[string]string `json:"env,omitempty"`     // exported for the stage
+	Command string            `json:"command"`           // the build command
+	Workdir string            `json:"workdir,omitempty"` // command workdir (empty = code dir)
+	Timeout int               `json:"timeout"`           // seconds
+	Env     map[string]string `json:"env,omitempty"`     // exported for the stage
 }
 
 // StageConfig is the unit sub-task snapshot: the command list with its

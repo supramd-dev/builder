@@ -20,9 +20,8 @@ defaults:
   env:
     OMP_NUM_THREADS: "4"
   build:
-    generator: cmake            # cmake(默认)| script
-    cmake_flags: "-DCMAKE_BUILD_TYPE=Release"
-    threads: 8                  # cmake --build -j
+    # 一条普通 shell 命令 —— cmake/make/脚本,项目用什么就写什么。
+    command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
 
 # 回归测试预设:被矩阵条目引用的公共测试用例。每个预设就是一个
 # 回归用例 —— 如何运行它、收集哪些结果文件。
@@ -46,7 +45,7 @@ matrix:
       CC: gcc
       CXX: g++
     build:
-      cmake_flags: "-DENABLE_MPI=OFF"
+      command: "cmake -DENABLE_MPI=OFF . && cmake --build ."
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
       timeout: 600
@@ -57,8 +56,7 @@ matrix:
     env:
       CC: clang
     build:
-      generator: script         # 非 cmake 项目
-      command: "./build.sh --cuda"
+      command: "./build.sh --cuda"   # 任意构建工具,不限于 cmake
     unit:
       command: "ctest --test-dir build -L unit"
     regression:
@@ -85,15 +83,21 @@ matrix:
 | unit.results                 | 否       | 结果文件路径(或路径列表),runner 会在阶段结束后取回(见结果文件)。 |
 | unit.timeout                 | 否       | 覆盖默认值的阶段超时。                                              |
 
-构建阶段有两种形式:
+构建阶段就是一条 shell 命令(没有内置的 cmake 支持 —— cmake/make/ninja/
+脚本调用自己写):
 
-| 字段                | 说明                                                                        |
-|---------------------|-----------------------------------------------------------------------------|
-| build.generator     | cmake(默认)或 script。                                                    |
-| build.cmake_flags   | 传给 cmake 的参数(仅 cmake 生成器)。                                       |
-| build.threads       | 并行构建任务数(默认 8)。                                                   |
-| build.workdir       | 构建目录(cmake:源外构建;script:命令运行目录)。                          |
-| build.command       | shell 命令(仅 script 生成器)。                                             |
+| 字段           | 说明                                                              |
+|----------------|-------------------------------------------------------------------|
+| build.command  | 编译代码的 shell 命令(必填 —— 条目或 defaults 提供)。             |
+| build.workdir  | 命令运行目录(语义与 unit/presets 相同)。                         |
+
+示例 —— 通过 workdir 和内置的 `$MD_CODE_DIR` 变量做源外构建:
+
+```yaml
+build:
+  command: 'cmake "$MD_CODE_DIR" -DCMAKE_BUILD_TYPE=Release && cmake --build . -j16'
+  workdir: "build"   # 在 <code>/build 中运行
+```
 
 每个超时通过远程的 `timeout` 命令约束对应阶段;整个 SSH 会话的上限是各
 阶段超时之和再加 15 分钟余量。
@@ -221,9 +225,8 @@ unit:
   (runner 不会创建它)。
 - **绝对路径**:在远程主机上原样使用。
 
-对 cmake 构建生成器,workdir 意味着**源外构建(out-of-source build)**:
-cmake 在 workdir 中以源码目录为参数完成配置并在那里构建,源码树保持
-干净。
+源外构建只是 workdir 加一条以 `"$MD_CODE_DIR"` 为参数的配置命令
+(见上面的 build 示例)。
 
 ## 结果文件
 
@@ -267,8 +270,9 @@ unit:
 - 每个条目需要非空的 `tags` 以及 `unit` / `regression`(或其预设展开)
   中的至少一个,且带有 `command`。
 - 条目之间不允许重复的标签组合。
-- `build.generator` 必须是 `cmake` 或 `script`;`script` 必须提供
-  `build.command`。
+- `build.command` 必填(条目自己的或 `defaults.build` 的)。
+- 未知字段会被拒绝(例如已移除的 `build.generator` / `cmake_flags` /
+  `threads`)。
 - 每个预设必须带 `command`;`use` / `disable` 中的名称必须引用已定义
   的预设。
 

@@ -5,6 +5,7 @@
 package runner
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -23,15 +24,6 @@ const MaxTimeoutSeconds = 4 * 3600
 
 // DefaultTimeoutSeconds applies when neither defaults nor the entry set one.
 const DefaultTimeoutSeconds = 3600
-
-// DefaultBuildThreads is the default parallel build count.
-const DefaultBuildThreads = 8
-
-// Build generators.
-const (
-	GeneratorCMake  = "cmake"
-	GeneratorScript = "script"
-)
 
 // EnvConfig is a test stage: unit, or one regression preset.
 type EnvConfig struct {
@@ -210,13 +202,10 @@ func (r ResultsPaths) Clean() ResultsPaths {
 	return out
 }
 
-// BuildConfig describes how to compile the code repository.
+// BuildConfig describes the build stage of an entry.
 type BuildConfig struct {
-	Generator  string `yaml:"generator,omitempty" json:"generator,omitempty"` // cmake (default) | script
-	CMakeFlags string `yaml:"cmake_flags,omitempty" json:"cmake_flags,omitempty"`
-	Threads    int    `yaml:"threads,omitempty" json:"threads,omitempty"`
-	Command    string `yaml:"command,omitempty" json:"command,omitempty"` // generator: script
-	Workdir    string `yaml:"workdir,omitempty" json:"workdir,omitempty"` // build directory; empty = in-source (code dir)
+	Command string `yaml:"command,omitempty" json:"command,omitempty"` // the build command
+	Workdir string `yaml:"workdir,omitempty" json:"workdir,omitempty"` // command workdir; empty = code dir
 }
 
 // RegressionUse is the matrix entry's regression stanza: it references
@@ -273,8 +262,12 @@ type MergedEntry struct {
 // ParseConfig parses and validates md-builder.yaml. The returned entries are
 // defaults-merged and ready for environment matching.
 func ParseConfig(data []byte) ([]MergedEntry, error) {
+	// Strict decoding: unknown fields (e.g. the removed build.generator /
+	// cmake_flags / threads) must fail loudly instead of being ignored.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
 	var raw rawConfig
-	if err := yaml.Unmarshal(data, &raw); err != nil {
+	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse md-builder.yaml: %w", err)
 	}
 	if raw.Version != ConfigVersion {
@@ -302,11 +295,8 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		if entry.Unit != nil && entry.Unit.Command.IsEmpty() {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d has unit without a command", i+1)
 		}
-		if entry.Build.Generator != "" && entry.Build.Generator != GeneratorCMake && entry.Build.Generator != GeneratorScript {
-			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d: build.generator must be cmake or script", i+1)
-		}
-		if entry.Build.Generator == GeneratorScript && strings.TrimSpace(entry.Build.Command) == "" {
-			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d: build.generator script requires build.command", i+1)
+		if strings.TrimSpace(entry.Build.Command) == "" && (raw.Defaults == nil || strings.TrimSpace(raw.Defaults.Build.Command) == "") {
+			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d: build requires a command (entry or defaults.build)", i+1)
 		}
 
 		tags := normalizeTagList(entry.Tags)
@@ -428,27 +418,12 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 
 	build := entry.Build
 	if defaults != nil {
-		if build.Generator == "" {
-			build.Generator = defaults.Build.Generator
-		}
-		if build.CMakeFlags == "" {
-			build.CMakeFlags = defaults.Build.CMakeFlags
-		}
 		if build.Command == "" {
 			build.Command = defaults.Build.Command
-		}
-		if build.Threads == 0 {
-			build.Threads = defaults.Build.Threads
 		}
 		if build.Workdir == "" {
 			build.Workdir = defaults.Build.Workdir
 		}
-	}
-	if build.Generator == "" {
-		build.Generator = GeneratorCMake
-	}
-	if build.Threads == 0 {
-		build.Threads = DefaultBuildThreads
 	}
 	m.Build = build
 	return m, nil

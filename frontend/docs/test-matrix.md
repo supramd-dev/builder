@@ -22,9 +22,8 @@ defaults:
   env:
     OMP_NUM_THREADS: "4"
   build:
-    generator: cmake            # cmake (default) | script
-    cmake_flags: "-DCMAKE_BUILD_TYPE=Release"
-    threads: 8                  # cmake --build -j
+    # A plain shell command — cmake/make/script, whatever the project uses.
+    command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
 
 # Regression presets: shared test cases referenced by matrix entries.
 # Each preset is one regression case — how to run it and which results
@@ -49,7 +48,7 @@ matrix:
       CC: gcc
       CXX: g++
     build:
-      cmake_flags: "-DENABLE_MPI=OFF"
+      command: "cmake -DENABLE_MPI=OFF . && cmake --build ."
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
       timeout: 600
@@ -60,8 +59,7 @@ matrix:
     env:
       CC: clang
     build:
-      generator: script         # non-cmake projects
-      command: "./build.sh --cuda"
+      command: "./build.sh --cuda"   # any build tool, not just cmake
     unit:
       command: "ctest --test-dir build -L unit"
     regression:
@@ -88,15 +86,22 @@ matrix:
 | unit.results                 | no       | Results file path (or list) the runner fetches back (see Results files). |
 | unit.timeout                 | no       | Stage timeout overriding defaults.                                  |
 
-The build stage has two forms:
+The build stage is one shell command (no built-in cmake support — write
+the cmake/make/ninja/script invocation yourself):
 
-| Field               | Description                                                                 |
-|---------------------|-----------------------------------------------------------------------------|
-| build.generator     | cmake (default) or script.                                                  |
-| build.cmake_flags   | Flags passed to cmake (cmake generator only).                               |
-| build.threads       | Parallel build jobs (default 8).                                            |
-| build.workdir       | Build directory (cmake: out-of-source build, script: command workdir).      |
-| build.command       | Shell command (script generator only).                                      |
+| Field          | Description                                                          |
+|----------------|----------------------------------------------------------------------|
+| build.command  | Shell command compiling the code (required — entry or defaults).     |
+| build.workdir  | Directory the command runs in (same semantics as unit/presets).      |
+
+Example — out-of-source cmake via the workdir and the built-in
+`$MD_CODE_DIR` variable:
+
+```yaml
+build:
+  command: 'cmake "$MD_CODE_DIR" -DCMAKE_BUILD_TYPE=Release && cmake --build . -j16'
+  workdir: "build"   # runs in <code>/build
+```
 
 Every timeout bounds the stage via the remote `timeout` command; the
 whole SSH session gets the sum of the stage timeouts plus 15 minutes of
@@ -238,10 +243,8 @@ directory a stage command runs in:
   repository (the runner does not create it).
 - **absolute**: used as-is on the remote host.
 
-For the cmake build generator a workdir turns the build into an
-**out-of-source build**: cmake is configured in the workdir with the
-source directory as argument and built there, leaving the source tree
-clean.
+An out-of-source build is just a `workdir` plus a command that
+configures against `"$MD_CODE_DIR"` (see the build example above).
 
 ## Results files
 
@@ -290,8 +293,9 @@ its command's exit status (see Pass / fail of a case).
 - Each entry needs non-empty `tags` and at least one of `unit` /
   `regression` (or its presets expansion), with a `command`.
 - Duplicate tag sets across entries are rejected.
-- `build.generator` must be `cmake` or `script`; `script` requires
-  `build.command`.
+- `build.command` is required (the entry's own or `defaults.build`).
+- Unknown fields are rejected (e.g. the removed `build.generator` /
+  `cmake_flags` / `threads`).
 - Every preset needs a `command`; names in `use` / `disable` must
   reference defined presets.
 

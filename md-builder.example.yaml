@@ -14,6 +14,8 @@
 #   2. Each entry becomes a task graph:
 #        clone → build → unit (optional)
 #                       └→ regression: <preset>  (one sub-task per case)
+#      The build stage runs the build.command shell line — there is no
+#      built-in cmake support; write the invocation your project needs.
 #   3. Every stage runs on the remote environment over SSH, inside the
 #      working directory you configure (workdir), with the environment
 #      setup script of that environment sourced first (module loads,
@@ -40,10 +42,10 @@ defaults:
     OMP_NUM_THREADS: "4"
 
   # Build defaults for every entry (same fields as matrix[].build).
+  # The build stage is just a shell command — there is no built-in cmake
+  # support: write the cmake (or make, ninja, script) invocation yourself.
   build:
-    generator: cmake                 # cmake (default) | script
-    cmake_flags: "-DCMAKE_BUILD_TYPE=Release"
-    threads: 8                       # cmake --build -j
+    command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
 
 # ---------------------------------------------------------------------------
 # presets (optional) — shared regression test cases
@@ -112,13 +114,13 @@ matrix:
       CXX: g++
 
     build:
-      # generator defaults to cmake; flags/threads inherit defaults.build
-      # and can be extended per entry:
-      cmake_flags: "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF"
-      # workdir: "build"              # set this for an out-of-source
-                                      # build: cmake is configured and
-                                      # built in <code>/build with the
-                                      # source tree as argument
+      # The build command is a plain shell line (&& chains fine). This
+      # entry overrides defaults.build.command with its own flags; the
+      # command runs in the code dir by default.
+      command: "cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF . && cmake --build . -j8"
+      # workdir: "build"              # run the command in <code>/build
+                                      # instead — e.g. for an out-of-source
+                                      # cmake: `cmake "$MD_CODE_DIR" && ...`
 
     unit:
       # Required. Runs in the code dir by default (workdir below moves
@@ -150,9 +152,10 @@ matrix:
       OMP_NUM_THREADS: "1"            # overrides defaults.env
 
     build:
-      cmake_flags: "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=ON"
-      threads: 16
-      workdir: "build"                # out-of-source build
+      # Out-of-source cmake: run IN <code>/build, configure against the
+      # source root via the MD_CODE_DIR variable.
+      command: 'cmake "$MD_CODE_DIR" -DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=ON && cmake --build . -j16'
+      workdir: "build"
 
     unit:
       command: "mpirun -np 4 ./build/unit_tests --gtest_output=xml:build/unit_mpi.xml"
@@ -161,16 +164,15 @@ matrix:
     regression:
       use: [heat, poisson, eos-table]
 
-  # --- entry 3: GPU build, script-based ----------------------------------
+  # --- entry 3: GPU build, custom build script ---------------------------
   - tags: [gpu, cuda]
-    description: CUDA build (non-cmake project)
+    description: CUDA build (custom build script)
 
     env:
       CC: nvcc
 
     build:
-      generator: script               # custom command instead of cmake
-      command: "./build.sh --cuda -j8"
+      command: "$MD_CODE_DIR/build.sh --cuda -j8"
       workdir: "build"                # the script runs in <code>/build
 
     unit:

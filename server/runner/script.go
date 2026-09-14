@@ -73,37 +73,18 @@ func (in *ScriptInput) TimeoutOr(fallback int) int {
 }
 
 // BuildScript renders the remote bash script for the build sub-task: the
-// shared preamble plus the build recipe (cmake — out-of-source when a
-// workdir is set — or a custom command) under `timeout`.
+// shared preamble plus the build command (whatever the yaml author chose —
+// cmake, make, a script) in the configured workdir under `timeout`.
 func BuildScript(in *ScriptInput) (string, error) {
 	if in == nil || in.Entry == nil {
 		return "", fmt.Errorf("no entry config")
 	}
-
 	cmd := strings.TrimSpace(in.Entry.Build.Command)
-	if in.Entry.Build.Generator == GeneratorScript {
-		if cmd == "" {
-			return "", fmt.Errorf("build.generator script requires build.command")
-		}
-		return renderScript(in, scriptBody{cmds: []string{
-			fmt.Sprintf("timeout %d bash -c %s", in.TimeoutOr(DefaultStageTimeoutSeconds), shq(cmd)),
-		}})
-	}
-
-	// cmake: out-of-source when a workdir is set, in-source otherwise (the
-	// historical default — the code dir is the build dir).
-	flags := strings.TrimSpace(in.Entry.Build.CMakeFlags)
-	threads := in.Entry.Build.Threads
-	if threads <= 0 {
-		threads = DefaultBuildThreads
-	}
-	secs := in.TimeoutOr(DefaultStageTimeoutSeconds)
-	src := "." // in-source: the code dir is the build dir
-	if strings.TrimSpace(in.Workdir) != "" {
-		src = "\"$MD_CODE_DIR\"" // out-of-source: configure the workdir against the source root
+	if cmd == "" {
+		return "", fmt.Errorf("build has no command")
 	}
 	return renderScript(in, scriptBody{cmds: []string{
-		fmt.Sprintf("timeout %d cmake %s %s && timeout %d cmake --build . -j%d", secs, flags, src, secs, threads),
+		fmt.Sprintf("timeout %d bash -c %s", in.TimeoutOr(DefaultStageTimeoutSeconds), shq(cmd)),
 	}})
 }
 

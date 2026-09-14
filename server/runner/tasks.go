@@ -155,21 +155,18 @@ func (s *Service) DispatchManual(in ManualDispatch) ([]*store.Task, error) {
 }
 
 // createManualGraph builds and persists one environment's graph from the
-// manual stage commands: build (default cmake recipe when empty), then the
-// requested test stages. The manual regression command becomes a single
-// case named "regression". An existing root for the (commit, environment)
-// pair is redeployed, mirroring the webhook requeue path.
+// manual stage commands: build, then the requested test stages — an empty
+// stage command means that stage is skipped (the graph omits its node).
+// The manual regression command becomes a single case named "regression".
+// An existing root for the (commit, environment) pair is redeployed,
+// mirroring the webhook requeue path.
 func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnvironment, cfg *store.SiteConfig, in ManualDispatch) (*store.Task, error) {
 	entry := MergedEntry{
 		Tags:    env.TagList(),
 		Timeout: DefaultTimeoutSeconds,
 		Build: BuildConfig{
-			Generator: GeneratorScript,
-			Command:   strings.TrimSpace(in.BuildCommand),
+			Command: strings.TrimSpace(in.BuildCommand),
 		},
-	}
-	if entry.Build.Command == "" {
-		entry.Build.Command = "cmake . && cmake --build . -j8"
 	}
 	if cmd := strings.TrimSpace(in.UnitCommand); cmd != "" {
 		entry.Unit = &EnvConfig{

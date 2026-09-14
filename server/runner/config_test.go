@@ -11,6 +11,9 @@ import (
 
 func TestParseConfigV2Presets(t *testing.T) {
 	entries, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
 presets:
   heat:
     description: "heat equation"
@@ -62,6 +65,9 @@ matrix:
 
 func TestParseConfigV2UseDisable(t *testing.T) {
 	entries, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
 presets:
   a: {command: "./a"}
   b: {command: "./b"}
@@ -89,6 +95,9 @@ matrix:
 
 func TestParseConfigV2UnknownPreset(t *testing.T) {
 	if _, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
 presets:
   a: {command: "./a"}
 matrix:
@@ -99,6 +108,9 @@ matrix:
 		t.Errorf("unknown use preset should error: %v", err)
 	}
 	if _, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
 presets:
   a: {command: "./a"}
 matrix:
@@ -112,6 +124,9 @@ matrix:
 
 func TestParseConfigV2PresetNeedsCommand(t *testing.T) {
 	if _, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
 presets:
   a: {workdir: "x"}
 matrix:
@@ -125,6 +140,9 @@ matrix:
 func TestParseConfigV2NoStages(t *testing.T) {
 	// Unit missing and regression resolving to nothing.
 	if _, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
 presets:
   a: {command: "./a"}
 matrix:
@@ -151,6 +169,7 @@ func TestParseConfigV2Workdirs(t *testing.T) {
 	entries, err := ParseConfig([]byte(`version: 2
 defaults:
   build:
+    command: "make -C src"
     workdir: "build-default"
   unit:
     workdir: "unit-default"
@@ -176,6 +195,8 @@ matrix:
 func TestParseConfigV2PresetTimeoutDefault(t *testing.T) {
 	entries, err := ParseConfig([]byte(`version: 2
 defaults:
+  build:
+    command: "make"
   timeout: 900
 presets:
   a: {command: "./a"}
@@ -249,6 +270,9 @@ func caseNames(cases []RegressionCase) []string {
 
 func TestParseConfigV2CommandList(t *testing.T) {
 	entries, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
 presets:
   heat:
     command:
@@ -290,6 +314,9 @@ matrix:
 
 func TestParseConfigV2CommandListInvalid(t *testing.T) {
 	_, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
 presets:
   bad:
     command:
@@ -303,6 +330,9 @@ matrix:
 		t.Errorf("mapping command should fail validation: %v", err)
 	}
 	_, err = ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
 matrix:
   - tags: [cpu]
     unit:

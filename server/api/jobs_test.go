@@ -33,6 +33,9 @@ func newDispatchTestServer(t *testing.T, yaml string) (*Server, *store.Store) {
 }
 
 const dispatchYAML = `version: 2
+defaults:
+  build:
+    command: "cmake . && cmake --build ."
 presets:
   main:
     command: "python3 run.py"
@@ -322,7 +325,7 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	}
 	subs := []*store.Task{
 		{Kind: store.TaskKindClone, Name: "clone repositories", CommitID: commit.ID, EnvironmentID: env.ID},
-		{Kind: store.TaskKindBuild, Name: "build (cmake)", CommitID: commit.ID, EnvironmentID: env.ID},
+		{Kind: store.TaskKindBuild, Name: "build", CommitID: commit.ID, EnvironmentID: env.ID},
 		{Kind: store.TaskKindUnit, Name: "unit tests", CommitID: commit.ID, EnvironmentID: env.ID},
 	}
 	deps := [][]int64{
