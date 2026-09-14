@@ -149,6 +149,36 @@ POST /api/jobs/manual
 - 图会标记 `trigger: 1`(手动);每次派发都记录一条新的 commit 行,
   因此重跑同一 ref 会新增矩阵行,旧行标记为 superseded。
 
+### YAML 矩阵派发
+
+`POST /api/jobs/manual-yaml` 按需执行**webhook 流程**:对站点配置的代码
+仓库的一个 ref(Manual test 页签上的一个输入框 + 一个按钮):
+
+```
+POST /api/jobs/manual-yaml
+{
+  "ref": "main"   // 分支、tag、短/完整 SHA;留空 = HEAD
+}
+```
+
+ref 被解析(与手动派发相同的 `git ls-remote`)后,提交行按 **webhook
+同样的去重方式**记录,读取并解析该提交上的 md-builder.yaml,为每个匹配
+的环境创建一个任务图:
+
+```
+{
+  "commitId": 7, "commitSha": "abc123…", "commitCreated": true,
+  "jobsCreated": 2, "entriesSkipped": 0
+}
+```
+
+- 图标记 `trigger: 2`(手动 yaml)。重复触发同一 ref 会**复用同一批**
+  图(按 commit+environment 定位)并以最新快照重建 —— yaml 或环境标签
+  的修改会被采纳,矩阵不会多出新行。
+- 出错(ref 无法解析、yaml 非法、无匹配环境)时返回 422,响应体带
+  `dispatchError` 字段,与 webhook 响应一致;若提交已解析成功,该行
+  仍会被记录。
+
 ## API 端点
 
 除非另行说明,所有端点都需要会话(cookie)。用户通过 `adduser` CLI
@@ -184,6 +214,7 @@ source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。�
 | GET    | `/api/test-artifacts/{id}`      | 单个存储 artifact 的原始内容                 |
 | POST   | `/api/jobs`                     | 手动重新派发某提交的任务图(webhook 方式,读取 YAML) |
 | POST   | `/api/jobs/manual`              | 派发自定义测试(仓库、ref、阶段命令、环境;无需 YAML) |
+| POST   | `/api/jobs/manual-yaml`         | 派发某 ref 上的 md-builder.yaml 矩阵(按需执行的 webhook 流程) |
 | GET    | `/api/jobs`                     | 最近的任务图(`?limit=`;监控;旧 job 形状)    |
 | GET    | `/api/tasks/{id}`               | 单个任务;root 附带子任务列表与提交/环境上下文 |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | 给定序号之后的任务日志块(增量,实时跟随)   |

@@ -17,9 +17,10 @@ import (
 
 // DispatchResult summarizes a dispatch run.
 type DispatchResult struct {
-	TasksCreated   int // number of task graphs (roots) created/requeued
-	SubtasksTotal  int // total sub-task nodes across graphs
-	EntriesSkipped int
+	TasksCreated   int  // number of task graphs (roots) created/requeued
+	SubtasksTotal  int  // total sub-task nodes across graphs
+	EntriesSkipped int  // entries with no matching environment
+	CommitCreated  bool // the commit row was newly inserted (false = deduplicated)
 	Err            error
 }
 
@@ -46,6 +47,54 @@ type ManualDispatch struct {
 // (unreachable repo, bad YAML), the commit stays recorded but no tasks are
 // created; the error is surfaced to the caller.
 func (s *Service) DispatchForCommit(commit *store.Commit) DispatchResult {
+	return s.dispatchYAML(commit, store.TaskTriggerWebhook)
+}
+
+// DispatchForRef is the manual yaml-matrix trigger ("run the webhook flow
+// on demand"): the ref (branch, tag, short/full SHA; empty = HEAD) is
+// resolved against the site-configured code repository, recorded as a
+// commit row (deduplicated like a webhook push), and the yaml matrix at
+// that commit is dispatched exactly as the webhook would. Graphs are keyed
+// by (commit, environment): re-triggering the same ref requeues the same
+// graphs with fresh snapshots, so yaml/environment changes are picked up.
+func (s *Service) DispatchForRef(ctx context.Context, ref string) (store.Commit, DispatchResult) {
+	var commit store.Commit
+	cfg, err := s.Store.GetSiteConfig()
+	if err != nil {
+		return commit, DispatchResult{Err: err}
+	}
+	repo := strings.TrimSpace(cfg.CodeRepo)
+	if repo == "" {
+		return commit, DispatchResult{Err: errors.New("site config has no code repository set")}
+	}
+
+	creds := &GitCredentials{AccessToken: cfg.AccessToken}
+	sha, err := s.resolveRef(ctx, repo, ref, creds)
+	if err != nil {
+		return commit, DispatchResult{Err: err}
+	}
+
+	commit = store.Commit{
+		Repo:     store.RepoPath(repo),
+		SHA:      sha,
+		Ref:      strings.TrimSpace(ref),
+		Author:   "manual",
+		Message:  "manual yaml dispatch " + time.Now().UTC().Format("2006-01-02 15:04"),
+		PushedAt: time.Now(),
+	}
+	created, err := s.Store.GetOrCreateCommit(&commit)
+	if err != nil {
+		return commit, DispatchResult{Err: err}
+	}
+	res := s.dispatchYAML(&commit, store.TaskTriggerManualYAML)
+	res.CommitCreated = created
+	return commit, res
+}
+
+// dispatchYAML is the shared yaml-matrix dispatch: fetch md-builder.yaml at
+// the commit, parse it, match entries to enabled environments and create
+// one graph per entry, with the given trigger source.
+func (s *Service) dispatchYAML(commit *store.Commit, trigger int) DispatchResult {
 	res := DispatchResult{}
 
 	cfg, err := s.Store.GetSiteConfig()
@@ -83,7 +132,7 @@ func (s *Service) DispatchForCommit(commit *store.Commit) DispatchResult {
 			res.EntriesSkipped++
 			continue
 		}
-		if err := s.createGraph(commit, &entry, env, cfg); err != nil {
+		if err := s.createGraph(commit, &entry, env, cfg, trigger); err != nil {
 			res.Err = err
 			return res
 		}
@@ -257,9 +306,9 @@ func (s *Service) dropStaleStageRuns(root *store.Task, graph []GraphTask) error 
 }
 
 // createGraph persists one entry's task graph (root + sub-tasks) for the
-// (commit, environment) pair, requeueing an existing root (delete old
-// sub-tasks, rebuild from the fresh snapshot).
-func (s *Service) createGraph(commit *store.Commit, entry *MergedEntry, env *store.TestEnvironment, cfg *store.SiteConfig) error {
+// (commit, environment) pair with the given trigger source, requeueing an
+// existing root (delete old sub-tasks, rebuild from the fresh snapshot).
+func (s *Service) createGraph(commit *store.Commit, entry *MergedEntry, env *store.TestEnvironment, cfg *store.SiteConfig, trigger int) error {
 	graph, err := BuildTaskGraph(entry)
 	if err != nil {
 		return err
@@ -301,6 +350,7 @@ func (s *Service) createGraph(commit *store.Commit, entry *MergedEntry, env *sto
 		CommitID:      commit.ID,
 		EnvironmentID: env.ID,
 		Tags:          SortedTagString(entry.Tags),
+		Trigger:       trigger,
 		Config:        string(entryJSON),
 	}
 	// A concurrent dispatch may have created the root meanwhile; treat a

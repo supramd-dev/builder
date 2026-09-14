@@ -14,7 +14,9 @@
 #   EMAIL      test user email          (default smoke@example.com)
 #   SKIP_SETUP set to 1 to skip user creation (user must already exist)
 #   MD_BUILDER_BIN prebuilt server binary for adduser (default: go run)
-#   DSN        SQLite/Postgres DSN the server uses, for user creation
+#   DSN        SQLite/Postgres DSN the server uses, for user creation.
+#              Must match the DATABASE THE RUNNING SERVER IS ON, or every
+#              request 401s (the user is created in a different file).
 #              (default: <project root>/server/md-builder.db)
 #
 # Exit code 0 = all checks passed, 1 = at least one check failed.

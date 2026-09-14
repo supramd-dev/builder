@@ -782,3 +782,128 @@ func loadRootCommitID(t *testing.T, s *store.Store, taskID int64) int64 {
 	}
 	return task.CommitID
 }
+
+// TestManualYAMLTrigger exercises POST /api/jobs/manual-yaml: a ref resolves
+// against the site code repository, the commit is recorded (deduplicated on
+// re-trigger) and the yaml matrix dispatches one graph per matching
+// environment, with the manual-yaml trigger flag on the roots.
+func TestManualYAMLTrigger(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	seedUser(t, s, "yamluser", "yaml@example.com", "pw")
+	envCPU := seedDispatchEnv(t, s, "cpu-yaml", "cpu", true)
+	envGPU := seedDispatchEnv(t, s, "gpu-yaml", "gpu", true)
+
+	apiServer.Runner.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *runner.GitCredentials) (string, error) {
+		if repoURL != "https://gitlab.com/group/code" {
+			t.Errorf("resolve repo: got %q", repoURL)
+		}
+		if ref != "v2.0" {
+			t.Errorf("resolve ref: want v2.0, got %q", ref)
+		}
+		return "fedcba98fedcba98fedcba98fedcba98fedcba98", nil
+	}
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "yamluser", "pw")
+
+	authed := func(method, target, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// GET is not allowed.
+	rec := authed(http.MethodGet, "/api/jobs/manual-yaml", "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET: expected 405, got %d", rec.Code)
+	}
+
+	// Dispatch the matrix at v2.0: both environments match (the gpu entry
+	// needs cpu+gpu... only the cpu entry matches cpu; the gpu entry wants
+	// [gpu, cuda] which no env satisfies), so 1 graph and 1 skip.
+	rec = authed(http.MethodPost, "/api/jobs/manual-yaml", `{"ref":"v2.0"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manual-yaml: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		CommitID       int64  `json:"commitId"`
+		CommitSHA      string `json:"commitSha"`
+		CommitCreated  bool   `json:"commitCreated"`
+		JobsCreated    int    `json:"jobsCreated"`
+		EntriesSkipped int    `json:"entriesSkipped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.CommitID == 0 || res.CommitSHA != "fedcba98fedcba98fedcba98fedcba98fedcba98" {
+		t.Fatalf("commit fields wrong: %+v", res)
+	}
+	if !res.CommitCreated {
+		t.Error("first dispatch should create the commit")
+	}
+	if res.JobsCreated != 1 || res.EntriesSkipped != 1 {
+		t.Errorf("dispatch counts: jobs %d skipped %d, want 1/1", res.JobsCreated, res.EntriesSkipped)
+	}
+
+	// The created root is a manual-yaml graph over the recorded commit.
+	roots, err := s.ListRootTasks(10)
+	if err != nil || len(roots) != 1 {
+		t.Fatalf("roots: %v %d", err, len(roots))
+	}
+	if roots[0].Trigger != store.TaskTriggerManualYAML {
+		t.Errorf("root trigger: want manual-yaml(%d), got %d", store.TaskTriggerManualYAML, roots[0].Trigger)
+	}
+	if roots[0].CommitID != res.CommitID || roots[0].EnvironmentID != envCPU.ID {
+		t.Errorf("root over wrong commit/env: %+v (commit %d, cpu %d)", roots[0], res.CommitID, envCPU.ID)
+	}
+
+	// Re-triggering the same ref deduplicates the commit and requeues the
+	// same (commit, environment) graph instead of duplicating it.
+	rec = authed(http.MethodPost, "/api/jobs/manual-yaml", `{"ref":"v2.0"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("re-dispatch: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var res2 struct {
+		CommitID      int64 `json:"commitId"`
+		CommitCreated bool  `json:"commitCreated"`
+		JobsCreated   int   `json:"jobsCreated"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res2); err != nil {
+		t.Fatal(err)
+	}
+	if res2.CommitCreated || res2.CommitID != res.CommitID {
+		t.Errorf("re-dispatch must reuse the commit: %+v", res2)
+	}
+	if res2.JobsCreated != 1 {
+		t.Errorf("re-dispatch jobs: %d, want 1 (requeue)", res2.JobsCreated)
+	}
+	roots2, _ := s.ListRootTasks(10)
+	if len(roots2) != 1 {
+		t.Errorf("roots after re-dispatch: %d, want 1", len(roots2))
+	}
+
+	// A failing ref resolution surfaces as 422 with dispatchError.
+	apiServer.Runner.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *runner.GitCredentials) (string, error) {
+		return "", fmt.Errorf("git ls-remote: ref %q not found", ref)
+	}
+	rec = authed(http.MethodPost, "/api/jobs/manual-yaml", `{"ref":"nope"}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("bad ref: expected 422, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "dispatchError") {
+		t.Errorf("bad ref response missing dispatchError: %s", rec.Body.String())
+	}
+
+	// Environment rows the graph did not use stay untouched.
+	var envCount int64
+	if err := s.DB.Model(&store.TestEnvironment{}).Where("id = ?", envGPU.ID).Count(&envCount).Error; err != nil || envCount != 1 {
+		t.Fatalf("env count: %v %d", err, envCount)
+	}
+}

@@ -29,9 +29,9 @@ const DefaultTimeoutSeconds = 3600
 type EnvConfig struct {
 	Command     CommandList  `yaml:"command" json:"command"`
 	Description string       `yaml:"description,omitempty" json:"description,omitempty"` // preset label (regression presets)
-	Workdir     string       `yaml:"workdir,omitempty" json:"workdir,omitempty"`        // relative to the code dir; empty = code dir
-	Timeout     int          `yaml:"timeout,omitempty" json:"timeout,omitempty"`        // seconds; 0 = use default
-	Results     ResultsPaths `yaml:"results,omitempty" json:"results,omitempty"`        // googletest results files (XML/JSON) produced by the command
+	Workdir     string       `yaml:"workdir,omitempty" json:"workdir,omitempty"`         // relative to the code dir; empty = code dir
+	Timeout     int          `yaml:"timeout,omitempty" json:"timeout,omitempty"`         // seconds; 0 = use default
+	Results     ResultsPaths `yaml:"results,omitempty" json:"results,omitempty"`         // googletest results files (XML/JSON) produced by the command
 }
 
 // CommandList is a stage command that may be one command or several. The
@@ -223,16 +223,16 @@ type EntryConfig struct {
 	Env         map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	Build       BuildConfig       `yaml:"build,omitempty" json:"build,omitempty"`
 	Unit        *EnvConfig        `yaml:"unit,omitempty" json:"unit,omitempty"`
-	Regression  *RegressionUse   `yaml:"regression,omitempty" json:"regression,omitempty"`
+	Regression  *RegressionUse    `yaml:"regression,omitempty" json:"regression,omitempty"`
 	Timeout     int               `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
 // rawConfig mirrors md-builder.yaml before defaults merging.
 type rawConfig struct {
-	Version  int                     `yaml:"version"`
-	Defaults *EntryConfig            `yaml:"defaults,omitempty"`
-	Presets  map[string]*EnvConfig   `yaml:"presets,omitempty"` // shared regression cases
-	Matrix   []EntryConfig           `yaml:"matrix"`
+	Version  int                   `yaml:"version"`
+	Defaults *EntryConfig          `yaml:"defaults,omitempty"`
+	Presets  map[string]*EnvConfig `yaml:"presets,omitempty"` // shared regression cases
+	Matrix   []EntryConfig         `yaml:"matrix"`
 }
 
 // RegressionCase is one effective regression case of a merged entry: a
@@ -255,7 +255,7 @@ type MergedEntry struct {
 	Env         map[string]string `json:"env,omitempty"`
 	Build       BuildConfig       `json:"build"`
 	Unit        *EnvConfig        `json:"unit,omitempty"`
-	Regression  []RegressionCase `json:"regression,omitempty"`
+	Regression  []RegressionCase  `json:"regression,omitempty"`
 	Timeout     int               `json:"timeout"`
 }
 

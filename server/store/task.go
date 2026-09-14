@@ -29,10 +29,13 @@ const (
 )
 
 // Task trigger sources: what dispatched the graph. Webhook (0) is the
-// default — a GitLab push; manual (1) is a user-submitted test from the UI.
+// default — a GitLab push; manual (1) is a user-submitted test from the UI;
+// manual-yaml (2) is a user-requested dispatch of the yaml matrix (a webhook
+// run on demand).
 const (
-	TaskTriggerWebhook int = 0
-	TaskTriggerManual  int = 1
+	TaskTriggerWebhook    int = 0
+	TaskTriggerManual     int = 1
+	TaskTriggerManualYAML int = 2
 )
 
 // Task is one node of a dispatched task graph: either the root (the whole
@@ -50,7 +53,7 @@ type Task struct {
 	CommitID      int64  `gorm:"index;not null"`
 	EnvironmentID int64  `gorm:"index;not null"`
 	Tags          string `gorm:"not null;default:''"`
-	Trigger       int    `gorm:"not null;default:0"` // 0 = webhook, 1 = manual (TaskTrigger*)
+	Trigger       int    `gorm:"not null;default:0"` // 0 = webhook, 1 = manual, 2 = manual-yaml (TaskTrigger*)
 	Config        string `gorm:"type:text"`          // root: entry snapshot; sub-task: stage snapshot (JSON)
 	DependsOn     string `gorm:"type:text"`          // JSON array of task IDs, e.g. "[3,4]"
 	Status        string `gorm:"index;not null;default:'pending'"`

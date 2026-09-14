@@ -288,7 +288,7 @@ function MatrixTable({
                             >
                               <Network size={14} aria-label="graph" />
                             </a>
-                            {cell.trigger === 1 && (
+                            {cell.trigger !== undefined && cell.trigger > 0 && (
                               <span className="dash-trigger" title="manually triggered">
                                 M
                               </span>
@@ -413,7 +413,7 @@ function SingleCell({
   return (
     <>
       <StageStatus status={status} label={label} onClick={onClick} title={title} />
-      {cell.trigger === 1 && (
+      {cell.trigger !== undefined && cell.trigger > 0 && (
         <span className="dash-trigger" title="manually triggered">
           M
         </span>

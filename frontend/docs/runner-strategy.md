@@ -6,10 +6,11 @@ the SSH transport to the test environments. The former sshcheck package
 
 ## Dispatch
 
-A **task graph** is created by one of two triggers — a webhook push or a
-manual dispatch. Both share the same graph model, scheduler and
-environment execution; they differ in how the commit and the stage
-commands are determined, and in how repeated triggers are recorded.
+A **task graph** is created by one of three triggers — a webhook push, a
+manual yaml-matrix dispatch, or a manual custom-commands dispatch. All
+share the same graph model, scheduler and environment execution; they
+differ in how the commit and the stage commands are determined, and in
+how repeated triggers are recorded.
 
 - **Webhook dispatch** (automatic): a push to the configured code
   repository (see [Webhooks](#/docs/webhooks)) reads `md-builder.yaml`
@@ -20,6 +21,16 @@ commands are determined, and in how repeated triggers are recorded.
   the YAML — requeues the existing graph: sub-tasks and logs are rebuilt
   from the fresh snapshot, and test runs of stages the new graph no
   longer contains are dropped.
+- **Manual yaml dispatch** (the **Run command** page's *Manual test*
+  tab, first section — one ref input and one button — or
+  `POST /api/jobs/manual-yaml`): the webhook flow, started by hand for a
+  ref (branch / tag / commit id, empty = HEAD) of the site-configured
+  code repository. The ref is resolved, the commit recorded
+  **deduplicated like a webhook push**, and the yaml matrix at it is
+  dispatched exactly like a push: same graphs keyed by
+  (commit, environment), so re-triggering the same ref requeues them
+  with fresh snapshots (picking up yaml or environment-tag changes)
+  instead of adding matrix rows. Graphs are marked `trigger: 2`.
 - **Manual dispatch** (the **Run command** page's *Manual test* tab, or
   `POST /api/jobs/manual`, see
   [Dashboard & API](#/docs/dashboard)): a user-configured test — no YAML,
@@ -37,8 +48,10 @@ commands are determined, and in how repeated triggers are recorded.
   dashboard, but greyed out.
 
 The `trigger` column of a task records how its graph was created —
-`0` = webhook, `1` = manual — and is surfaced on the task pages and the
-matrix (a small "M" / "manual" badge marks manually dispatched graphs).
+`0` = webhook, `1` = manual (custom commands), `2` = manual yaml — and is
+surfaced on the task pages and the
+matrix (a small "M" / "manual" badge marks manually created graphs —
+`1` or `2`).
 
 A graph is a root task plus a small DAG of sub-tasks:
 

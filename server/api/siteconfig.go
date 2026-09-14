@@ -23,10 +23,10 @@ type siteConfigJSON struct {
 // token follows the environment private-key convention: an empty value
 // keeps the stored one; the explicit Clear flag removes it.
 type siteConfigInput struct {
-	CodeRepo       string `json:"codeRepo"`
-	AccessToken    string `json:"accessToken"` // empty = keep current
-	Timezone       string `json:"timezone"`    // IANA name, "" = browser local
-	ClearAccessToken bool  `json:"clearAccessToken"`
+	CodeRepo         string `json:"codeRepo"`
+	AccessToken      string `json:"accessToken"` // empty = keep current
+	Timezone         string `json:"timezone"`    // IANA name, "" = browser local
+	ClearAccessToken bool   `json:"clearAccessToken"`
 }
 
 // handleSiteConfig routes GET/PUT /api/site-config. Any logged-in user may

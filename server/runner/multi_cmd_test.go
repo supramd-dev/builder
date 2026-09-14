@@ -71,11 +71,11 @@ func TestMultiCommandScriptShape(t *testing.T) {
 
 func TestMultiCommandScriptBash(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		cmds      CommandList
-		wantExit  int
-		wantOut   []string
-		notIn     []string
+		name     string
+		cmds     CommandList
+		wantExit int
+		wantOut  []string
+		notIn    []string
 	}{
 		{"all pass", CommandList{"echo one", "echo two"}, 0,
 			[]string{"one", "two"}, nil},

@@ -8,6 +8,7 @@ import {
   getSiteConfig,
   listEnvironments,
   triggerManualTest,
+  triggerManualYAML,
   type ExecResult,
   type ScriptLanguage,
   type TestEnvironment,
@@ -319,6 +320,86 @@ function splitPaths(input: string): string | string[] | undefined {
   return parts.length === 1 ? parts[0] : parts
 }
 
+// YAMLTriggerSection dispatches the md-builder.yaml matrix of one ref:
+// a text input (branch / tag / commit id, empty = HEAD) and a button — the
+// webhook flow (clone, yaml parse, environment matching, graphs) on demand.
+function YAMLTriggerSection({
+  repo,
+  onError,
+}: {
+  repo: string
+  onError: (message: string) => void
+}) {
+  const [ref, setRef] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [result, setResult] = useState<Awaited<ReturnType<typeof triggerManualYAML>> | null>(null)
+  const [error, setError] = useState('')
+
+  const submit = async () => {
+    if (submitting) return
+    setSubmitting(true)
+    setError('')
+    setResult(null)
+    try {
+      const res = await triggerManualYAML(ref.trim())
+      setResult(res)
+      if (res.dispatchError) {
+        setError(res.dispatchError)
+        onError(res.dispatchError)
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <form
+      className="yaml-trigger"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (!submitting) void submit()
+      }}
+    >
+      <fieldset className="form-group">
+        <label>Run the md-builder.yaml matrix of a branch / tag / commit</label>
+        <div className="yaml-trigger-row">
+          <input
+            type="text"
+            value={ref}
+            onChange={(e) => setRef(e.target.value)}
+            placeholder="main / v1.2.0 / a commit id — empty = HEAD"
+            aria-label="Branch, tag or commit id"
+          />
+          <button type="submit" className="btn btn-primary" disabled={submitting}>
+            {submitting ? 'Dispatching…' : 'Test yaml matrix'}
+          </button>
+        </div>
+        <small className="text-muted">
+          Resolves the ref on{' '}
+          {repo ? <code>{repo}</code> : 'the site-configured code repository'}, reads the
+          md-builder.yaml at it and dispatches one task graph per matching
+          environment — exactly like a webhook push (the same commit requeues
+          the same graphs). Results appear on the dashboard.
+        </small>
+      </fieldset>
+
+      {error && <div className="alert alert-danger">{error}</div>}
+
+      {result && !error && (
+        <p>
+          Dispatched {result.jobsCreated} task graph{result.jobsCreated === 1 ? '' : 's'} for{' '}
+          <code>{result.commitSha.slice(0, 12)}</code>
+          {result.entriesSkipped > 0 && <> ({result.entriesSkipped} entr{result.entriesSkipped === 1 ? 'y' : 'ies'} matched no environment)</>}
+          .
+        </p>
+      )}
+    </form>
+  )
+}
+
 // ManualTestTab dispatches a user-configured test: one repository (default:
 // the site config's code repository), an optional ref and the three stage
 // commands, run as task graphs (clone → build → unit → regression) by the
@@ -399,11 +480,13 @@ function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
 
   return (
     <div>
+      <YAMLTriggerSection repo={repo} onError={onError} />
+
       <p className="text-muted">
-        Dispatch a test of one repository on the selected environments: the
-        task graph (clone → build → unit test → regression test) is queued
-        and run by the scheduler, like a webhook-triggered push. It shows up
-        on the dashboard marked <code>manual</code>.{' '}
+        Or dispatch a test of one repository on the selected environments with
+        custom stage commands: the task graph (clone → build → unit test →
+        regression test) is queued and run by the scheduler. It shows up on
+        the dashboard marked <code>manual</code>.{' '}
         {repo ? (
           <>
             Default repository: <code>{repo}</code>

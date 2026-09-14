@@ -122,7 +122,7 @@ function TaskDetail({
         )}
         {task.tags && <>tags: {task.tags} · </>}
         <TaskStatusText status={task.status} />
-        {task.trigger === 1 && (
+        {(task.trigger ?? 0) > 0 && (
           <span className="dash-trigger" title="manually triggered from the UI">
             manual
           </span>

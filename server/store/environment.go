@@ -27,9 +27,9 @@ type TestEnvironment struct {
 	// stage (build/unit/regression case) on this environment: module loads,
 	// compiler exports, environment-specific paths. Empty = no script (the
 	// runner warns in the task log). Not secret — returned in full by the API.
-	EnvScript  string `gorm:"type:text;not null;default:''"`
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	EnvScript string `gorm:"type:text;not null;default:''"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // EnvScriptName derives the on-host file name for the environment script:

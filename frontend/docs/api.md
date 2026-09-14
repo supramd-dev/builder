@@ -167,6 +167,39 @@ list of paths — a run can produce several results files.
   fresh commit row, so re-running the same ref adds a new matrix row and
   supersedes the older ones.
 
+### YAML matrix dispatch
+
+`POST /api/jobs/manual-yaml` runs the **webhook flow on demand** for a
+ref of the site-configured code repository — the form has one input and
+one button on the *Manual test* tab:
+
+```
+POST /api/jobs/manual-yaml
+{
+  "ref": "main"   // branch, tag, short/full SHA; empty = HEAD
+}
+```
+
+The ref is resolved (the same `git ls-remote` as the manual dispatch),
+the commit recorded **deduplicated like a webhook push**, the
+md-builder.yaml at that commit read and parsed, and one graph per
+matching environment created:
+
+```
+{
+  "commitId": 7, "commitSha": "abc123…", "commitCreated": true,
+  "jobsCreated": 2, "entriesSkipped": 0
+}
+```
+
+- Graphs are marked `trigger: 2` (manual yaml). Re-triggering the same
+  ref requeues the **same** graphs (keyed by commit+environment) with
+  fresh snapshots — yaml or environment-tag changes are picked up, and
+  no extra matrix row appears.
+- Errors (unresolvable ref, bad YAML, no matching environment) come back
+  as 422 with a `dispatchError` field, mirroring the webhook response;
+  the commit row stays recorded when one was resolved.
+
 ## API endpoints
 
 All endpoints require a session (cookie) unless noted. Users are
@@ -205,6 +238,7 @@ script is (it is not a secret).
 | GET    | `/api/test-artifacts/{id}`      | One stored artifact's raw content             |
 | POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit (webhook-style, reads the YAML) |
 | POST   | `/api/jobs/manual`              | Dispatch a user-configured test (repo, ref, stage commands, environments; no YAML) |
+| POST   | `/api/jobs/manual-yaml`         | Dispatch the md-builder.yaml matrix at a ref (webhook flow on demand) |
 | GET    | `/api/jobs`                     | Recent task graphs (`?limit=`, monitoring; legacy job shape) |
 | GET    | `/api/tasks/{id}`               | One task; a root carries its sub-task list and commit/environment context |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | The task's log chunks after the given sequence (incremental, live-following) |

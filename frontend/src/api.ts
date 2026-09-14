@@ -191,7 +191,7 @@ export interface RunCell {
   total: number
   passed: number
   failed: number
-  trigger?: number // the root graph's trigger: 1 = manual, 0/absent = webhook
+  trigger?: number // the root graph's trigger: 1 = manual, 2 = manual yaml, 0/absent = webhook
   startedAt: string
   finishedAt: string
   error?: string
@@ -254,6 +254,27 @@ export async function triggerManualTest(
   return api<{ roots: ManualTestRoot[] }>('/api/jobs/manual', {
     method: 'POST',
     body: JSON.stringify(input),
+  })
+}
+
+// ManualYAMLResult is the POST /api/jobs/manual-yaml response: the resolved
+// commit (0 when resolution failed) and how many graphs were created.
+export interface ManualYAMLResult {
+  commitId: number
+  commitSha: string
+  commitCreated: boolean
+  jobsCreated: number
+  entriesSkipped: number
+  dispatchError?: string
+}
+
+// triggerManualYAML dispatches the md-builder.yaml matrix of the given ref
+// (branch / tag / commit id; empty = HEAD) of the site-configured code
+// repository — the webhook flow, started by hand.
+export async function triggerManualYAML(ref: string): Promise<ManualYAMLResult> {
+  return api<ManualYAMLResult>('/api/jobs/manual-yaml', {
+    method: 'POST',
+    body: JSON.stringify({ ref }),
   })
 }
 
@@ -438,7 +459,7 @@ export interface TaskDetail {
   commitId: number
   environmentId: number
   tags: string
-  trigger?: number // 1 = manual, 0/absent = webhook
+  trigger?: number // 1 = manual, 2 = manual yaml, 0/absent = webhook
   startedAt: string
   finishedAt: string
   subTasks?: SubTask[]

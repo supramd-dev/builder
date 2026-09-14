@@ -435,6 +435,23 @@ textarea.form-control:focus {
   min-width: 12rem;
 }
 
+/* Run page, manual test tab: the yaml-matrix trigger (ref input + button) */
+.yaml-trigger {
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.yaml-trigger-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.yaml-trigger-row input {
+  flex: 1 1 20rem;
+}
+
 .run-language-buttons {
   display: flex;
   gap: 1rem;

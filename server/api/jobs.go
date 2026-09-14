@@ -28,15 +28,25 @@ type jobJSON struct {
 }
 
 // handleJobs routes /api/jobs: POST re-dispatches a commit (manual trigger),
-// GET lists recent root tasks.
+// GET lists recent root tasks. /api/jobs/manual and /api/jobs/manual-yaml
+// are the two user-facing dispatches (custom stage commands; the yaml matrix
+// of a chosen ref).
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request, user *store.User) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/jobs")
-	if strings.Trim(rest, "/") == "manual" {
+	switch strings.Trim(rest, "/") {
+	case "manual":
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
 		s.triggerManual(w, r, user)
+		return
+	case "manual-yaml":
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		s.triggerManualYAML(w, r, user)
 		return
 	}
 	switch r.Method {
@@ -200,6 +210,51 @@ func (s *Server) triggerManual(w http.ResponseWriter, r *http.Request, user *sto
 		out = append(out, manualTestRoot{TaskID: root.ID, EnvironmentID: root.EnvironmentID})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"roots": out})
+}
+
+// manualYAMLInput is the body of POST /api/jobs/manual-yaml: a ref
+// (branch, tag, short/full SHA; empty = HEAD) of the site-configured code
+// repository whose md-builder.yaml matrix should be dispatched — the same
+// flow a webhook push takes, started by hand.
+type manualYAMLInput struct {
+	Ref string `json:"ref"`
+}
+
+// triggerManualYAML handles POST /api/jobs/manual-yaml — resolve the ref,
+// record the commit (deduplicated like a webhook push) and dispatch the
+// yaml matrix at it: clone, yaml parse, environment matching, graphs.
+func (s *Server) triggerManualYAML(w http.ResponseWriter, r *http.Request, user *store.User) {
+	if s.Runner == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "task dispatch is not configured"})
+		return
+	}
+	var in manualYAMLInput
+	if err := decodeJSON(r, &in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	commit, res := s.Runner.DispatchForRef(r.Context(), in.Ref)
+	resp := map[string]any{
+		"commitId":       commit.ID,
+		"commitSha":      commit.SHA,
+		"commitCreated":  res.CommitCreated,
+		"jobsCreated":    res.TasksCreated,
+		"entriesSkipped": res.EntriesSkipped,
+	}
+	if res.Err != nil {
+		resp["dispatchError"] = res.Err.Error()
+		// Mirror the webhook: the commit (when resolved) is recorded, the
+		// dispatch failure is surfaced in the body. 422 when nothing was
+		// dispatched at all, 200 when at least one graph was created.
+		code := http.StatusUnprocessableEntity
+		if res.TasksCreated > 0 {
+			code = http.StatusOK
+		}
+		writeJSON(w, code, resp)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func toJobJSON(t *store.Task) jobJSON {
