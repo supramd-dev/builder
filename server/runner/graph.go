@@ -72,7 +72,7 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 	// per-case cells on the graph page.
 	if entry.Unit != nil {
 		cfg, err := marshalJSON(StageConfig{
-			Command: entry.Unit.Command,
+			Command: entry.Unit.Command.Clean(),
 			Workdir: entry.Unit.Workdir,
 			Timeout: resolveStageTimeout(entry.Unit.Timeout, entry),
 			Env:     entry.Env,
@@ -92,7 +92,7 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 		c := &entry.Regression[i]
 		cfg, err := marshalJSON(CaseStageConfig{
 			Case:    c.Name,
-			Command: c.Command,
+			Command: c.Command.Clean(),
 			Workdir: c.Workdir,
 			Timeout: resolveStageTimeout(c.Timeout, entry),
 			Env:     entry.Env,

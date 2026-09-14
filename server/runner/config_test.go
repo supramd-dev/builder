@@ -42,7 +42,7 @@ matrix:
 	if len(reg) != 2 {
 		t.Fatalf("entry 0: want 2 cases, got %d", len(reg))
 	}
-	if reg[0].Name != "heat" || reg[0].Command != "mpirun ./run_heat" ||
+	if reg[0].Name != "heat" || reg[0].Command.String() != "mpirun ./run_heat" ||
 		reg[0].Workdir != "regression/heat" || reg[0].Timeout != 1800 ||
 		len(reg[0].Results) != 1 || reg[0].Results[0] != "regression/heat/out.xml" {
 		t.Errorf("heat case wrong: %+v", reg[0])
@@ -245,4 +245,70 @@ func caseNames(cases []RegressionCase) []string {
 		out[i] = cases[i].Name
 	}
 	return out
+}
+
+func TestParseConfigV2CommandList(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 2
+presets:
+  heat:
+    command:
+      - "make prepare"
+      - "mpirun ./run_heat"
+    results: "out.xml"
+  single:
+    command: "echo one"
+matrix:
+  - tags: [cpu]
+    unit:
+      command: ["make data", "ctest -L unit"]
+    regression:
+      use: [heat, single]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := entries[0]
+	if got := e.Unit.Command.String(); got != "make data && ctest -L unit" {
+		t.Errorf("unit command list wrong: %q", got)
+	}
+	if len(e.Regression) != 2 {
+		t.Fatalf("expected 2 cases, got %d", len(e.Regression))
+	}
+	heat := e.Regression[0]
+	if heat.Name != "heat" || len(heat.Command) != 2 ||
+		heat.Command[0] != "make prepare" || heat.Command[1] != "mpirun ./run_heat" {
+		t.Errorf("heat command list wrong: %+v", heat)
+	}
+	if single := e.Regression[1]; len(single.Command) != 1 || single.Command[0] != "echo one" {
+		t.Errorf("scalar command should stay a one-element list: %+v", single.Command)
+	}
+	// Empty list entries are dropped by Clean (block-scalar newlines).
+	if got := (CommandList{"a", "  ", "", "b"}).Clean(); len(got) != 2 {
+		t.Errorf("Clean should drop blanks: %+v", got)
+	}
+}
+
+func TestParseConfigV2CommandListInvalid(t *testing.T) {
+	_, err := ParseConfig([]byte(`version: 2
+presets:
+  bad:
+    command:
+      map: true
+matrix:
+  - tags: [cpu]
+    regression:
+      use: [bad]
+`))
+	if err == nil || !strings.Contains(err.Error(), "command must be a string or a list of strings") {
+		t.Errorf("mapping command should fail validation: %v", err)
+	}
+	_, err = ParseConfig([]byte(`version: 2
+matrix:
+  - tags: [cpu]
+    unit:
+      command: []
+`))
+	if err == nil || !strings.Contains(err.Error(), "unit without a command") {
+		t.Errorf("empty command list should fail validation: %v", err)
+	}
 }

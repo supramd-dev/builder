@@ -80,7 +80,7 @@ matrix:
 | matrix[].build               | 否       | 构建阶段(见下)。                                                   |
 | matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 workdir、timeout、results。       |
 | matrix[].regression          | 否       | 回归测试选择:use / disable 引用预设。                              |
-| unit.command                 | 是(每阶段) | shell 命令(可用内置环境变量,见内置环境变量)。                       |
+| unit.command                 | 是(每阶段) | shell 命令,或命令列表(见命令列表)。                       |
 | unit.workdir                 | 否       | 命令的运行目录(见工作目录)。                                       |
 | unit.results                 | 否       | 结果文件路径(或路径列表),runner 会在阶段结束后取回(见结果文件)。 |
 | unit.timeout                 | 否       | 覆盖默认值的阶段超时。                                              |
@@ -115,7 +115,7 @@ presets:
 
 | 字段                     | 必填 | 说明                                                        |
 |--------------------------|------|--------------------------------------------------------------|
-| presets.<名称>.command   | 是   | 运行该用例的 shell 命令。                                     |
+| presets.<名称>.command   | 是   | 运行该用例的 shell 命令,或命令列表(见命令列表)。                |
 | presets.<名称>.description | 否 | 人类可读的标签。                                              |
 | presets.<名称>.workdir   | 否   | 命令的运行目录(见工作目录)。                                 |
 | presets.<名称>.timeout   | 否   | 用例超时(缺省回退到 defaults / 矩阵条目的 timeout)。          |
@@ -152,6 +152,28 @@ presets:
 全部通过 → ✓。各用例相互独立 —— 某个用例失败不会中断其他用例。当
 clone 或 build 失败时,所有用例被记录为 **skipped**(⤼),备注为上游
 错误。
+
+## 命令列表
+
+unit 阶段或回归预设的 `command` 可以是**单条命令,也可以是列表**:
+
+```yaml
+command: "make data && ctest -L unit"       # 标量:一条 bash -c 命令
+command: ["make data", "ctest -L unit"]     # 列表:两条命令
+command: |                                  # 块标量:仍是一条命令
+  ./configure --enable-mpi
+  make -j8
+```
+
+- **标量**形式是单次 `bash -c` 调用 —— 用 `&&`、`;`、管道或块标量
+  自由组合。
+- **列表**形式按顺序执行每一项(每条命令有自己的 `timeout` 包装),
+  并用 `&&` 串联:**任一条命令失败即停止** —— 后续命令不再执行,
+  该用例以失败命令的退出码判定失败。
+- 空白项会被忽略(方便把块标量按行拆成列表)。
+
+列表形式等价于在单条字符串里用 `&&` 串联,只是可读性更好
+(也省得在 yaml 里写 `&&`)。
 
 ## 内置环境变量
 

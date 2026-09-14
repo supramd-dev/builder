@@ -55,24 +55,34 @@ defaults:
 # regression run on the dashboard (one cell, per-case rows inside).
 #
 # Fields per preset:
-#   command     (required) shell command running the case
+#   command     (required) shell command running the case — a single
+#                          string OR a list of strings (see below)
 #   description (optional) human-readable label
 #   workdir     (optional) directory the command runs in, relative to the
 #                          code root; absolute paths pass through as-is
 #   timeout     (optional) seconds; falls back to defaults.timeout
 #   results     (optional) results file(s) fetched back — a single path
 #                          or a list; googletest XML/JSON by default
+#
+# A command may be several: a yaml list runs the entries in order and
+# stops at the first failure — the remaining commands are skipped and
+# the stage fails with that command's exit code.
+# A single string is one bash -c invocation — chain with && / ; / | as
+# you like, or use a yaml block (|) for a small inline script.
 presets:
   heat:
     description: Heat equation convergence (2nd-order scheme)
-    command: "./run_heat.py --nt 500 --tol 1e-5"
+    command:
+      - "make prepare"               # list form: in order, stops at the
+                                     # first failure
+      - "./run_heat.py --nt 500 --tol 1e-5"
     workdir: "regression/heat"       # runs in <code>/regression/heat
     timeout: 1800
     results: "out.xml"               # relative to the preset workdir
 
   poisson:
     description: Poisson solver, multigrid vs direct
-    command: "python3 run_poisson.py --grid 128"
+    command: "python3 run_poisson.py --grid 128"   # scalar form
     workdir: "regression/poisson"
     results: ["poisson.xml", "poisson.log"]   # several files: a list
 
@@ -112,7 +122,9 @@ matrix:
 
     unit:
       # Required. Runs in the code dir by default (workdir below moves
-      # it). Everything a bash line can do, including && chains.
+      # it). Everything a bash line can do, including && chains — or a
+      # list of commands (same semantics as presets: in order, stops at
+      # the first failure).
       command: "ctest --test-dir build -L unit --output-on-failure"
       timeout: 600                    # overrides defaults.timeout
       results: "build/test_detail.xml"   # googletest XML written by the

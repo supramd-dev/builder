@@ -35,11 +35,100 @@ const (
 
 // EnvConfig is a test stage: unit, or one regression preset.
 type EnvConfig struct {
-	Command     string       `yaml:"command" json:"command"`
+	Command     CommandList  `yaml:"command" json:"command"`
 	Description string       `yaml:"description,omitempty" json:"description,omitempty"` // preset label (regression presets)
 	Workdir     string       `yaml:"workdir,omitempty" json:"workdir,omitempty"`        // relative to the code dir; empty = code dir
 	Timeout     int          `yaml:"timeout,omitempty" json:"timeout,omitempty"`        // seconds; 0 = use default
 	Results     ResultsPaths `yaml:"results,omitempty" json:"results,omitempty"`        // googletest results files (XML/JSON) produced by the command
+}
+
+// CommandList is a stage command that may be one command or several. The
+// yaml form accepts a scalar string or a list of strings; the commands run
+// in order and stop at the first failure — a non-zero exit skips the
+// remaining commands and fails the stage with that exit code. A
+// multi-line scalar (yaml `|` block) stays a single command.
+//
+//	command: "ctest -L unit"
+//	command: ["make data", "ctest -L unit"]
+type CommandList []string
+
+// UnmarshalYAML accepts a scalar command or a list of commands.
+func (c *CommandList) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		if node.Value == "" && node.Tag == "!!null" {
+			*c = nil
+			return nil
+		}
+		*c = CommandList{node.Value}
+		return nil
+	case yaml.SequenceNode:
+		var list []string
+		if err := node.Decode(&list); err != nil {
+			return err
+		}
+		*c = CommandList(list)
+		return nil
+	default:
+		return fmt.Errorf("command must be a string or a list of strings")
+	}
+}
+
+// UnmarshalJSON accepts a single string or a list (legacy snapshots stored
+// one string).
+func (c *CommandList) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	if s == "null" || s == "" {
+		*c = nil
+		return nil
+	}
+	if s[0] == '[' {
+		var list []string
+		if err := json.Unmarshal(data, &list); err != nil {
+			return err
+		}
+		*c = CommandList(list)
+		return nil
+	}
+	var one string
+	if err := json.Unmarshal(data, &one); err != nil {
+		return err
+	}
+	*c = CommandList{one}
+	return nil
+}
+
+// MarshalJSON emits the list form (one command → a one-element list keeps
+// the shape stable).
+func (c CommandList) MarshalJSON() ([]byte, error) {
+	list := []string(c)
+	if list == nil {
+		list = []string{}
+	}
+	return json.Marshal(list)
+}
+
+// Clean returns the commands trimmed, with empties dropped (a list entry
+// may be an empty line from yaml block scalars).
+func (c CommandList) Clean() CommandList {
+	out := make(CommandList, 0, len(c))
+	for _, s := range c {
+		if v := strings.TrimSpace(s); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// String joins the commands with " && " for contexts that need one line
+// (display, the manual-dispatch default).
+func (c CommandList) String() string {
+	return strings.Join(c.Clean(), " && ")
+}
+
+// IsEmpty reports whether no non-blank command is set.
+func (c CommandList) IsEmpty() bool {
+	return len(c.Clean()) == 0
 }
 
 // ResultsPaths is a list of results file paths. A run (or a single case) can
@@ -163,7 +252,7 @@ type rawConfig struct {
 type RegressionCase struct {
 	Name        string       `json:"name"` // preset name
 	Description string       `json:"description,omitempty"`
-	Command     string       `json:"command"`
+	Command     CommandList  `json:"command"`
 	Workdir     string       `json:"workdir,omitempty"`
 	Timeout     int          `json:"timeout"`
 	Results     ResultsPaths `json:"results,omitempty"`
@@ -195,7 +284,7 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		return nil, fmt.Errorf("md-builder.yaml: matrix must not be empty")
 	}
 	for name, p := range raw.Presets {
-		if p == nil || strings.TrimSpace(p.Command) == "" {
+		if p == nil || p.Command.IsEmpty() {
 			return nil, fmt.Errorf("md-builder.yaml: preset %q needs a command", name)
 		}
 	}
@@ -210,7 +299,7 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		if entry.Unit == nil && entry.Regression == nil {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d defines neither unit nor regression", i+1)
 		}
-		if entry.Unit != nil && strings.TrimSpace(entry.Unit.Command) == "" {
+		if entry.Unit != nil && entry.Unit.Command.IsEmpty() {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d has unit without a command", i+1)
 		}
 		if entry.Build.Generator != "" && entry.Build.Generator != GeneratorCMake && entry.Build.Generator != GeneratorScript {

@@ -104,7 +104,7 @@ func (rc *rootContext) creds() *GitCredentials {
 
 // scriptInput assembles the shared ScriptInput for sub-task scripts.
 // workdir/case/timeout are the stage-specific fields.
-func (rc *rootContext) scriptInput(stageCommand, workdir, caseName string, timeout int) *ScriptInput {
+func (rc *rootContext) scriptInput(stageCommand CommandList, workdir, caseName string, timeout int) *ScriptInput {
 	return &ScriptInput{
 		CommitSHA:     rc.sha,
 		EnvName:       rc.env.Name,
@@ -219,7 +219,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	logw := NewLogWriter(s.Store, task.ID)
 	defer logw.Close()
 
-	script, err := BuildScript(rc.scriptInput("", stage.Workdir, "", stage.Timeout))
+	script, err := BuildScript(rc.scriptInput(nil, stage.Workdir, "", stage.Timeout))
 	if err != nil {
 		s.failTaskLogged(task, logw, err.Error())
 		return

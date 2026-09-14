@@ -17,7 +17,10 @@ import (
 //	[ -f "$MD_TASK_DIR/md-builder-env-<hash>.sh" ] && . ... || warn   # when the env has one
 //	cd "<workdir>" || exit 1
 //	timeout N bash -c '<command>'
-//	exit $?
+//	exit $?                                                              # single command
+//	timeout N bash -c '<c1>' &&                                          # command list:
+//	timeout N bash -c '<c2>'                                             # stops at the first
+//	exit $?                                                              # failure
 //
 // The MD_* exports and the env script land in every stage script because
 // each stage is its own SSH session: state set by one never leaks to the
@@ -43,8 +46,11 @@ type ScriptInput struct {
 	// env map). The env map is exported by every script kind.
 	Entry *MergedEntry
 
-	// StageCommand is the command to run (all script kinds).
-	StageCommand string
+	// StageCommand is the command list to run (all script kinds): one or
+	// several commands, each under its own `timeout` wrapper. They run in
+	// order and stop at the first failure — a non-zero exit skips the
+	// remaining commands and fails the stage with that exit code.
+	StageCommand CommandList
 
 	// Workdir is the working directory of the command, relative to the code
 	// dir; empty = the code dir itself. Absolute paths pass through.
@@ -102,15 +108,25 @@ func BuildScript(in *ScriptInput) (string, error) {
 }
 
 // BuildStageScript renders the remote bash script for a test sub-task
-// (unit / regression case): the shared preamble plus the command under
-// `timeout` in the configured workdir.
+// (unit / regression case): the shared preamble plus the command list in
+// the configured workdir. Each command runs under its own `timeout`
+// wrapper, chained with `&&`: a failing command stops the stage right
+// there (the remaining ones do not run) and its exit code becomes the
+// stage's exit code.
 func BuildStageScript(in *ScriptInput) (string, error) {
-	if in == nil || in.StageCommand == "" {
+	if in == nil || in.StageCommand.IsEmpty() {
 		return "", fmt.Errorf("no stage command")
 	}
-	return renderScript(in, scriptBody{cmds: []string{
-		fmt.Sprintf("timeout %d bash -c %s", in.TimeoutOr(DefaultStageTimeoutSeconds), shq(in.StageCommand)),
-	}})
+	cmds := in.StageCommand.Clean()
+	secs := in.TimeoutOr(DefaultStageTimeoutSeconds)
+
+	// Chain the commands with `&&`: order is kept, the first failure
+	// short-circuits the rest, and $? carries its exit code to `exit $?`.
+	chain := make([]string, len(cmds))
+	for i, cmd := range cmds {
+		chain[i] = fmt.Sprintf("timeout %d bash -c %s", secs, shq(cmd))
+	}
+	return renderScript(in, scriptBody{cmds: []string{strings.Join(chain, " && \\\n")}})
 }
 
 // scriptBody is the stage-specific part of a rendered script.

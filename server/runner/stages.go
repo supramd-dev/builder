@@ -26,12 +26,12 @@ type BuildStageConfig struct {
 	Env        map[string]string `json:"env,omitempty"`     // exported for the stage
 }
 
-// StageConfig is the unit sub-task snapshot: one command with its workdir,
-// timeout, environment and the optional results files the runner fetches
-// back after the command ran (a run can produce several; legacy snapshots
-// store a single string and still decode).
+// StageConfig is the unit sub-task snapshot: the command list with its
+// workdir, timeout, environment and the optional results files the runner
+// fetches back after the commands ran (a run can produce several; legacy
+// snapshots store a single string and still decode).
 type StageConfig struct {
-	Command string            `json:"command"`
+	Command CommandList       `json:"command"`
 	Workdir string            `json:"workdir,omitempty"`
 	Timeout int               `json:"timeout"` // seconds
 	Env     map[string]string `json:"env,omitempty"`
@@ -39,10 +39,10 @@ type StageConfig struct {
 }
 
 // CaseStageConfig is one regression case sub-task snapshot: the preset name
-// plus the resolved command, workdir, timeout and results files.
+// plus the resolved command list, workdir, timeout and results files.
 type CaseStageConfig struct {
 	Case    string            `json:"case"` // preset name
-	Command string            `json:"command"`
+	Command CommandList       `json:"command"`
 	Workdir string            `json:"workdir,omitempty"`
 	Timeout int               `json:"timeout"`
 	Env     map[string]string `json:"env,omitempty"`

@@ -173,7 +173,7 @@ func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnviron
 	}
 	if cmd := strings.TrimSpace(in.UnitCommand); cmd != "" {
 		entry.Unit = &EnvConfig{
-			Command: cmd,
+			Command: CommandList{cmd},
 			Timeout: DefaultTimeoutSeconds,
 			Results: in.UnitResults.Clean(),
 		}
@@ -181,7 +181,7 @@ func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnviron
 	if cmd := strings.TrimSpace(in.RegressionCommand); cmd != "" {
 		entry.Regression = []RegressionCase{{
 			Name:    "regression",
-			Command: cmd,
+			Command: CommandList{cmd},
 			Timeout: DefaultTimeoutSeconds,
 			Results: in.RegressionResults.Clean(),
 		}}

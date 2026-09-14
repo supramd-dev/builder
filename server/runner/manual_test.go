@@ -124,7 +124,7 @@ func TestDispatchManual(t *testing.T) {
 				if err := json.Unmarshal([]byte(subs[i].Config), &sc); err != nil {
 					t.Fatal(err)
 				}
-				if sc.Command != "ctest -L unit" {
+				if sc.Command.String() != "ctest -L unit" {
 					t.Errorf("root %d: unit command %q", root.ID, sc.Command)
 				}
 				if len(sc.Results) != 2 || sc.Results[0] != "build/test_detail.xml" || sc.Results[1] != "build/extra.json" {

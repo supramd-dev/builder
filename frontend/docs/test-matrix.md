@@ -83,7 +83,7 @@ matrix:
 | matrix[].build               | no       | Build stage (see below).                                            |
 | matrix[].unit                | no       | Unit test stage: at least command; optional workdir, timeout, results. |
 | matrix[].regression          | no       | Regression selection: use and/or disable referencing presets.       |
-| unit.command                 | yes (per stage) | Shell command (see Built-in environment variables).          |
+| unit.command                 | yes (per stage) | Shell command, or a list of commands (see Command lists).    |
 | unit.workdir                 | no       | Directory the command runs in (see Working directories).            |
 | unit.results                 | no       | Results file path (or list) the runner fetches back (see Results files). |
 | unit.timeout                 | no       | Stage timeout overriding defaults.                                  |
@@ -120,7 +120,7 @@ presets:
 
 | Field                | Required | Description                                                   |
 |----------------------|----------|---------------------------------------------------------------|
-| presets.<name>.command | yes    | Shell command running the case.                              |
+| presets.<name>.command | yes    | Shell command, or a list of commands (see Command lists).    |
 | presets.<name>.description | no | Human-readable label.                                         |
 | presets.<name>.workdir | no    | Directory the command runs in (see Working directories).     |
 | presets.<name>.timeout | no     | Case timeout (falls back to defaults/matrix timeout).        |
@@ -163,6 +163,30 @@ failed case → the cell shows ✗, every case passed → ✓. Cases run
 independently — one failing case does not stop the others. When the
 clone or build fails, every case is recorded as **skipped** (⤼) with the
 upstream error as its note.
+
+## Command lists
+
+The `command` of a unit stage or a regression preset may be **one
+command or a list**:
+
+```yaml
+command: "make data && ctest -L unit"       # scalar: one bash -c line
+command: ["make data", "ctest -L unit"]     # list: two commands
+command: |                                  # block scalar: still one command
+  ./configure --enable-mpi
+  make -j8
+```
+
+- The **scalar** form is a single `bash -c` invocation — chain with `&&`,
+  `;`, pipes or a block scalar however you like.
+- The **list** form runs the entries in order, each under its own
+  `timeout` wrapper, chained with `&&`: **a failing command stops the
+  stage right there** — the remaining commands do not run, and the case
+  fails with that command's exit code.
+- Blank entries are dropped (handy with block scalars split into lines).
+
+The list form is exactly equivalent to joining with `&&` in one string;
+it just reads better (and keeps `&&` out of quoted yaml).
 
 ## Built-in environment variables
 

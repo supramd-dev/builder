@@ -15,10 +15,10 @@ func sampleEntry() *MergedEntry {
 		Timeout: 300,
 		Env:     map[string]string{"CC": "gcc"},
 		Build:   BuildConfig{Generator: GeneratorCMake, CMakeFlags: "-DX=1", Threads: 4},
-		Unit:    &EnvConfig{Command: "ctest -L unit", Timeout: 100},
+		Unit:    &EnvConfig{Command: CommandList{"ctest -L unit"}, Timeout: 100},
 		Regression: []RegressionCase{
-			{Name: "heat", Command: "python3 run_heat.py", Timeout: 200},
-			{Name: "poisson", Command: "python3 run_poisson.py", Timeout: 0},
+			{Name: "heat", Command: CommandList{"python3 run_heat.py"}, Timeout: 200},
+			{Name: "poisson", Command: CommandList{"python3 run_poisson.py"}, Timeout: 0},
 		},
 	}
 }
@@ -77,7 +77,7 @@ func TestBuildTaskGraphShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(tasks[2].Config), &unit); err != nil {
 		t.Fatal(err)
 	}
-	if unit.Command != "ctest -L unit" || unit.Timeout != 100 || unit.Workdir != "" {
+	if unit.Command.String() != "ctest -L unit" || unit.Timeout != 100 || unit.Workdir != "" {
 		t.Errorf("unit snapshot wrong: %+v", unit)
 	}
 
@@ -86,7 +86,7 @@ func TestBuildTaskGraphShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(tasks[3].Config), &heat); err != nil {
 		t.Fatal(err)
 	}
-	if heat.Case != "heat" || heat.Command != "python3 run_heat.py" || heat.Timeout != 200 {
+	if heat.Case != "heat" || heat.Command.String() != "python3 run_heat.py" || heat.Timeout != 200 {
 		t.Errorf("heat case snapshot wrong: %+v", heat)
 	}
 	var poisson CaseStageConfig
@@ -211,7 +211,7 @@ func TestBuildStageScriptAndExports(t *testing.T) {
 		TaskDir:      "$HOME/.md-builder/tasks/abcdef123456",
 		CodeDir:      "$HOME/.md-builder/tasks/abcdef123456/code",
 		Entry:        sampleEntry(),
-		StageCommand: "ctest -L unit",
+		StageCommand: CommandList{"ctest -L unit"},
 		Workdir:      "tests/unit",
 		Timeout:      90,
 	}
@@ -239,7 +239,7 @@ func TestBuildStageScriptAndExports(t *testing.T) {
 		TaskDir:      "$HOME/.md-builder/tasks/abcdef123456",
 		CodeDir:      "$HOME/.md-builder/tasks/abcdef123456/code",
 		Entry:        sampleEntry(),
-		StageCommand: "python3 run_heat.py",
+		StageCommand: CommandList{"python3 run_heat.py"},
 		CaseName:     "heat",
 		Timeout:      90,
 	}
@@ -267,7 +267,7 @@ func TestBuildStageScriptEnvScriptSource(t *testing.T) {
 		TaskDir:       "$HOME/.md-builder/tasks/abcdef123456",
 		CodeDir:       "$HOME/.md-builder/tasks/abcdef123456/code",
 		Entry:         sampleEntry(),
-		StageCommand:  "ctest -L unit",
+		StageCommand:  CommandList{"ctest -L unit"},
 		EnvScriptName: "md-builder-env-abc123def456.sh",
 		Timeout:       90,
 	}

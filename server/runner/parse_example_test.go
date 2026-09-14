@@ -29,10 +29,13 @@ func TestParseExampleYAML(t *testing.T) {
 	if e1.Regression[0].Workdir != "regression/heat" || e1.Regression[0].Timeout != 1800 {
 		t.Errorf("heat case wrong: %+v", e1.Regression[0])
 	}
+	if got := e1.Regression[0].Command.String(); got != "make prepare && ./run_heat.py --nt 500 --tol 1e-5" {
+		t.Errorf("heat list command wrong: %q", got)
+	}
 	if e1.Regression[1].Timeout != 3600 {
 		t.Errorf("poisson should fall back to defaults timeout, got %d", e1.Regression[1].Timeout)
 	}
-	if e1.Unit == nil || !strings.Contains(e1.Unit.Command, "ctest") {
+	if e1.Unit == nil || !strings.Contains(e1.Unit.Command.String(), "ctest") {
 		t.Fatalf("entry 1 unit wrong: %+v", e1.Unit)
 	}
 	if e1.Unit.Timeout != 600 {
