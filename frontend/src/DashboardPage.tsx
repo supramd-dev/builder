@@ -40,6 +40,11 @@ export default function DashboardPage({ onError }: Props) {
   // no synchronous setState inside the effect.
   const effectiveKind = loadedKind ?? kind
 
+  // Both dashboard payloads carry repoFilter: the commit repo the matrix is
+  // scoped to (empty = no site codeRepo configured → all repos). Shown in the
+  // header so a switched code repo explains "missing" seed rows.
+  const repoFilter = (full ?? dash)?.repoFilter ?? ''
+
   const refresh = useCallback(
     async (k: DashboardKind) => {
       try {
@@ -91,7 +96,14 @@ export default function DashboardPage({ onError }: Props) {
           gap: '0.5rem',
         }}
       >
-        <h2 style={{ marginBottom: 0 }}>Test dashboard</h2>
+        <h2 style={{ marginBottom: 0 }}>
+          Test dashboard
+          {repoFilter && (
+            <span className="text-muted" style={{ marginLeft: '0.5rem', fontSize: '0.875rem', fontWeight: 400 }}>
+              {repoFilter}
+            </span>
+          )}
+        </h2>
         <div className="dash-tabs" role="tablist">
           {tab('full', 'All')}
           {tab('build', 'Build')}
