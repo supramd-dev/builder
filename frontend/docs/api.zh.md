@@ -82,13 +82,15 @@ commit 行还带 **graph** 链接:该 commit 任务管线
 - 删除环境会同时删除其测试运行。
 
 `GET /api/test-runs/{id}` 返回运行详情,含 `taskId`(产出该运行的阶段
-子任务,其日志即阶段的 stdout;外部上报为 0)、`skipped` 计数、`cases`
-(带 `durationMillis`)以及 `artifacts` —— 存储文件的引用,例如 runner
-取回的 googletest 结果文件(一次运行可以产出多个):
+子任务,其日志即阶段的 stdout;外部上报为 0)、`rootTaskId`(所在图的
+root 任务 —— 返回流水线页面的链接;外部上报为 0)、`skipped` 计数、
+`cases`(带 `durationMillis`)以及 `artifacts` —— 存储文件的引用,例如
+runner 取回的 googletest 结果文件(一次运行可以产出多个):
 
 ```json
 {
   "id": 12, "kind": "unit", "status": "failed", "taskId": 77,
+  "rootTaskId": 70,
   "total": 12, "passed": 9, "failed": 2, "skipped": 1,
   "artifacts": [
     {"id": 3, "caseId": 0, "kind": "results",

@@ -379,6 +379,9 @@ export interface TestRunDetail {
   // Stage sub-task that produced the run (0 = external report); its log
   // (stdout) is shown on the detail page.
   taskId: number
+  // Root of the producing stage task (0 = external report) — the breadcrumb
+  // link to the graph page.
+  rootTaskId: number
   environmentId: number
   environmentName: string | null
   commitId: number

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { HashRouter, NavLink as RRNavLink, Navigate, Route, Routes, useLocation } from 'react-router'
 import './App.css'
 import { api, getSiteConfig, type Me } from './api'
 import LoginPage from './LoginPage'
@@ -12,26 +13,27 @@ import DocsPage from './DocsPage'
 import TaskDetailPage from './TaskDetailPage'
 import TaskGraphPage from './TaskGraphPage'
 import { applySiteTimezone, subscribeTimezone } from './timezone'
-import type { CaseResult } from './api'
 
-// Page is the client-side routing state. The dashboard hierarchy is
-// dashboard → task graph → run detail → case detail, each with a back link;
-// the task log view (task-detail) stays reachable from the graph page.
-type Page =
-  | { view: 'dashboard' }
-  | { view: 'environments' }
-  | { view: 'run' }
-  | { view: 'settings' }
-  | { view: 'docs' }
-  | { view: 'run-detail'; runId: number }
-  | { view: 'case-detail'; runId: number; caseResult: CaseResult }
-  | { view: 'task-detail'; taskId: number }
-  | { view: 'task-graph'; taskId: number }
+// The route table (hash-based so the docs' #/docs/... anchors keep working
+// and the server's SPA fallback stays enough):
+//
+//   #/                      dashboard (default)
+//   #/environments          runner environments
+//   #/run                   run command
+//   #/settings              site settings
+//   #/docs                  documentation
+//   #/docs/:section         documentation, a section preselected
+//   #/tasks/:taskId         task graph (root)
+//   #/tasks/:taskId/log     task log view (root detail + step list)
+//   #/runs/:runId           test run detail
+//   #/runs/:runId/case/:caseId  case detail
+//
+// Signed-in pages read their ids from the URL (useParams) and link onward
+// with <Link> / useNavigate — no per-page navigation callbacks.
 
 function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [loadingMe, setLoadingMe] = useState(true)
-  const [page, setPage] = useState<Page>({ view: 'dashboard' })
   // Bumped when the display timezone changes so every page re-renders its
   // timestamps (the formatters read the module-level state directly).
   const [, setTimezoneTick] = useState(0)
@@ -76,123 +78,106 @@ function App() {
       // Ignore logout errors; clear local state regardless.
     }
     setMe(null)
-    setPage({ view: 'dashboard' })
   }
 
-  const navLink = (p: Page, label: string) => (
-    <a
-      href="#"
-      className={page.view === p.view ? 'active' : ''}
-      onClick={(e) => {
-        e.preventDefault()
-        setPage(p)
-      }}
-    >
+  return (
+    <HashRouter>
+      <ScrollToTop />
+      <div className="page">
+        <NavBar me={me} onLogout={handleLogout} />
+        {/* Main content */}
+        <div className="container content" style={{ flexGrow: 1 }}>
+          {loadingMe ? (
+            <p className="text-muted">Loading…</p>
+          ) : me ? (
+            <PageRoutes />
+          ) : (
+            <LoginPage onLogin={setMe} />
+          )}
+        </div>
+        {/* Footer */}
+        <footer className="container">
+          <span className="text-muted">
+            md-builder · Scientific computing test platform
+          </span>
+          {me && (
+            <span className="footer-nav">
+              <RRNavLink to="/docs">Documentation</RRNavLink>
+            </span>
+          )}
+        </footer>
+      </div>
+    </HashRouter>
+  )
+}
+
+// PageRoutes is the signed-in route table.
+function PageRoutes() {
+  return (
+    <Routes>
+      <Route path="/" element={<DashboardPage onError={console.warn} />} />
+      <Route path="/environments" element={<UserCenter />} />
+      <Route path="/run" element={<RunPage onError={console.warn} />} />
+      <Route path="/settings" element={<SettingsPage onError={console.warn} />} />
+      <Route path="/docs" element={<DocsPage />} />
+      <Route path="/docs/:section" element={<DocsPage />} />
+      <Route path="/tasks/:taskId" element={<TaskGraphPage />} />
+      <Route path="/tasks/:taskId/log" element={<TaskDetailPage />} />
+      <Route path="/runs/:runId" element={<TestRunDetailPage onError={console.warn} />} />
+      <Route path="/runs/:runId/case/:caseId" element={<CaseDetailPage />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  )
+}
+
+// ScrollToTop scrolls the window to the top after every route change.
+function ScrollToTop() {
+  const { pathname } = useLocation()
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [pathname])
+  return null
+}
+
+// NavBar is the top navigation; NavLink gives the active link its class.
+function NavBar({ me, onLogout }: { me: Me | null; onLogout: () => void }) {
+  const navLink = (to: string, label: string) => (
+    <RRNavLink to={to} className={({ isActive }) => (isActive ? 'active' : '')}>
       {label}
-    </a>
+    </RRNavLink>
   )
 
   return (
-    <div className="page">
-      {/* Top navigation bar */}
-      <nav className="container navbar">
-        <a href="/" className="brand">
-          md-builder
-        </a>
-        {me && (
-          <nav className="navbar-nav">
-            {navLink({ view: 'dashboard' }, 'Dashboard')}
-            {navLink({ view: 'environments' }, 'Runner Envs')}
-            {navLink({ view: 'run' }, 'Run command')}
-            {navLink({ view: 'settings' }, 'Settings')}
-          </nav>
-        )}
-        <div className="navbar-text">
-          {me ? (
-            <>
-              <span className="text-muted">{me.username}</span>
-              {' — '}
-              <a href="#" onClick={(e) => { e.preventDefault(); handleLogout() }}>
-                Log out
-              </a>
-            </>
-          ) : (
-            <>
-              <a href="#">Log in</a>
-              {' — '}
-              <a href="#">Register</a>
-            </>
-          )}
-        </div>
-      </nav>
-
-      {/* Main content */}
-      <div className="container content" style={{ flexGrow: 1 }}>
-        {loadingMe ? (
-          <p className="text-muted">Loading…</p>
-        ) : me ? (
-          page.view === 'dashboard' ? (
-            <DashboardPage
-              onOpenRun={(runId) => setPage({ view: 'run-detail', runId })}
-              onOpenTask={(taskId) => setPage({ view: 'task-graph', taskId })}
-              onError={console.warn}
-            />
-          ) : page.view === 'task-graph' ? (
-            <TaskGraphPage
-              taskId={page.taskId}
-              onBack={() => setPage({ view: 'dashboard' })}
-              onOpenRun={(runId) => setPage({ view: 'run-detail', runId })}
-              onOpenLog={(taskId) => setPage({ view: 'task-detail', taskId })}
-            />
-          ) : page.view === 'task-detail' ? (
-            <TaskDetailPage
-              taskId={page.taskId}
-              onBack={() => setPage({ view: 'dashboard' })}
-            />
-          ) : page.view === 'run-detail' ? (
-            <TestRunDetailPage
-              runId={page.runId}
-              onBack={() => setPage({ view: 'dashboard' })}
-              onOpenCase={(runId, caseResult) =>
-                setPage({ view: 'case-detail', runId, caseResult })
-              }
-              onError={console.warn}
-            />
-          ) : page.view === 'case-detail' ? (
-            <CaseDetailPage
-              runId={page.runId}
-              caseResult={page.caseResult}
-              onBack={() => setPage({ view: 'run-detail', runId: page.runId })}
-            />
-          ) : page.view === 'run' ? (
-            <RunPage
-              onError={console.warn}
-              onOpenTask={(taskId) => setPage({ view: 'task-graph', taskId })}
-            />
-          ) : page.view === 'settings' ? (
-            <SettingsPage onError={console.warn} />
-          ) : page.view === 'docs' ? (
-            <DocsPage />
-          ) : (
-            <UserCenter me={me} />
-          )
+    <nav className="container navbar">
+      <RRNavLink to="/" className="brand">
+        md-builder
+      </RRNavLink>
+      {me && (
+        <nav className="navbar-nav">
+          {navLink('/', 'Dashboard')}
+          {navLink('/environments', 'Runner Envs')}
+          {navLink('/run', 'Run command')}
+          {navLink('/settings', 'Settings')}
+        </nav>
+      )}
+      <div className="navbar-text">
+        {me ? (
+          <>
+            <span className="text-muted">{me.username}</span>
+            {' — '}
+            <a href="#" onClick={(e) => { e.preventDefault(); onLogout() }}>
+              Log out
+            </a>
+          </>
         ) : (
-          <LoginPage onLogin={setMe} />
+          <>
+            <a href="#">Log in</a>
+            {' — '}
+            <a href="#">Register</a>
+          </>
         )}
       </div>
-
-      {/* Footer */}
-      <footer className="container">
-        <span className="text-muted">
-          md-builder · Scientific computing test platform
-        </span>
-        {me && (
-          <span className="footer-nav">
-            {navLink({ view: 'docs' }, 'Documentation')}
-          </span>
-        )}
-      </footer>
-    </div>
+    </nav>
   )
 }
 

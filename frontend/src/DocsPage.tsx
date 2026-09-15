@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link, useParams } from 'react-router'
 import { Markdown } from './markdown'
 
 // The documentation lives in standalone .md files under frontend/docs and
@@ -76,10 +77,14 @@ function initialLang(): Lang {
 
 // DocsPage renders the platform documentation with a table of contents
 // linking to each section and an EN/中文 language switch (persisted in
-// localStorage).
+// localStorage). Routed as /docs and /docs/:section — the section comes
+// straight from the URL, so every in-docs `#/docs/<section>` link (TOC,
+// pager, cross-references in the markdown) navigates react-router-style and
+// the section follows. Unknown section ids fall back to the first section.
 export default function DocsPage() {
+  const section = useParams().section
+  const active = DOCS.some((d) => d.id === section) ? (section as string) : DOCS[0].id
   const [lang, setLang] = useState<Lang>(initialLang)
-  const [active, setActive] = useState(DOCS[0].id)
   const current = DOCS.find((d) => d.id === active) ?? DOCS[0]
   const t = STRINGS[lang]
 
@@ -110,17 +115,13 @@ export default function DocsPage() {
         <h3>{t.contents}</h3>
         <nav>
           {DOCS.map((d) => (
-            <a
+            <Link
               key={d.id}
-              href={`#${d.id}`}
+              to={`/docs/${d.id}`}
               className={d.id === active ? 'active' : ''}
-              onClick={(e) => {
-                e.preventDefault()
-                setActive(d.id)
-              }}
             >
               {label(d.id)}
-            </a>
+            </Link>
           ))}
         </nav>
         <div className="docs-lang" role="group" aria-label="Language">
@@ -147,27 +148,15 @@ export default function DocsPage() {
             d.id === current.id ? (
               <span key={d.id}>
                 {i > 0 && (
-                  <a
-                    href={`#${DOCS[i - 1].id}`}
-                    onClick={(e) => {
-                      e.preventDefault()
-                      setActive(DOCS[i - 1].id)
-                    }}
-                  >
+                  <Link to={`/docs/${DOCS[i - 1].id}`}>
                     ← {label(DOCS[i - 1].id)}
-                  </a>
+                  </Link>
                 )}
                 {i > 0 && i < DOCS.length - 1 && ' · '}
                 {i < DOCS.length - 1 && (
-                  <a
-                    href={`#${DOCS[i + 1].id}`}
-                    onClick={(e) => {
-                      e.preventDefault()
-                      setActive(DOCS[i + 1].id)
-                    }}
-                  >
+                  <Link to={`/docs/${DOCS[i + 1].id}`}>
                     {label(DOCS[i + 1].id)} →
-                  </a>
+                  </Link>
                 )}
               </span>
             ) : null,

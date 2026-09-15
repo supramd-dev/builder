@@ -1,20 +1,18 @@
 import { useEffect, useState } from 'react'
+import { useParams } from 'react-router'
 import { Maximize2 } from 'lucide-react'
 import {
   getTestArtifact,
   getTestRun,
-  type CaseResult,
   type TestRunDetail,
 } from './api'
 import { formatDuration, parseGTestResults, type GTestCase } from './gtest'
 import MessageDialog from './MessageDialog'
 import TaskLogView from './TaskLogView'
 import { formatTime } from './timezone'
+import { Breadcrumbs } from './Breadcrumbs'
 
 interface Props {
-  runId: number
-  onBack: () => void
-  onOpenCase: (runId: number, caseResult: CaseResult) => void
   onError: (message: string) => void
 }
 
@@ -22,7 +20,8 @@ interface Props {
 // (kind, status in color), a summary block (environment, commit, results,
 // time), the run's one-paragraph conclusion, the per-case results (from the
 // stored results file, parsed in the browser) and the stage's stdout log.
-export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }: Props) {
+export default function TestRunDetailPage({ onError }: Props) {
+  const runId = Number(useParams().runId)
   const [run, setRun] = useState<TestRunDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -47,10 +46,20 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
     }
   }, [runId, onError])
 
+  // The breadcrumb trail's task crumb needs the root task id, which arrives
+  // with the run; before that the trail ends at Dashboard.
+  const trail = [
+    { label: 'Dashboard', to: '/' },
+    ...(run && run.rootTaskId > 0
+      ? [{ label: `Task #${run.rootTaskId}`, to: `/tasks/${run.rootTaskId}` }]
+      : []),
+    { label: `Run #${runId}` },
+  ]
+
   if (loading) {
     return (
       <div>
-        <BackLink onBack={onBack} />
+        <Breadcrumbs trail={trail} />
         <p className="text-muted">Loading…</p>
       </div>
     )
@@ -58,7 +67,7 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
   if (error || !run) {
     return (
       <div>
-        <BackLink onBack={onBack} />
+        <Breadcrumbs trail={trail} />
         {error && <div className="alert alert-danger">{error}</div>}
       </div>
     )
@@ -73,7 +82,7 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
 
   return (
     <div>
-      <BackLink onBack={onBack} />
+      <Breadcrumbs trail={trail} />
 
       {/* Title: kind + status in color. */}
       <h2 className="task-title">
@@ -130,15 +139,13 @@ export default function TestRunDetailPage({ runId, onBack, onOpenCase, onError }
           <h3 className="task-section-title">Test cases</h3>
           <CaseTable
             cases={run.cases.map((c) => ({
+              id: c.id,
               name: c.name,
               status: c.status,
               durationMs: c.durationMillis,
               message: c.message,
             }))}
-            onOpenCase={(name) => {
-              const c = run.cases.find((x) => x.name === name)
-              if (c) onOpenCase(runId, c)
-            }}
+            caseHref={(caseId) => `/runs/${runId}/case/${caseId}`}
           />
         </>
       )}
@@ -318,10 +325,10 @@ function BrowserCaseTable({ cases }: { cases: GTestCase[] }) {
 // row links into the case detail page.
 function CaseTable({
   cases,
-  onOpenCase,
+  caseHref,
 }: {
-  cases: GTestCase[]
-  onOpenCase: (name: string) => void
+  cases: (GTestCase & { id: number })[]
+  caseHref: (caseId: number) => string
 }) {
   const [note, setNote] = useState<{ name: string; message: string } | null>(null)
   return (
@@ -338,9 +345,9 @@ function CaseTable({
         <tbody>
           {cases.map((c) => (
             <tr
-              key={c.name}
+              key={c.id}
               className="dash-case-row"
-              onClick={() => onOpenCase(c.name)}
+              onClick={() => (window.location.hash = caseHref(c.id))}
               title="Click for case details"
             >
               <td>{c.name}</td>
@@ -412,21 +419,4 @@ function truncateNote(message: string): string {
   }
   const flat = message.split('\n')[0]
   return flat.length > 80 ? flat.slice(0, 77) + '…' : flat
-}
-
-// BackLink is the "← back to dashboard" navigation.
-function BackLink({ onBack }: { onBack: () => void }) {
-  return (
-    <p style={{ marginBottom: '0.5rem' }}>
-      <a
-        href="#"
-        onClick={(e) => {
-          e.preventDefault()
-          onBack()
-        }}
-      >
-        ← Back to dashboard
-      </a>
-    </p>
-  )
 }

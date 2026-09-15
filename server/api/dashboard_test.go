@@ -856,6 +856,7 @@ func TestRunDetailArtifactFields(t *testing.T) {
 	}
 	var detail struct {
 		TaskID        int64   `json:"taskId"`
+		RootTaskID    int64   `json:"rootTaskId"`
 		Skipped       int     `json:"skipped"`
 		CommitRepo    *string `json:"commitRepo"`
 		CommitRepoURL *string `json:"commitRepoUrl"`
@@ -875,6 +876,11 @@ func TestRunDetailArtifactFields(t *testing.T) {
 	}
 	if detail.TaskID != 77 || detail.Skipped != 1 {
 		t.Fatalf("taskId/skipped wrong: %+v", detail)
+	}
+	// Task 77 does not exist here, so the root lookup falls back to 0 (the
+	// breadcrumb hides the task crumb).
+	if detail.RootTaskID != 0 {
+		t.Fatalf("rootTaskId should be 0 for a missing task, got %d", detail.RootTaskID)
 	}
 	if detail.CommitRepo == nil || *detail.CommitRepo != "group/md-code" {
 		t.Fatalf("commitRepo wrong: %v", detail.CommitRepo)
@@ -911,6 +917,70 @@ func TestRunDetailArtifactFields(t *testing.T) {
 	rec = env.authed(http.MethodGet, "/api/test-artifacts/abc", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad artifact id: expected 400, got %d", rec.Code)
+	}
+}
+
+// TestRunDetailRootTaskID checks that the run detail resolves the producing
+// stage task's root (the graph-page breadcrumb link): a stage task with a
+// real root reports its rootId, an external report (taskId 0) reports 0.
+func TestRunDetailRootTaskID(t *testing.T) {
+	apiServer, env := newDashboardEnv(t)
+
+	var env1 store.TestEnvironment
+	apiServer.Store.DB.Where("name = ?", "cpu-node-1").First(&env1)
+	commit := &store.Commit{Repo: "group/md-code", SHA: "1111111"}
+	if _, err := apiServer.Store.GetOrCreateCommit(commit); err != nil {
+		t.Fatalf("get commit: %v", err)
+	}
+
+	// A small graph: root + one unit stage producing the run.
+	root := &store.Task{
+		Kind: store.TaskKindRoot, Name: "test 1111111 on cpu-node-1",
+		Status: store.TaskDone, CommitID: commit.ID, EnvironmentID: env1.ID,
+		Tags: "unit", Trigger: store.TaskTriggerWebhook,
+	}
+	if err := apiServer.Store.CreateTask(root); err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	if err := apiServer.Store.DB.Model(root).Update("root_id", root.ID).Error; err != nil {
+		t.Fatalf("self-root: %v", err)
+	}
+	stage := &store.Task{
+		Kind: store.TaskKindUnit, Name: "unit tests", Status: store.TaskDone,
+		RootID: root.ID, CommitID: commit.ID, EnvironmentID: env1.ID, Tags: "unit",
+	}
+	if err := apiServer.Store.CreateTask(stage); err != nil {
+		t.Fatalf("create stage: %v", err)
+	}
+
+	run, err := apiServer.Store.UpsertTestRun(&store.RunInput{
+		EnvironmentID: env1.ID,
+		CommitID:      commit.ID,
+		Kind:          store.RunKindUnit,
+		TaskID:        stage.ID,
+		Total:         3,
+		Passed:        3,
+	})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	rec := env.authed(http.MethodGet, fmt.Sprintf("/api/test-runs/%d", run.ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		TaskID     int64 `json:"taskId"`
+		RootTaskID int64 `json:"rootTaskId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detail.TaskID != stage.ID {
+		t.Fatalf("taskId = %d, want %d", detail.TaskID, stage.ID)
+	}
+	if detail.RootTaskID != root.ID {
+		t.Fatalf("rootTaskId = %d, want %d", detail.RootTaskID, root.ID)
 	}
 }
 

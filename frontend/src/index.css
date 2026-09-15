@@ -957,6 +957,24 @@ code {
 
 /* Task pages (graph / detail / run detail), sr.ht build style: a title
    line, a gray summary line, the job status in color, then the content. */
+.breadcrumbs {
+  margin-bottom: 0.5rem;
+  font-size: 0.875rem;
+}
+
+.breadcrumb-item + .breadcrumb-item {
+  margin-left: 0.35rem;
+}
+
+.breadcrumb-sep {
+  margin-right: 0.35rem;
+  color: var(--muted);
+}
+
+.breadcrumb-current {
+  color: var(--muted);
+}
+
 .task-title {
   margin-bottom: 0.25rem;
 }
@@ -992,6 +1010,12 @@ code {
 .task-error {
   color: var(--danger);
   white-space: pre-wrap;
+}
+
+/* The "graph →" link beside the Pipeline heading (task log view). */
+.task-graph-link {
+  font-size: 0.75rem;
+  font-weight: 400;
 }
 
 .task-steps {

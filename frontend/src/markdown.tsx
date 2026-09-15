@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode } from 'react'
+import { Link } from 'react-router'
 
 // A tiny self-contained Markdown renderer covering the subset used by the
 // documentation pages: headings (# .. ####), paragraphs, bullet and numbered
@@ -9,18 +10,26 @@ import { Fragment, type ReactNode } from 'react'
 // --- inline parsing ---------------------------------------------------------
 
 // Inline patterns are tried in order at each position; `code` spans win
-// first so their contents are not further formatted.
+// first so their contents are not further formatted. Links to the app's own
+// routes (the docs' `#/docs/...` cross-references) render as router links —
+// same-tab navigation, the section switches without a page reload; external
+// URLs open in a new tab.
 const INLINE_PATTERNS: { re: RegExp; render: (m: RegExpMatchArray, key: number) => ReactNode }[] = [
   { re: /^`([^`]+)`/, render: (m, key) => <code key={key}>{m[1]}</code> },
   { re: /^\*\*([^*]+)\*\*/, render: (m, key) => <strong key={key}>{m[1]}</strong> },
   { re: /^\*([^*]+)\*/, render: (m, key) => <em key={key}>{m[1]}</em> },
   {
     re: /^\[([^\]]+)\]\(([^)]+)\)/,
-    render: (m, key) => (
-      <a key={key} href={m[2]} target="_blank" rel="noreferrer">
-        {m[1]}
-      </a>
-    ),
+    render: (m, key) =>
+      m[2].startsWith('#/') ? (
+        <Link key={key} to={m[2].slice(1)}>
+          {m[1]}
+        </Link>
+      ) : (
+        <a key={key} href={m[2]} target="_blank" rel="noreferrer">
+          {m[1]}
+        </a>
+      ),
   },
 ]
 

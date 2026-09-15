@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate } from 'react-router'
 import Editor, { type OnMount } from '@monaco-editor/react'
 import { defineMonacoTheme } from './monacoTheme'
 import { formatDuration } from './gtest'
@@ -16,8 +17,6 @@ import {
 
 interface RunPageProps {
   onError: (message: string) => void
-  // onOpenTask jumps to a freshly dispatched graph (manual test tab).
-  onOpenTask?: (taskId: number) => void
 }
 
 // Default script skeletons. The first-line comment names the interpreter
@@ -46,7 +45,7 @@ const INTERPRETERS: Record<ScriptLanguage, string[]> = {
 // RunPage offers two ways to exercise a test environment, side by side as
 // tabs: ad-hoc command/script execution, and dispatching a manual test
 // graph (clone → build → unit → regression).
-export default function RunPage({ onError, onOpenTask }: RunPageProps) {
+export default function RunPage({ onError }: RunPageProps) {
   const [tab, setTab] = useState<'exec' | 'manual'>('exec')
 
   return (
@@ -75,7 +74,7 @@ export default function RunPage({ onError, onOpenTask }: RunPageProps) {
       {tab === 'exec' ? (
         <ExecTab onError={onError} />
       ) : (
-        <ManualTestTab onError={onError} onOpenTask={onOpenTask} />
+        <ManualTestTab onError={onError} />
       )}
     </div>
   )
@@ -404,7 +403,8 @@ function YAMLTriggerSection({
 // the site config's code repository), an optional ref and the three stage
 // commands, run as task graphs (clone → build → unit → regression) by the
 // scheduler on the selected environments.
-function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
+function ManualTestTab({ onError }: { onError: (message: string) => void }) {
+  const navigate = useNavigate()
   const [environments, setEnvironments] = useState<TestEnvironment[]>([])
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [loading, setLoading] = useState(true)
@@ -469,7 +469,7 @@ function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
         environmentIds: [...selected],
       })
       setDispatched(res.roots.map((r) => r.taskId))
-      if (res.roots.length > 0 && onOpenTask) onOpenTask(res.roots[0].taskId)
+      if (res.roots.length > 0) navigate(`/tasks/${res.roots[0].taskId}`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
@@ -637,15 +637,7 @@ function ManualTestTab({ onError, onOpenTask }: RunPageProps) {
           {dispatched.map((id, i) => (
             <span key={id}>
               {i > 0 && ', '}
-              <a
-                href="#"
-                onClick={(e) => {
-                  e.preventDefault()
-                  if (onOpenTask) onOpenTask(id)
-                }}
-              >
-                task #{id}
-              </a>
+              <Link to={`/tasks/${id}`}>task #{id}</Link>
             </span>
           ))}
         </p>

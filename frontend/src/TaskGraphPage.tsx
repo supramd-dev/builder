@@ -1,18 +1,9 @@
 import { useEffect, useState } from 'react'
+import { useNavigate, useParams } from 'react-router'
 import { LoaderCircle } from 'lucide-react'
 import { getTask, type SubTask, type TaskDetail } from './api'
 import { TaskStatusText, commitUrl } from './StatusViews'
-
-interface Props {
-  taskId: number
-  onBack: () => void
-  // onOpenRun jumps to a test run's detail page (build/unit/regression
-  // nodes with a recorded run).
-  onOpenRun: (runId: number) => void
-  // onOpenLog jumps to the task's pipeline log view (clone/root nodes and
-  // stages without a recorded run).
-  onOpenLog: (taskId: number) => void
-}
+import { Breadcrumbs } from './Breadcrumbs'
 
 // NODE_W/NODE_H size the graph nodes; GAP_X/GAP_Y the layer spacing.
 const NODE_W = 180
@@ -25,7 +16,8 @@ const GAP_Y = 22
 // dependency graph itself — the root on the left, the sub-tasks layered by
 // dependency depth, edges drawn between the columns. Clicking a node opens
 // its detail (the stage's live log or the recorded run).
-export default function TaskGraphPage({ taskId, onBack, onOpenRun, onOpenLog }: Props) {
+export default function TaskGraphPage() {
+  const taskId = Number(useParams().taskId)
   const [task, setTask] = useState<TaskDetail | null>(null)
   const [error, setError] = useState('')
 
@@ -55,38 +47,23 @@ export default function TaskGraphPage({ taskId, onBack, onOpenRun, onOpenLog }: 
 
   return (
     <div>
-      <p>
-        <a
-          href="#"
-          onClick={(e) => {
-            e.preventDefault()
-            onBack()
-          }}
-        >
-          ← Back to dashboard
-        </a>
-      </p>
+      <Breadcrumbs
+        trail={[{ label: 'Dashboard', to: '/' }, { label: `Task #${taskId}` }]}
+      />
 
       {error ? (
         <div className="alert alert-danger">{error}</div>
       ) : !task ? (
         <p className="text-muted">Loading…</p>
       ) : (
-        <TaskGraph task={task} onOpenRun={onOpenRun} onOpenLog={onOpenLog} />
+        <TaskGraph task={task} />
       )}
     </div>
   )
 }
 
-function TaskGraph({
-  task,
-  onOpenRun,
-  onOpenLog,
-}: {
-  task: TaskDetail
-  onOpenRun: (runId: number) => void
-  onOpenLog: (taskId: number) => void
-}) {
+function TaskGraph({ task }: { task: TaskDetail }) {
+  const navigate = useNavigate()
   const root = task.kind === 'root' ? task : null
   const subs = task.subTasks ?? []
   const layers = layerGraph(subs)
@@ -172,8 +149,8 @@ function TaskGraph({
             // Test stages with a recorded run jump to run details; everything
             // else (clone, root, stages still pending) opens the pipeline log.
             const onClick = runId
-              ? () => onOpenRun(runId)
-              : () => onOpenLog(task.id)
+              ? () => navigate(`/runs/${runId}`)
+              : () => navigate(`/tasks/${task.id}/log`)
             const cls =
               'graph-node graph-node-link graph-node-' +
               (isRoot ? 'root ' : '') +

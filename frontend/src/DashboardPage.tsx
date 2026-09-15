@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router'
 import { Network } from 'lucide-react'
 import {
   getDashboard,
@@ -14,8 +15,6 @@ import { StageStatus, commitUrl, truncate } from './StatusViews'
 import { formatTimeShort } from './timezone'
 
 interface Props {
-  onOpenRun: (runId: number) => void
-  onOpenTask: (taskId: number) => void
   onError: (message: string) => void
 }
 
@@ -23,7 +22,12 @@ interface Props {
 // commit column (linked short sha, author, push date, message) followed by
 // one column per environment. The full view gives each environment four
 // sub-columns (build, unit, reg, graph); the single kinds show one stage.
-export default function DashboardPage({ onOpenRun, onOpenTask, onError }: Props) {
+export default function DashboardPage({ onError }: Props) {
+  // Stage cells navigate with plain router navigation (run detail when a
+  // run is recorded, the task graph while the pipeline is live).
+  const navigate = useNavigate()
+  const onOpenRun = (runId: number) => navigate(`/runs/${runId}`)
+  const onOpenTask = (taskId: number) => navigate(`/tasks/${taskId}`)
   // "full" is the first tab: the complete per-commit, per-environment view
   // of every pipeline stage. Single kinds follow: build, unit, regression.
   const [kind, setKind] = useState<DashboardKind>('full')

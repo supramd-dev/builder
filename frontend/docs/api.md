@@ -93,13 +93,16 @@ Results are reported with `POST /api/test-runs`:
 
 `GET /api/test-runs/{id}` returns the run with `taskId` (the stage
 sub-task whose log holds the stage's stdout; 0 for external reports),
-`skipped` count, `cases` (with `durationMillis`) and `artifacts` —
-references to stored files, e.g. the googletest results files the runner
-fetched back (a run can produce several):
+`rootTaskId` (the graph's root task — the link back to the pipeline
+page; 0 for external reports), `skipped` count, `cases` (with
+`durationMillis`) and `artifacts` — references to stored files, e.g. the
+googletest results files the runner fetched back (a run can produce
+several):
 
 ```json
 {
   "id": 12, "kind": "unit", "status": "failed", "taskId": 77,
+  "rootTaskId": 70,
   "total": 12, "passed": 9, "failed": 2, "skipped": 1,
   "artifacts": [
     {"id": 3, "caseId": 0, "kind": "results",

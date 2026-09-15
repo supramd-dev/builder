@@ -5,22 +5,17 @@ import {
   setEnvironmentEnabled,
   testEnvironment,
   type ConnectivityResult,
-  type Me,
   type TestEnvironment,
 } from './api'
 import EnvironmentForm from './EnvironmentForm'
 import { formatTime } from './timezone'
-
-interface Props {
-  me: Me
-}
 
 type Editing =
   | { mode: 'none' }
   | { mode: 'create' }
   | { mode: 'edit'; env: TestEnvironment }
 
-export default function UserCenter({ me }: Props) {
+export default function UserCenter() {
   const [envs, setEnvs] = useState<TestEnvironment[] | null>(null)
   const [loadError, setLoadError] = useState('')
   const [editing, setEditing] = useState<Editing>({ mode: 'none' })
@@ -101,9 +96,6 @@ export default function UserCenter({ me }: Props) {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <h2>Runner environments</h2>
-        <span className="text-muted">
-          {me.username} · {me.email}
-        </span>
       </div>
 
       <h3>Test environments</h3>

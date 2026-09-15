@@ -670,6 +670,14 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 		Cases:     make([]caseJSON, 0, len(cases)),
 		Artifacts: make([]artifactRefJSON, 0, len(artifacts)),
 	}
+	// Root task of the producing stage sub-task (for the breadcrumb link to
+	// the graph page); 0 when the run came from an external report or the
+	// task row was deleted.
+	if run.TaskID != 0 {
+		if task, err := s.Store.GetTask(run.TaskID); err == nil {
+			detail.RootTaskID = task.RootID
+		}
+	}
 	if env != nil {
 		name := env.Name
 		detail.EnvironmentName = &name
@@ -728,6 +736,7 @@ type artifactRefJSON struct {
 // Pointer fields are null when the referenced record was deleted.
 type runDetailJSON struct {
 	runJSON
+	RootTaskID      int64             `json:"rootTaskId"` // root of the producing stage task (0 = external report); the graph-page link
 	EnvironmentName *string           `json:"environmentName"`
 	CommitSHA       *string           `json:"commitSha"`
 	CommitShortSHA  *string           `json:"commitShortSha"`

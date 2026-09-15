@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link, useParams } from 'react-router'
 import { LoaderCircle } from 'lucide-react'
 import {
   getTask,
@@ -8,17 +9,14 @@ import {
 } from './api'
 import TaskLogView from './TaskLogView'
 import { TaskStatusText, commitUrl } from './StatusViews'
-
-interface Props {
-  taskId: number
-  onBack: () => void
-}
+import { Breadcrumbs } from './Breadcrumbs'
 
 // TaskDetailPage renders one task's pipeline log in the sr.ht build style:
 // the title (task number, commit, environment), a summary line (author,
 // ref, tags), the job status in color, the pipeline step list and the
 // selected step's log, following a running task incrementally.
-export default function TaskDetailPage({ taskId, onBack }: Props) {
+export default function TaskDetailPage() {
+  const taskId = Number(useParams().taskId)
   const [task, setTask] = useState<TaskDetail | null>(null)
   const [error, setError] = useState('')
   // Which sub-task's log is shown; null = the root overview (no log).
@@ -53,19 +51,19 @@ export default function TaskDetailPage({ taskId, onBack }: Props) {
     }
   }, [taskId])
 
+  // The graph trail crumb targets the task's root (the graph page), so the
+  // log view of any task in a graph links back to the same pipeline.
+  const rootId = task ? (task.kind === 'root' ? task.id : task.rootId) : taskId
+
   return (
     <div>
-      <p>
-        <a
-          href="#"
-          onClick={(e) => {
-            e.preventDefault()
-            onBack()
-          }}
-        >
-          ← Back to dashboard
-        </a>
-      </p>
+      <Breadcrumbs
+        trail={[
+          { label: 'Dashboard', to: '/' },
+          { label: `Task #${rootId}`, to: `/tasks/${rootId}` },
+          { label: 'Log' },
+        ]}
+      />
 
       {error ? (
         <div className="alert alert-danger">{error}</div>
@@ -135,6 +133,7 @@ function TaskDetail({
           subs={task.subTasks}
           selected={selected}
           onSelect={onSelect}
+          rootTaskId={task.kind === 'root' ? task.id : task.rootId}
         />
       )}
 
@@ -156,14 +155,25 @@ function SubTaskList({
   subs,
   selected,
   onSelect,
+  rootTaskId,
 }: {
   subs: SubTask[]
   selected: number | null
   onSelect: (id: number) => void
+  rootTaskId: number
 }) {
   return (
     <section>
-      <h3 className="task-section-title">Pipeline</h3>
+      <h3 className="task-section-title">
+        Pipeline{' '}
+        <Link
+          to={`/tasks/${rootTaskId}`}
+          className="task-graph-link"
+          title="Open the task dependency graph"
+        >
+          graph →
+        </Link>
+      </h3>
       <ol className="task-steps">
         {subs.map((sub) => (
           <li key={sub.id}>
