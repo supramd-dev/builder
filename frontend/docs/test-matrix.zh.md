@@ -24,17 +24,17 @@ defaults:
     command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
 
 # 回归测试预设:被矩阵条目引用的公共测试用例。每个预设就是一个
-# 回归用例 —— 如何运行它、收集哪些结果文件。
+# 回归用例 —— 如何运行它、收集哪些工件文件。
 presets:
   heat:
     description: 热传导方程收敛性
     command: "python3 run_heat.py"
     workdir: "regression/heat"        # 相对代码目录
     timeout: 1800
-    results: "out.xml"
+    artifacts: "out.xml"
   poisson:
     command: "python3 run_poisson.py --nt 200"
-    results: ["poisson.xml", "poisson.log"]
+    artifacts: ["poisson.xml", "poisson.log"]
 
 # 必填:矩阵。每个条目声明环境必须携带的标签;派发时为每个条目挑选
 # 一个匹配且已启用的环境。
@@ -49,7 +49,7 @@ matrix:
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
       timeout: 600
-      results: "build/test_detail.xml"   # googletest 结果文件
+      artifacts: "build/test_detail.xml"  # googletest 结果文件
     regression:
       use: [heat, poisson]          # 在此条目上运行哪些预设(留空 = 全部)
   - tags: [gpu, cuda]
@@ -76,11 +76,11 @@ matrix:
 | matrix[].timeout             | 否       | 默认阶段超时秒数(默认 3600,上限 14400)。                          |
 | matrix[].env                 | 否       | 为所有阶段导出的额外环境变量。                                      |
 | matrix[].build               | 否       | 构建阶段(见下)。                                                   |
-| matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 workdir、timeout、results。       |
+| matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 workdir、timeout、artifacts。    |
 | matrix[].regression          | 否       | 回归测试选择:use / disable 引用预设。                              |
 | unit.command                 | 是(每阶段) | shell 命令,或命令列表(见命令列表)。                       |
 | unit.workdir                 | 否       | 命令的运行目录(见工作目录)。                                       |
-| unit.results                 | 否       | 结果文件路径(或路径列表),runner 会在阶段结束后取回(见结果文件)。 |
+| unit.artifacts                | 否       | 工件文件路径(或路径列表),runner 会在阶段结束后取回(见工件文件)。 |
 | unit.timeout                 | 否       | 覆盖默认值的阶段超时。                                              |
 
 构建阶段就是一条 shell 命令(没有内置的 cmake 支持 —— cmake/make/ninja/
@@ -114,7 +114,7 @@ presets:
     command: "python3 run_heat.py"
     workdir: "regression/heat"
     timeout: 1800
-    results: "out.xml"
+    artifacts: "out.xml"
 ```
 
 | 字段                     | 必填 | 说明                                                        |
@@ -123,7 +123,7 @@ presets:
 | presets.<名称>.description | 否 | 人类可读的标签。                                              |
 | presets.<名称>.workdir   | 否   | 命令的运行目录(见工作目录)。                                 |
 | presets.<名称>.timeout   | 否   | 用例超时(缺省回退到 defaults / 矩阵条目的 timeout)。          |
-| presets.<名称>.results   | 否   | 要收集的结果文件(见结果文件)。                                |
+| presets.<名称>.artifacts | 否   | 要收集的工件文件(见工件文件)。                                |
 
 每个被引用的预设都会成为任务图中**独立的子任务**(“regression: heat”),
 在构建之后运行,拥有自己的超时、自己的日志,以及回归运行中自己的用例
@@ -146,9 +146,9 @@ presets:
   远程 `timeout` 包装命令,超时退出码为 124)和 workdir `cd` 失败。
 - SSH 层面的失败(主机不可达、会话中断)同样判定为失败,传输错误会
   作为该用例的备注。
-- 预设的 `results` 文件**不会改变判定结果** —— 它们只作为该用例的
+- 预设的 `artifacts` 文件**不会改变判定结果** —— 它们只作为该用例的
   artifact 存储(逐用例明细由浏览器解析)。这一点与 unit 阶段不同:
-  unit 的结果文件解析出失败用例时,运行也会判为失败。
+  unit 的工件文件解析出失败用例时,运行也会判为失败。
 - `MD-BUILDER-SUMMARY:` 行只会成为用例的备注,无法把非零退出码变成
   通过。
 
@@ -228,40 +228,40 @@ unit:
 源外构建只是 workdir 加一条以 `"$MD_CODE_DIR"` 为参数的配置命令
 (见上面的 build 示例)。
 
-## 结果文件
+## 工件文件
 
 阶段命令(unit 或回归预设)可以产出结构化的结果文件 —— 默认是 googletest
 的 XML(`--gtest_output=xml:`)或 JSON(`--gtest_output=json:`)格式,
-由测试程序自己写出。一次运行可能产出**多个**结果文件;`results` 接受
+由测试程序自己写出。一次运行可能产出**多个**结果文件;`artifacts` 接受
 单个路径或路径列表:
 
 ```yaml
 unit:
   command: "./build/unit_tests --gtest_output=xml:build/test_detail.xml"
-  results: "build/test_detail.xml"
+  artifacts: "build/test_detail.xml"
 ```
 
 ```yaml
 unit:
   command: "ctest --output-junit junit.xml && ./build/extra_tests --gtest_output=json:build/extra.json"
-  results: ["build/test_detail.xml", "build/extra.json"]
+  artifacts: ["build/test_detail.xml", "build/extra.json"]
 ```
 
-配置了 `results` 时,runner 会在命令结束后逐个取回这些文件,并:
+配置了 `artifacts` 时,runner 会在命令结束后逐个取回这些文件,并:
 
 - 将每个文件内容**原样**存为各自独立的运行 artifact;
 - 仅从各文件根节点属性中提取聚合计数(总数 / 失败 / 跳过),跨所有
   文件**求和**后用于矩阵格。
 
 每个测试项的明细 —— 名称、状态、耗时、失败信息 —— 由**浏览器**在打开
-运行详情页时解析展示;服务器不解析单个测试项。所有已存储的结果文件
+运行详情页时解析展示;服务器不解析单个测试项。所有已存储的工件文件
 都按默认名称/格式解析;缺失或无法识别的文件会被跳过(阶段日志会注
 明),不影响运行结果 —— 运行仍记录命令的退出状态。路径相对于该阶段的
 工作目录(绝对路径也可以)。
 
-对 **unit** 阶段,解析出的计数参与判定:结果文件中出现失败用例时,
+对 **unit** 阶段,解析出的计数参与判定:工件文件中出现失败用例时,
 即使命令以 0 退出,运行也判为失败(ctest 一类的包装可能吞掉测试程序
-的退出码)。对**回归预设**,结果文件仅用于展示 —— 用例的成败由其命令
+的退出码)。对**回归预设**,工件文件仅用于展示 —— 用例的成败由其命令
 的退出状态决定(见“用例的通过 / 失败判定”)。
 
 ## 校验规则

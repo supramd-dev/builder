@@ -150,15 +150,15 @@ POST /api/jobs/manual
   "ref": "master",                                    // optional: HEAD
   "buildCommand": "cmake . && cmake --build . -j8",   // optional; empty = no build stage
   "unitCommand": "ctest -L unit",                     // optional: stage skipped
-  "unitResults": "build/test_detail.xml",             // optional: results file(s)
+  "unitArtifacts": "build/test_detail.xml",           // optional: artifact file(s)
   "regressionCommand": "python3 run.py",              // optional: stage skipped
-  "regressionResults": "reg/results.json",            // optional: results file(s)
+  "regressionArtifacts": "reg/results.json",          // optional: artifact file(s)
   "environmentIds": [1, 2]
 }
 ```
 
-The `unitResults` / `regressionResults` fields accept a single path or a
-list of paths — a run can produce several results files.
+The `unitArtifacts` / `regressionArtifacts` fields accept a single path
+or a list of paths — a run can produce several artifact files.
 
 - At least one stage command and one environment are required.
 - The ref is resolved to a concrete commit (a remote ref listing, the

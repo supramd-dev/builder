@@ -26,7 +26,7 @@ defaults:
     command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
 
 # Regression presets: shared test cases referenced by matrix entries.
-# Each preset is one regression case — how to run it and which results
+# Each preset is one regression case — how to run it and which artifact
 # files to collect.
 presets:
   heat:
@@ -34,10 +34,10 @@ presets:
     command: "python3 run_heat.py"
     workdir: "regression/heat"        # relative to the code directory
     timeout: 1800
-    results: "out.xml"
+    artifacts: "out.xml"
   poisson:
     command: "python3 run_poisson.py --nt 200"
-    results: ["poisson.xml", "poisson.log"]
+    artifacts: ["poisson.xml", "poisson.log"]
 
 # Required: the matrix. Each entry names the tags an environment must
 # carry; dispatch picks one matching enabled environment per entry.
@@ -52,7 +52,7 @@ matrix:
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
       timeout: 600
-      results: "build/test_detail.xml"   # googletest results file
+      artifacts: "build/test_detail.xml"  # googletest XML file
     regression:
       use: [heat, poisson]          # which presets run here (empty = all)
   - tags: [gpu, cuda]
@@ -79,11 +79,11 @@ matrix:
 | matrix[].timeout             | no       | Default stage timeout in seconds (default 3600, capped at 14400).   |
 | matrix[].env                 | no       | Extra environment variables exported for all stages.                |
 | matrix[].build               | no       | Build stage (see below).                                            |
-| matrix[].unit                | no       | Unit test stage: at least command; optional workdir, timeout, results. |
+| matrix[].unit                | no       | Unit test stage: at least command; optional workdir, timeout, artifacts. |
 | matrix[].regression          | no       | Regression selection: use and/or disable referencing presets.       |
 | unit.command                 | yes (per stage) | Shell command, or a list of commands (see Command lists).    |
 | unit.workdir                 | no       | Directory the command runs in (see Working directories).            |
-| unit.results                 | no       | Results file path (or list) the runner fetches back (see Results files). |
+| unit.artifacts               | no       | Artifact file path (or list) the runner fetches back (see Artifact files). |
 | unit.timeout                 | no       | Stage timeout overriding defaults.                                  |
 
 The build stage is one shell command (no built-in cmake support — write
@@ -120,7 +120,7 @@ presets:
     command: "python3 run_heat.py"
     workdir: "regression/heat"
     timeout: 1800
-    results: "out.xml"
+    artifacts: "out.xml"
 ```
 
 | Field                | Required | Description                                                   |
@@ -129,7 +129,7 @@ presets:
 | presets.<name>.description | no | Human-readable label.                                         |
 | presets.<name>.workdir | no    | Directory the command runs in (see Working directories).     |
 | presets.<name>.timeout | no     | Case timeout (falls back to defaults/matrix timeout).        |
-| presets.<name>.results | no     | Results files to collect (see Results files).                |
+| presets.<name>.artifacts | no    | Artifact files to collect (see Artifact files).              |
 
 Each referenced preset becomes its **own sub-task** in the task graph
 (“regression: heat”), which runs after the build with its own timeout,
@@ -156,9 +156,9 @@ A case's verdict is its **command's exit status** — nothing else:
   exits 124) and a failed `cd` into the workdir.
 - An SSH-level failure (host unreachable, session dropped) fails the
   case the same way, with the transport error as the case's note.
-- The preset's `results` files **never flip the verdict** — they are
+- The preset's `artifacts` files **never flip the verdict** — they are
   stored as artifacts of the case (per-case detail parsed in the
-  browser). This differs from the unit stage, where results files
+  browser). This differs from the unit stage, where artifact files
   reporting failed cases also fail the run.
 - An `MD-BUILDER-SUMMARY:` line only becomes the case's note; it cannot
   turn a non-zero exit into a pass.
@@ -246,27 +246,27 @@ directory a stage command runs in:
 An out-of-source build is just a `workdir` plus a command that
 configures against `"$MD_CODE_DIR"` (see the build example above).
 
-## Results files
+## Artifact files
 
 A stage command (unit or a regression preset) may produce structured
-results files — by default the googletest XML (`--gtest_output=xml:`)
+result files — by default the googletest XML (`--gtest_output=xml:`)
 or JSON (`--gtest_output=json:`) format, which the test binary writes
-itself. A run can produce several of them; `results` accepts a single
+itself. A run can produce several of them; `artifacts` accepts a single
 path or a list:
 
 ```yaml
 unit:
   command: "./build/unit_tests --gtest_output=xml:build/test_detail.xml"
-  results: "build/test_detail.xml"
+  artifacts: "build/test_detail.xml"
 ```
 
 ```yaml
 unit:
   command: "ctest --output-junit junit.xml && ./build/extra_tests --gtest_output=json:build/extra.json"
-  results: ["build/test_detail.xml", "build/extra.json"]
+  artifacts: ["build/test_detail.xml", "build/extra.json"]
 ```
 
-When `results` is set, the runner reads every configured file back after
+When `artifacts` is set, the runner reads every configured file back after
 the command and:
 
 - stores each one **verbatim** as its own run artifact, and
@@ -275,14 +275,14 @@ the command and:
 
 The per-case list — name, status, duration, failure message — is parsed
 **in the browser** when you open the run's detail page; the server never
-interprets individual cases. Every stored results file is parsed by its
+interprets individual cases. Every stored artifact file is parsed by its
 default name/format; files that are missing or unrecognized are skipped
 (noted in the stage log) and do not fail the run — it still records the
 command's exit status. Paths are relative to the stage's working
 directory (absolute paths work too).
 
 For the **unit** stage the parsed counts matter to the verdict: failed
-cases in the results file fail the run even when the command exited zero
+cases in the artifact file fail the run even when the command exited zero
 (ctest-style wrappers can swallow the test binary's exit code). For
 **regression presets** the files are display-only — the case's verdict is
 its command's exit status (see Pass / fail of a case).
@@ -322,7 +322,7 @@ Each matched entry becomes a task graph (see
    timeout; the full output streams into the task log and the outcome
    is stored as a test run.
 5. **regression: one sub-task per selected preset** — each case command
-   runs after the build (exporting MD_CASE), collects its own results
+   runs after the build (exporting MD_CASE), collects its own artifact
    files and records its own case row; the matrix cell shows the
    aggregate across cases.
 

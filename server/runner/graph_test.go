@@ -99,10 +99,10 @@ func TestBuildTaskGraphShape(t *testing.T) {
 	}
 }
 
-func TestBuildTaskGraphResultsPassthrough(t *testing.T) {
+func TestBuildTaskGraphArtifactsPassthrough(t *testing.T) {
 	entry := sampleEntry()
-	entry.Unit.Results = ResultsPaths{"build/test_detail.xml", "build/extra.json"}
-	entry.Regression[0].Results = ResultsPaths{"reg/results.json"}
+	entry.Unit.Artifacts = ArtifactPaths{"build/test_detail.xml", "build/extra.json"}
+	entry.Regression[0].Artifacts = ArtifactPaths{"reg/results.json"}
 	entry.Regression[0].Workdir = "regression/heat"
 	tasks, err := BuildTaskGraph(entry)
 	if err != nil {
@@ -112,15 +112,15 @@ func TestBuildTaskGraphResultsPassthrough(t *testing.T) {
 	if err := json.Unmarshal([]byte(tasks[2].Config), &unit); err != nil {
 		t.Fatal(err)
 	}
-	if len(unit.Results) != 2 || unit.Results[0] != "build/test_detail.xml" || unit.Results[1] != "build/extra.json" {
-		t.Errorf("unit results not passed through: %+v", unit)
+	if len(unit.Artifacts) != 2 || unit.Artifacts[0] != "build/test_detail.xml" || unit.Artifacts[1] != "build/extra.json" {
+		t.Errorf("unit artifacts not passed through: %+v", unit)
 	}
 	var heat CaseStageConfig
 	if err := json.Unmarshal([]byte(tasks[3].Config), &heat); err != nil {
 		t.Fatal(err)
 	}
-	if len(heat.Results) != 1 || heat.Results[0] != "reg/results.json" || heat.Workdir != "regression/heat" {
-		t.Errorf("case results/workdir not passed through: %+v", heat)
+	if len(heat.Artifacts) != 1 || heat.Artifacts[0] != "reg/results.json" || heat.Workdir != "regression/heat" {
+		t.Errorf("case artifacts/workdir not passed through: %+v", heat)
 	}
 }
 

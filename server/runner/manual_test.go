@@ -54,7 +54,7 @@ func TestDispatchManual(t *testing.T) {
 	roots, err := svc.DispatchManual(ManualDispatch{
 		Ref:            "v1.2",
 		UnitCommand:    "ctest -L unit",
-		UnitResults:    ResultsPaths{"build/test_detail.xml", "build/extra.json"},
+		UnitArtifacts:  ArtifactPaths{"build/test_detail.xml", "build/extra.json"},
 		EnvironmentIDs: []int64{envs[0].ID, envs[1].ID},
 		Username:       "manual",
 	})
@@ -111,8 +111,8 @@ func TestDispatchManual(t *testing.T) {
 				if sc.Command.String() != "ctest -L unit" {
 					t.Errorf("root %d: unit command %q", root.ID, sc.Command)
 				}
-				if len(sc.Results) != 2 || sc.Results[0] != "build/test_detail.xml" || sc.Results[1] != "build/extra.json" {
-					t.Errorf("root %d: unit results paths %+v", root.ID, sc.Results)
+				if len(sc.Artifacts) != 2 || sc.Artifacts[0] != "build/test_detail.xml" || sc.Artifacts[1] != "build/extra.json" {
+					t.Errorf("root %d: unit artifact paths %+v", root.ID, sc.Artifacts)
 				}
 			}
 		}

@@ -72,9 +72,9 @@ root (test <sha> on <environment>)
   entry selects (`regression.use`, minus `disable`; see
   [the test matrix](#/docs/test-matrix)) becomes its own sub-task named
   `regression: <preset>`, depending on build, with its own command,
-  workdir, timeout and results files. All cases of an entry share **one**
+  workdir, timeout and artifact files. All cases of an entry share **one**
   regression run per (environment, commit): each case records its own row
-  (status, message, duration) and its results files link to that row.
+  (status, message, duration) and its artifact files link to that row.
 - Each node stores a **snapshot** of its config, so later YAML edits or
   manual re-dispatches do not affect already-running graphs.
 - When a sub-task fails, everything that (transitively) depends on it is
@@ -114,7 +114,7 @@ root (test <sha> on <environment>)
   [Dashboard and reporting](#/docs/dashboard)).
 - **regression: <preset>**: one sub-task per case — the preset's command
   runs in the preset's working directory with `MD_CASE` exported; the
-  case's results files are collected and linked to the case row. Each case
+  case's artifact files are collected and linked to the case row. Each case
   records its row into the shared regression run; the cell aggregates.
 
 Every stage script runs through the same preamble:
@@ -156,8 +156,8 @@ not reported a run yet (queued / running / failed-before-report).
 ## Report handling
 
 Each test stage records its run for the dashboard: the status, a summary,
-the aggregate counts and — when the stage configured `results` files —
-each raw results file stored as its own artifact. A graph's root is done
+the aggregate counts and — when the stage configured `artifacts` files —
+each raw artifact file stored as its own artifact. A graph's root is done
 when all sub-tasks are done, failed otherwise.
 
 - A sub-task lands in **failed** (with the error on the task and in the
@@ -165,16 +165,16 @@ when all sub-tasks are done, failed otherwise.
   command exits non-zero — the pass/fail of the *tests themselves* is
   visible on the dashboard, not in the task status.
 - **Unit runs** fail when the command exited non-zero **or** the parsed
-  results files report failed cases (ctest-style wrappers can swallow the
+  artifact files report failed cases (ctest-style wrappers can swallow the
   test binary's exit code).
 - **Regression cases** are judged by their command's exit status alone
   (exit 0 → passed, anything else — timeout, SSH failure, non-zero — →
-  failed); their `results` files are stored for display and never flip
+  failed); their `artifacts` files are stored for display and never flip
   the verdict. The run aggregates its cases: any failed case → the cell
   shows ✗ (see [the test matrix](#/docs/test-matrix)).
 - Unit runs carry aggregate counts only (total / passed / failed /
-  skipped), summed across all configured results files. The per-case list
-  is parsed in the browser from the stored results files (see [the test
+  skipped), summed across all configured artifact files. The per-case list
+  is parsed in the browser from the stored artifact files (see [the test
   matrix](#/docs/test-matrix)); the run's `taskId` links back to the
   stage's task log (stdout).
 - Regression runs aggregate **incrementally**: each case sub-task upserts
@@ -189,7 +189,7 @@ when all sub-tasks are done, failed otherwise.
 
 Result files live in one `test_artifacts` table keyed by run — a run (or a
 single case) can have several — with a `case_id` column that is 0 for
-run-level files and set for the results files a regression case collects.
+run-level files and set for the artifact files a regression case collects.
 This is the extension point for regression tests: their per-case logs and
 series/plot data will be stored as `log` / `series` artifacts behind the
 same table, fetched by an "analyze" view in the browser, while per-case

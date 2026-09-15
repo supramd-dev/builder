@@ -133,15 +133,15 @@ POST /api/jobs/manual
   "ref": "master",                                    // 可选:HEAD
   "buildCommand": "cmake . && cmake --build . -j8",   // 可选;留空 = 无构建阶段
   "unitCommand": "ctest -L unit",                     // 可选:阶段跳过
-  "unitResults": "build/test_detail.xml",             // 可选:结果文件
+  "unitArtifacts": "build/test_detail.xml",           // 可选:工件文件
   "regressionCommand": "python3 run.py",              // 可选:阶段跳过
-  "regressionResults": "reg/results.json",            // 可选:结果文件
+  "regressionArtifacts": "reg/results.json",          // 可选:工件文件
   "environmentIds": [1, 2]
 }
 ```
 
-`unitResults` / `regressionResults` 接受单个路径或路径列表 —— 一次
-运行可以产出多个结果文件。
+`unitArtifacts` / `regressionArtifacts` 接受单个路径或路径列表 —— 一次
+运行可以产出多个工件文件。
 
 - 至少需要一个阶段命令和一个环境。
 - ref 会用站点的 Project Access Token 解析为具体提交(远程 ref 列举,

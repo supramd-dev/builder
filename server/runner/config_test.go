@@ -20,10 +20,10 @@ presets:
     command: "mpirun ./run_heat"
     workdir: "regression/heat"
     timeout: 1800
-    results: "regression/heat/out.xml"
+    artifacts: "regression/heat/out.xml"
   poisson:
     command: "./run_poisson"
-    results: ["out/a.xml", "out/b.json"]
+    artifacts: ["out/a.xml", "out/b.json"]
 matrix:
   - tags: [cpu]
     unit:
@@ -47,10 +47,10 @@ matrix:
 	}
 	if reg[0].Name != "heat" || reg[0].Command.String() != "mpirun ./run_heat" ||
 		reg[0].Workdir != "regression/heat" || reg[0].Timeout != 1800 ||
-		len(reg[0].Results) != 1 || reg[0].Results[0] != "regression/heat/out.xml" {
+		len(reg[0].Artifacts) != 1 || reg[0].Artifacts[0] != "regression/heat/out.xml" {
 		t.Errorf("heat case wrong: %+v", reg[0])
 	}
-	if reg[1].Name != "poisson" || reg[1].Workdir != "" || len(reg[1].Results) != 2 {
+	if reg[1].Name != "poisson" || reg[1].Workdir != "" || len(reg[1].Artifacts) != 2 {
 		t.Errorf("poisson case wrong: %+v", reg[1])
 	}
 
@@ -212,10 +212,10 @@ matrix:
 	}
 }
 
-// ResultsPaths JSON: legacy snapshots stored a single string; new ones store
-// a list. Both decode; encoding always emits the list form.
-func TestResultsPathsJSONRoundTrip(t *testing.T) {
-	var legacy ResultsPaths
+// ArtifactPaths JSON: legacy snapshots stored a single string; new ones
+// store a list. Both decode; encoding always emits the list form.
+func TestArtifactPathsJSONRoundTrip(t *testing.T) {
+	var legacy ArtifactPaths
 	if err := json.Unmarshal([]byte(`"build/test_detail.xml"`), &legacy); err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestResultsPathsJSONRoundTrip(t *testing.T) {
 		t.Errorf("legacy scalar: %+v", legacy)
 	}
 
-	var list ResultsPaths
+	var list ArtifactPaths
 	if err := json.Unmarshal([]byte(`["a.xml","b.json"]`), &list); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestResultsPathsJSONRoundTrip(t *testing.T) {
 		t.Errorf("marshal: %s", b)
 	}
 
-	var empty ResultsPaths
+	var empty ArtifactPaths
 	b, err = json.Marshal(empty)
 	if err != nil {
 		t.Fatal(err)
@@ -252,8 +252,8 @@ func TestResultsPathsJSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestResultsPathsClean(t *testing.T) {
-	in := ResultsPaths{"  a.xml ", "", "a.xml", "b.json", " "}
+func TestArtifactPathsClean(t *testing.T) {
+	in := ArtifactPaths{"  a.xml ", "", "a.xml", "b.json", " "}
 	got := in.Clean()
 	if len(got) != 2 || got[0] != "a.xml" || got[1] != "b.json" {
 		t.Errorf("clean: %+v", got)
@@ -278,7 +278,7 @@ presets:
     command:
       - "make prepare"
       - "mpirun ./run_heat"
-    results: "out.xml"
+    artifacts: "out.xml"
   single:
     command: "echo one"
 matrix:

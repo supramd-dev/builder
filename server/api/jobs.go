@@ -150,14 +150,14 @@ func (s *Server) triggerJobs(w http.ResponseWriter, r *http.Request) {
 // stage commands (an empty stage is skipped; at least one is required) and
 // the environments to run on.
 type manualTestInput struct {
-	Repo              string              `json:"repo"`
-	Ref               string              `json:"ref"`
-	BuildCommand      string              `json:"buildCommand"`
-	UnitCommand       string              `json:"unitCommand"`
-	UnitResults       runner.ResultsPaths `json:"unitResults"` // optional results file path(s)
-	RegressionCommand string              `json:"regressionCommand"`
-	RegressionResults runner.ResultsPaths `json:"regressionResults"` // optional results file path(s)
-	EnvironmentIDs    []int64             `json:"environmentIds"`
+	Repo                string               `json:"repo"`
+	Ref                 string               `json:"ref"`
+	BuildCommand        string               `json:"buildCommand"`
+	UnitCommand         string               `json:"unitCommand"`
+	UnitArtifacts       runner.ArtifactPaths `json:"unitArtifacts"` // optional artifact path(s) the unit command produces
+	RegressionCommand   string               `json:"regressionCommand"`
+	RegressionArtifacts runner.ArtifactPaths `json:"regressionArtifacts"` // optional artifact path(s) the regression command produces
+	EnvironmentIDs      []int64              `json:"environmentIds"`
 }
 
 // manualTestRoot is one created graph of the manual trigger response.
@@ -191,15 +191,15 @@ func (s *Server) triggerManual(w http.ResponseWriter, r *http.Request, user *sto
 	}
 
 	roots, err := s.Runner.DispatchManual(runner.ManualDispatch{
-		Repo:              in.Repo,
-		Ref:               in.Ref,
-		BuildCommand:      in.BuildCommand,
-		UnitCommand:       in.UnitCommand,
-		UnitResults:       in.UnitResults,
-		RegressionCommand: in.RegressionCommand,
-		RegressionResults: in.RegressionResults,
-		EnvironmentIDs:    in.EnvironmentIDs,
-		Username:          user.Username,
+		Repo:                in.Repo,
+		Ref:                 in.Ref,
+		BuildCommand:        in.BuildCommand,
+		UnitCommand:         in.UnitCommand,
+		UnitArtifacts:       in.UnitArtifacts,
+		RegressionCommand:   in.RegressionCommand,
+		RegressionArtifacts: in.RegressionArtifacts,
+		EnvironmentIDs:      in.EnvironmentIDs,
+		Username:            user.Username,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})

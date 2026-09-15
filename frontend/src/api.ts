@@ -230,16 +230,16 @@ export async function triggerJobs(commitId: number): Promise<{
 // ManualTestInput is the POST /api/jobs/manual body: one repository (empty
 // = the site-config default), an optional ref (empty = HEAD), the stage
 // commands (an empty stage is skipped) and the environments to run on. The
-// results fields accept one path or a list — a run can produce several
-// results files.
+// artifacts fields accept one path or a list — a run can produce several
+// artifact files.
 export interface ManualTestInput {
   repo?: string
   ref?: string
   buildCommand?: string
   unitCommand?: string
-  unitResults?: string | string[]
+  unitArtifacts?: string | string[]
   regressionCommand?: string
-  regressionResults?: string | string[]
+  regressionArtifacts?: string | string[]
   environmentIds: number[]
 }
 

@@ -20,9 +20,9 @@ import (
 // session overall bound (script upload, session setup).
 const stageTimeoutSlack = 5 * time.Minute
 
-// fetchResultsTimeout bounds the short session that reads the results file
+// fetchArtifactTimeout bounds the short session that reads an artifact file
 // back from the remote host.
-const fetchResultsTimeout = 2 * time.Minute
+const fetchArtifactTimeout = 2 * time.Minute
 
 // maxArtifactBytes caps a stored results/log/series artifact (the same cap
 // as the task log; anything larger is truncated at fetch time).
@@ -193,7 +193,7 @@ func (s *Service) writeEnvScript(ctx context.Context, rc *rootContext, logw *Log
 		shellExpand(dir), shellExpand(dir+"/"+name), shellExpand(dir+"/"+name))
 
 	h := envToSSHHost(rc.env)
-	res := s.SSH.RunScript(ctx, h, remote, script.String(), fetchResultsTimeout, logw, logw)
+	res := s.SSH.RunScript(ctx, h, remote, script.String(), fetchArtifactTimeout, logw, logw)
 	if res.ExitCode != 0 {
 		return fmt.Errorf("write %s failed (exit %d)", name, res.ExitCode)
 	}
@@ -245,7 +245,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 }
 
 // executeUnit implements the unit test sub-task: run the stage command in
-// its workdir, fetch the configured results files back (aggregate counts +
+// its workdir, fetch the configured artifact files back (aggregate counts +
 // raw artifacts), then record the TestRun for the dashboard.
 func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 	rc, ok := s.loadRootContext(task)
@@ -270,7 +270,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 	h := envToSSHHost(rc.env)
 	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
 
-	counts, artifacts := s.fetchStageResults(ctx, h, rc, task, stage.Workdir, stage.Results, logw, res.ExitCode)
+	counts, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
 	logw.Flush() // the summary is derived from the persisted log
 
@@ -297,7 +297,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 }
 
 // executeCase implements one regression case sub-task: run the preset's
-// command in its workdir, fetch the results files, then record the case
+// command in its workdir, fetch the artifact files, then record the case
 // row (and its artifacts) into the run's aggregated regression result.
 func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 	rc, ok := s.loadRootContext(task)
@@ -324,9 +324,9 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
 	finished := time.Now()
 
-	// The case's results files (when configured) are fetched back verbatim
+	// The case's artifact files (when configured) are fetched back verbatim
 	// and attached to the case row.
-	_, artifacts := s.fetchStageResults(ctx, h, rc, task, stage.Workdir, stage.Results, logw, res.ExitCode)
+	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
 	logw.Flush() // the case message is derived from the persisted log
 	output := s.readLogTail(task.ID)
@@ -370,27 +370,27 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 // stageCounts is the aggregate a stage's results files yielded.
 type stageCounts struct{ total, failed, skipped int }
 
-// fetchStageResults reads the configured results files back from the remote
-// host and returns the summed aggregate counts plus the artifact inputs
-// (run-scoped for unit; the caller links them to the case). Relative paths
-// resolve against the stage's workdir. Nothing runs when the session never
-// started (exitCode < 0).
-func (s *Service) fetchStageResults(ctx context.Context, h SSHHost, rc *rootContext, task *store.Task,
-	workdir string, results ResultsPaths, logw *LogWriter, exitCode int) (stageCounts, []store.ArtifactInput) {
+// fetchStageArtifacts reads the configured artifact files back from the
+// remote host and returns the summed aggregate counts plus the artifact
+// inputs (run-scoped for unit; the caller links them to the case). Relative
+// paths resolve against the stage's workdir. Nothing runs when the session
+// never started (exitCode < 0).
+func (s *Service) fetchStageArtifacts(ctx context.Context, h SSHHost, rc *rootContext, task *store.Task,
+	workdir string, artifacts ArtifactPaths, logw *LogWriter, exitCode int) (stageCounts, []store.ArtifactInput) {
 	var counts stageCounts
-	var artifacts []store.ArtifactInput
-	for _, path := range results.Clean() {
+	var out []store.ArtifactInput
+	for _, path := range artifacts.Clean() {
 		if exitCode < 0 {
 			break // the session never ran; nothing to fetch
 		}
-		content, fetchErr := s.fetchResultsFile(ctx, h, rc, path, workdir)
+		content, fetchErr := s.fetchArtifactFile(ctx, h, rc, path, workdir)
 		switch {
 		case fetchErr != nil:
-			fmt.Fprintf(logw, "results file %s: %v; skipping counts\n", path, fetchErr)
+			fmt.Fprintf(logw, "artifact %s: %v; skipping counts\n", path, fetchErr)
 		case content == "":
-			fmt.Fprintf(logw, "results file %s: not found or empty; skipping counts\n", path)
+			fmt.Fprintf(logw, "artifact %s: not found or empty; skipping counts\n", path)
 		default:
-			artifacts = append(artifacts, store.ArtifactInput{
+			out = append(out, store.ArtifactInput{
 				Kind:    store.ArtifactKindResults,
 				Name:    path,
 				Content: content,
@@ -400,19 +400,19 @@ func (s *Service) fetchStageResults(ctx context.Context, h SSHHost, rc *rootCont
 				counts.failed += failed
 				counts.skipped += skipped
 			} else {
-				fmt.Fprintf(logw, "results file %s: unrecognized format; storing file without counts\n", path)
+				fmt.Fprintf(logw, "artifact %s: unrecognized format; storing file without counts\n", path)
 			}
 		}
 	}
-	return counts, artifacts
+	return counts, out
 }
 
-// fetchResultsFile cats the configured results file on the remote host
+// fetchArtifactFile cats the configured artifact file on the remote host
 // (relative paths resolve against the stage's workdir, falling back to the
 // code directory), capped at maxArtifactBytes. The fetched bytes are
 // written to the returned string; a scratch writer swallows the
 // (unexpected) stderr without polluting the stage log.
-func (s *Service) fetchResultsFile(ctx context.Context, h SSHHost, rc *rootContext, path, workdir string) (string, error) {
+func (s *Service) fetchArtifactFile(ctx context.Context, h SSHHost, rc *rootContext, path, workdir string) (string, error) {
 	var script strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&script, format+"\n", args...) }
 	w("#!/usr/bin/env bash")
@@ -430,7 +430,7 @@ func (s *Service) fetchResultsFile(ctx context.Context, h SSHHost, rc *rootConte
 	}
 	w("head -c %d %s", maxArtifactBytes, shq(path))
 	var out, errOut strings.Builder
-	res := s.SSH.RunScript(ctx, h, "bash -s", script.String(), fetchResultsTimeout, &out, &errOut)
+	res := s.SSH.RunScript(ctx, h, "bash -s", script.String(), fetchArtifactTimeout, &out, &errOut)
 	if res.ExitCode != 0 {
 		return "", fmt.Errorf("remote read failed (exit %d)", res.ExitCode)
 	}

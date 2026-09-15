@@ -307,9 +307,9 @@ function ExecTab({ onError }: RunPageProps) {
 
 const DEFAULT_MANUAL_BUILD = 'cmake . && cmake --build . -j8' // placeholder example only
 
-// splitPaths turns the comma/space-separated results-file input into a list
-// for the API (a run can produce several results files); a single entry is
-// sent as a scalar to keep the request readable.
+// splitPaths turns the comma/space-separated artifact-path input into a
+// list for the API (a run can produce several artifact files); a single
+// entry is sent as a scalar to keep the request readable.
 function splitPaths(input: string): string | string[] | undefined {
   const parts = input
     .split(/[,\s]+/)
@@ -412,9 +412,9 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
   const [ref, setRef] = useState('')
   const [buildCommand, setBuildCommand] = useState('')
   const [unitCommand, setUnitCommand] = useState('')
-  const [unitResults, setUnitResults] = useState('')
+  const [unitArtifacts, setUnitArtifacts] = useState('')
   const [regressionCommand, setRegressionCommand] = useState('')
-  const [regressionResults, setRegressionResults] = useState('')
+  const [regressionArtifacts, setRegressionArtifacts] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [dispatched, setDispatched] = useState<number[]>([])
@@ -463,9 +463,9 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
         ref,
         buildCommand,
         unitCommand,
-        unitResults: splitPaths(unitResults),
+        unitArtifacts: splitPaths(unitArtifacts),
         regressionCommand,
-        regressionResults: splitPaths(regressionResults),
+        regressionArtifacts: splitPaths(regressionArtifacts),
         environmentIds: [...selected],
       })
       setDispatched(res.roots.map((r) => r.taskId))
@@ -568,11 +568,11 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
                   }}
                 />
                 <input
-                  id="manual-unit-results"
+                  id="manual-unit-artifacts"
                   type="text"
-                  value={unitResults}
-                  onChange={(e) => setUnitResults(e.target.value)}
-                  placeholder="results file(s), e.g. build/test_detail.xml, build/extra.json (optional)"
+                  value={unitArtifacts}
+                  onChange={(e) => setUnitArtifacts(e.target.value)}
+                  placeholder="artifact file(s), e.g. build/test_detail.xml, build/extra.json (optional)"
                   style={{ marginTop: '0.375rem' }}
                 />
               </div>
@@ -591,11 +591,11 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
                   }}
                 />
                 <input
-                  id="manual-reg-results"
+                  id="manual-reg-artifacts"
                   type="text"
-                  value={regressionResults}
-                  onChange={(e) => setRegressionResults(e.target.value)}
-                  placeholder="results file(s), e.g. regression_results.json (optional)"
+                  value={regressionArtifacts}
+                  onChange={(e) => setRegressionArtifacts(e.target.value)}
+                  placeholder="artifact file(s), e.g. regression_results.json (optional)"
                   style={{ marginTop: '0.375rem' }}
                 />
               </div>

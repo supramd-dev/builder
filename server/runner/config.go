@@ -27,11 +27,11 @@ const DefaultTimeoutSeconds = 3600
 
 // EnvConfig is a test stage: unit, or one regression preset.
 type EnvConfig struct {
-	Command     CommandList  `yaml:"command" json:"command"`
-	Description string       `yaml:"description,omitempty" json:"description,omitempty"` // preset label (regression presets)
-	Workdir     string       `yaml:"workdir,omitempty" json:"workdir,omitempty"`         // relative to the code dir; empty = code dir
-	Timeout     int          `yaml:"timeout,omitempty" json:"timeout,omitempty"`         // seconds; 0 = use default
-	Results     ResultsPaths `yaml:"results,omitempty" json:"results,omitempty"`         // googletest results files (XML/JSON) produced by the command
+	Command     CommandList   `yaml:"command" json:"command"`
+	Description string        `yaml:"description,omitempty" json:"description,omitempty"` // preset label (regression presets)
+	Workdir     string        `yaml:"workdir,omitempty" json:"workdir,omitempty"`         // relative to the code dir; empty = code dir
+	Timeout     int           `yaml:"timeout,omitempty" json:"timeout,omitempty"`         // seconds; 0 = use default
+	Artifacts   ArtifactPaths `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`     // artifact files (gtest XML/JSON) the command produces and the runner fetches back
 }
 
 // CommandList is a stage command that may be one command or several. The
@@ -123,23 +123,23 @@ func (c CommandList) IsEmpty() bool {
 	return len(c.Clean()) == 0
 }
 
-// ResultsPaths is a list of results file paths. A run (or a single case) can
-// produce several of them, so the yaml/JSON form accepts either one scalar
-// path or a list:
+// ArtifactPaths is a list of artifact file paths. A run (or a single case)
+// can produce several of them, so the yaml/JSON form accepts either one
+// scalar path or a list:
 //
-//	results: "build/test_detail.xml"
-//	results: ["build/test_detail.xml", "build/extra.json"]
-type ResultsPaths []string
+//	artifacts: "build/test_detail.xml"
+//	artifacts: ["build/test_detail.xml", "build/extra.json"]
+type ArtifactPaths []string
 
 // UnmarshalYAML accepts a scalar path or a list of paths.
-func (r *ResultsPaths) UnmarshalYAML(node *yaml.Node) error {
+func (r *ArtifactPaths) UnmarshalYAML(node *yaml.Node) error {
 	switch node.Kind {
 	case yaml.ScalarNode:
 		if node.Value == "" && node.Tag == "!!null" {
 			*r = nil
 			return nil
 		}
-		*r = ResultsPaths{node.Value}
+		*r = ArtifactPaths{node.Value}
 		return nil
 	case yaml.SequenceNode:
 		var list []string
@@ -149,13 +149,13 @@ func (r *ResultsPaths) UnmarshalYAML(node *yaml.Node) error {
 		*r = list
 		return nil
 	default:
-		return fmt.Errorf("results must be a path or a list of paths")
+		return fmt.Errorf("artifacts must be a path or a list of paths")
 	}
 }
 
 // UnmarshalJSON accepts a scalar path or a list of paths (legacy snapshots
 // and API bodies stored a single string).
-func (r *ResultsPaths) UnmarshalJSON(data []byte) error {
+func (r *ArtifactPaths) UnmarshalJSON(data []byte) error {
 	s := strings.TrimSpace(string(data))
 	if s == "null" || s == "" {
 		*r = nil
@@ -173,13 +173,13 @@ func (r *ResultsPaths) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &one); err != nil {
 		return err
 	}
-	*r = ResultsPaths{one}
+	*r = ArtifactPaths{one}
 	return nil
 }
 
 // MarshalJSON emits the list form (one file → a one-element list keeps the
 // shape stable).
-func (r ResultsPaths) MarshalJSON() ([]byte, error) {
+func (r ArtifactPaths) MarshalJSON() ([]byte, error) {
 	list := []string(r)
 	if list == nil {
 		list = []string{}
@@ -188,9 +188,9 @@ func (r ResultsPaths) MarshalJSON() ([]byte, error) {
 }
 
 // Clean returns the paths trimmed, deduplicated, with empties dropped.
-func (r ResultsPaths) Clean() ResultsPaths {
+func (r ArtifactPaths) Clean() ArtifactPaths {
 	seen := map[string]bool{}
-	out := make(ResultsPaths, 0, len(r))
+	out := make(ArtifactPaths, 0, len(r))
 	for _, p := range r {
 		p = strings.TrimSpace(p)
 		if p == "" || seen[p] {
@@ -237,14 +237,14 @@ type rawConfig struct {
 
 // RegressionCase is one effective regression case of a merged entry: a
 // preset selected by the entry's use/disable, resolved to its final command,
-// workdir, timeout and results files. Each becomes its own sub-task.
+// workdir, timeout and artifact files. Each becomes its own sub-task.
 type RegressionCase struct {
-	Name        string       `json:"name"` // preset name
-	Description string       `json:"description,omitempty"`
-	Command     CommandList  `json:"command"`
-	Workdir     string       `json:"workdir,omitempty"`
-	Timeout     int          `json:"timeout"`
-	Results     ResultsPaths `json:"results,omitempty"`
+	Name        string        `json:"name"` // preset name
+	Description string        `json:"description,omitempty"`
+	Command     CommandList   `json:"command"`
+	Workdir     string        `json:"workdir,omitempty"`
+	Timeout     int           `json:"timeout"`
+	Artifacts   ArtifactPaths `json:"artifacts,omitempty"`
 }
 
 // MergedEntry is an entry with defaults applied — the config snapshot stored
@@ -354,7 +354,7 @@ func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, default
 			Command:     p.Command,
 			Workdir:     p.Workdir,
 			Timeout:     p.Timeout,
-			Results:     p.Results,
+			Artifacts:   p.Artifacts,
 		}
 		if c.Timeout == 0 {
 			c.Timeout = defaultTimeoutFor(defaults, nil)

@@ -24,26 +24,26 @@ type BuildStageConfig struct {
 }
 
 // StageConfig is the unit sub-task snapshot: the command list with its
-// workdir, timeout, environment and the optional results files the runner
+// workdir, timeout, environment and the optional artifact files the runner
 // fetches back after the commands ran (a run can produce several; legacy
 // snapshots store a single string and still decode).
 type StageConfig struct {
-	Command CommandList       `json:"command"`
-	Workdir string            `json:"workdir,omitempty"`
-	Timeout int               `json:"timeout"` // seconds
-	Env     map[string]string `json:"env,omitempty"`
-	Results ResultsPaths      `json:"results,omitempty"` // paths relative to the workdir (or absolute)
+	Command   CommandList       `json:"command"`
+	Workdir   string            `json:"workdir,omitempty"`
+	Timeout   int               `json:"timeout"` // seconds
+	Env       map[string]string `json:"env,omitempty"`
+	Artifacts ArtifactPaths     `json:"artifacts,omitempty"` // paths relative to the workdir (or absolute)
 }
 
 // CaseStageConfig is one regression case sub-task snapshot: the preset name
-// plus the resolved command list, workdir, timeout and results files.
+// plus the resolved command list, workdir, timeout and artifact files.
 type CaseStageConfig struct {
-	Case    string            `json:"case"` // preset name
-	Command CommandList       `json:"command"`
-	Workdir string            `json:"workdir,omitempty"`
-	Timeout int               `json:"timeout"`
-	Env     map[string]string `json:"env,omitempty"`
-	Results ResultsPaths      `json:"results,omitempty"`
+	Case      string            `json:"case"` // preset name
+	Command   CommandList       `json:"command"`
+	Workdir   string            `json:"workdir,omitempty"`
+	Timeout   int               `json:"timeout"`
+	Env       map[string]string `json:"env,omitempty"`
+	Artifacts ArtifactPaths     `json:"artifacts,omitempty"`
 }
 
 // RootConfig is the root task's Config snapshot: the merged matrix entry.

@@ -53,7 +53,7 @@ defaults:
 # Regression cases are defined ONCE here and referenced by matrix entries
 # with regression.use / regression.disable. Each referenced preset runs
 # as its own sub-task ("regression: <name>") after the build, with its
-# own workdir, timeout and results files; all cases of an entry share one
+# own workdir, timeout and artifact files; all cases of an entry share one
 # regression run on the dashboard (one cell, per-case rows inside).
 #
 # Fields per preset:
@@ -63,8 +63,9 @@ defaults:
 #   workdir     (optional) directory the command runs in, relative to the
 #                          code root; absolute paths pass through as-is
 #   timeout     (optional) seconds; falls back to defaults.timeout
-#   results     (optional) results file(s) fetched back — a single path
-#                          or a list; googletest XML/JSON by default
+#   artifacts   (optional) artifact file(s) fetched back after the run —
+#                          a single path or a list; googletest XML/JSON by
+#                          default
 #
 # A command may be several: a yaml list runs the entries in order and
 # stops at the first failure — the remaining commands are skipped and
@@ -80,19 +81,19 @@ presets:
       - "./run_heat.py --nt 500 --tol 1e-5"
     workdir: "regression/heat"       # runs in <code>/regression/heat
     timeout: 1800
-    results: "out.xml"               # relative to the preset workdir
+    artifacts: "out.xml"             # relative to the preset workdir
 
   poisson:
     description: Poisson solver, multigrid vs direct
     command: "python3 run_poisson.py --grid 128"   # scalar form
     workdir: "regression/poisson"
-    results: ["poisson.xml", "poisson.log"]   # several files: a list
+    artifacts: ["poisson.xml", "poisson.log"] # several files: a list
 
   eos-table:
     description: Equation-of-state table spot checks
     command: "./check_eos $MD_CODE_DIR/data/eos/*.tbl"
     timeout: 600
-    # No workdir: runs in the code root. No results: pass/fail by exit
+    # No workdir: runs in the code root. No artifacts: pass/fail by exit
     # code plus the MD-BUILDER-SUMMARY line only.
 
 # ---------------------------------------------------------------------------
@@ -129,7 +130,7 @@ matrix:
       # the first failure).
       command: "ctest --test-dir build -L unit --output-on-failure"
       timeout: 600                    # overrides defaults.timeout
-      results: "build/test_detail.xml"   # googletest XML written by the
+      artifacts: "build/test_detail.xml"  # googletest XML written by the
                                          # test binary itself
       # workdir: "tests"              # optional, like presets
 
@@ -159,7 +160,7 @@ matrix:
 
     unit:
       command: "mpirun -np 4 ./build/unit_tests --gtest_output=xml:build/unit_mpi.xml"
-      results: "build/unit_mpi.xml"
+      artifacts: "build/unit_mpi.xml"
 
     regression:
       use: [heat, poisson, eos-table]
@@ -177,7 +178,7 @@ matrix:
 
     unit:
       command: "./build/unit_tests --gtest_output=xml:build/unit_cuda.xml"
-      results: "build/unit_cuda.xml"
+      artifacts: "build/unit_cuda.xml"
 
     regression:
       # Every preset except heat (which needs a CPU-only reference run):
@@ -201,7 +202,7 @@ matrix:
 # script before the stage command. Use it for module loads and compiler
 # exports. An environment without one simply logs a warning.
 #
-# Results files (results) are fetched back after the command, stored
+# Artifact files (artifacts) are fetched back after the command, stored
 # verbatim as run artifacts, and their aggregate counts feed the matrix
 # cell; the per-case detail is parsed in the browser. Paths are relative
 # to the stage's workdir. Missing or unrecognized files are skipped with
@@ -214,6 +215,6 @@ matrix:
 #
 # Verdicts: a regression case passes iff its command exits 0 — timeout
 # (exit 124), SSH failure or any other non-zero exit fails the case, and
-# its results files never flip the verdict (they are display-only). The
-# unit stage additionally fails when its results files report failed
+# its artifact files never flip the verdict (they are display-only). The
+# unit stage additionally fails when its artifact files report failed
 # cases. The matrix cell aggregates an entry's cases: any failed case → ✗.

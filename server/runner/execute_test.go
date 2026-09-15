@@ -179,7 +179,7 @@ func runUntilStage(t *testing.T, svc *Service, s *store.Store, cloneTask *store.
 	}
 }
 
-const resultsYAML = `version: 2
+const artifactsYAML = `version: 2
 defaults:
   build:
     command: "cmake -DEXEC=1 . && cmake --build ."
@@ -187,10 +187,10 @@ matrix:
   - tags: [cpu]
     unit:
       command: "ctest -L unit --output-junit junit.xml"
-      results: "build/test_detail.xml"
+      artifacts: "build/test_detail.xml"
 `
 
-const multiResultsYAML = `version: 2
+const multiArtifactsYAML = `version: 2
 defaults:
   build:
     command: "cmake ."
@@ -198,14 +198,14 @@ matrix:
   - tags: [cpu]
     unit:
       command: "ctest -L unit"
-      results:
+      artifacts:
         - "build/test_detail.xml"
         - "build/extra_results.json"
 `
 
-// caseResultsYAML exercises the per-case regression path: two presets with
-// their own results files.
-const caseResultsYAML = `version: 2
+// caseArtifactsYAML exercises the per-case regression path: two presets
+// with their own artifact files.
+const caseArtifactsYAML = `version: 2
 defaults:
   build:
     command: "cmake ."
@@ -213,7 +213,7 @@ presets:
   heat:
     command: "python3 run_heat.py"
     workdir: "regression/heat"
-    results: "out.xml"
+    artifacts: "out.xml"
   poisson:
     command: "python3 run_poisson.py"
 matrix:
@@ -225,12 +225,12 @@ matrix:
       disable: [poisson]
 `
 
-// TestExecuteStageFetchesResultsFile: a configured results file is fetched,
+// TestExecuteStageFetchesArtifactFile: a configured artifact file is fetched,
 // stored verbatim as an artifact, its root counts land on the run, and the
 // run links back to the stage task (its stdout lives in the task log).
-func TestExecuteStageFetchesResultsFile(t *testing.T) {
-	svc, s, exec, _, cloneTask := newExecuteFixture(t, resultsYAML)
-	// The fetch script contains the results path as a quoted cat argument;
+func TestExecuteStageFetchesArtifactFile(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, artifactsYAML)
+	// The fetch script contains the artifact path as a quoted cat argument;
 	// seed the fake to return the gtest XML for it.
 	exec.outcome["test_detail.xml"] = 0
 	exec.output["test_detail.xml"] = sampleGTestXML
@@ -239,7 +239,7 @@ func TestExecuteStageFetchesResultsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The unit script ran; the fetch script cats the results path.
+	// The unit script ran; the fetch script cats the artifact path.
 	fetchSeen := false
 	for _, script := range exec.scripts {
 		if strings.Contains(script, "test_detail.xml") {
@@ -247,7 +247,7 @@ func TestExecuteStageFetchesResultsFile(t *testing.T) {
 		}
 	}
 	if !fetchSeen {
-		t.Fatalf("no results fetch script ran: %+v", exec.scripts)
+		t.Fatalf("no artifact fetch script ran: %+v", exec.scripts)
 	}
 
 	envs := []int64{stage.EnvironmentID}
@@ -289,11 +289,11 @@ func TestExecuteStageFetchesResultsFile(t *testing.T) {
 	}
 }
 
-// TestExecuteStageMultipleResultsFiles: a run configured with several
-// results files stores one artifact per file and sums the parsed counts
+// TestExecuteStageMultipleArtifactFiles: a run configured with several
+// artifact files stores one artifact per file and sums the parsed counts
 // across all of them.
-func TestExecuteStageMultipleResultsFiles(t *testing.T) {
-	svc, s, exec, _, cloneTask := newExecuteFixture(t, multiResultsYAML)
+func TestExecuteStageMultipleArtifactFiles(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, multiArtifactsYAML)
 	// Both files parse; a missing second file is tolerated (logged, no
 	// artifact for it).
 	exec.outcome["test_detail.xml"] = 0
@@ -335,11 +335,11 @@ func TestExecuteStageMultipleResultsFiles(t *testing.T) {
 	}
 }
 
-// TestExecuteStageResultsFileMissing: a configured results file that does
+// TestExecuteStageArtifactFileMissing: a configured artifact file that does
 // not exist on the host leaves counts at zero, stores no artifact, and the
 // run still records the command's outcome.
-func TestExecuteStageResultsFileMissing(t *testing.T) {
-	svc, s, exec, _, cloneTask := newExecuteFixture(t, resultsYAML)
+func TestExecuteStageArtifactFileMissing(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, artifactsYAML)
 	// The fetch fails remotely (cat: no such file).
 	exec.outcome["test_detail.xml"] = 1
 	stage := runUntilStage(t, svc, s, cloneTask, store.TaskKindUnit)
@@ -369,8 +369,8 @@ func TestExecuteStageResultsFileMissing(t *testing.T) {
 	for _, l := range logs {
 		all += l.Content
 	}
-	if !strings.Contains(all, "results file") {
-		t.Errorf("log should mention the results file: %q", tailLine(all, 3))
+	if !strings.Contains(all, "artifact build/test_detail.xml") {
+		t.Errorf("log should mention the artifact file: %q", tailLine(all, 3))
 	}
 }
 
@@ -709,12 +709,12 @@ func TestRedeployRebuildsGraph(t *testing.T) {
 }
 
 // TestExecuteCaseRunsPreset: a regression case sub-task runs the preset
-// command in its workdir, sources the env script, fetches its results file
+// command in its workdir, sources the env script, fetches its artifact file
 // and records a case row with a case-scoped artifact.
 func TestExecuteCaseRunsPreset(t *testing.T) {
-	svc, s, exec, _, cloneTask := newExecuteFixture(t, caseResultsYAML)
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, caseArtifactsYAML)
 	// The case command's script carries the preset command; the fetch
-	// script cats the results path.
+	// script cats the artifact path.
 	exec.outcome["out.xml"] = 0
 	exec.output["out.xml"] = sampleGTestXML
 
