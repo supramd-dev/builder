@@ -993,7 +993,10 @@ code {
   align-items: center;
   gap: 0.3rem;
   font-weight: 600;
-  color: var(--muted) !important;
+  /* Base color only; when TaskStatusText also sets text-success/-danger/…,
+     those utility colors (same !important weight, defined earlier) must win,
+     so keep this non-important. */
+  color: var(--muted);
 }
 
 .task-status-text.text-success,
@@ -1010,12 +1013,6 @@ code {
 .task-error {
   color: var(--danger);
   white-space: pre-wrap;
-}
-
-/* The "graph →" link beside the Pipeline heading (task log view). */
-.task-graph-link {
-  font-size: 0.75rem;
-  font-weight: 400;
 }
 
 .task-steps {
@@ -1194,8 +1191,60 @@ code {
   background: var(--bg-alt);
 }
 
-.graph-hint {
+/* The selected node (whose log the pipeline page shows below): same
+   status colors as the rest, but with a thicker border in that color —
+   green for done, red for failed, blue for running. Running/pending
+   nodes have no status border of their own, so give the selected one
+   the link blue. */
+.graph-node-selected {
+  border-width: 2px;
+  padding: 0 0.45rem; /* keep the content aligned despite the thicker border */
+}
+
+.graph-node-selected.graph-node-running {
+  border-color: var(--link);
+  border-style: solid;
+}
+
+.graph-node-selected.graph-node-pending {
+  border-color: var(--border);
+  border-style: solid;
+}
+
+/* The shared log viewer under the pipeline step list (pipeline page). */
+.pipeline-log {
+  margin-top: 0.25rem;
+}
+
+/* Its heading: stage glyph + name + kind + status, with the run-details
+   link pushed to the right. */
+.pipeline-log-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.pipeline-log-status {
+  font-weight: 700;
+}
+
+.pipeline-log-name {
+  font-weight: 600;
+}
+
+.pipeline-log-kind {
+  font-size: 0.8rem;
+}
+
+.pipeline-log-live {
+  font-size: 0.8rem;
+}
+
+.pipeline-run-link {
+  margin-left: auto;
   font-size: 0.85rem;
+  font-weight: 400;
 }
 
 .task-log {

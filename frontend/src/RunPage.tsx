@@ -4,9 +4,9 @@ import Editor, { type OnMount } from '@monaco-editor/react'
 import { defineMonacoTheme } from './monacoTheme'
 import { formatDuration } from './gtest'
 import {
+  cachedSiteConfig,
   execEnvironment,
   execScript,
-  getSiteConfig,
   listEnvironments,
   triggerManualTest,
   triggerManualYAML,
@@ -421,7 +421,7 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([listEnvironments(), getSiteConfig().catch(() => null)])
+    Promise.all([listEnvironments(), cachedSiteConfig()])
       .then(([envs, cfg]) => {
         if (cancelled) return
         const enabled = envs.filter((e) => e.enabled)

@@ -145,13 +145,29 @@ export async function getSiteConfig(): Promise<SiteConfig> {
   return api<SiteConfig>('/api/site-config')
 }
 
+// Cached site config: the config is read-only for most pages (the settings
+// page is the only writer), so callers that just need e.g. the code repo
+// share one request per session. updateSiteConfig invalidates the cache.
+let siteConfigCache: SiteConfig | null = null
+export async function cachedSiteConfig(): Promise<SiteConfig | null> {
+  if (siteConfigCache) return siteConfigCache
+  try {
+    siteConfigCache = await getSiteConfig()
+    return siteConfigCache
+  } catch {
+    return null
+  }
+}
+
 export async function updateSiteConfig(
   input: SiteConfigUpdate,
 ): Promise<SiteConfig> {
-  return api<SiteConfig>('/api/site-config', {
+  const cfg = await api<SiteConfig>('/api/site-config', {
     method: 'PUT',
     body: JSON.stringify(input),
   })
+  siteConfigCache = cfg
+  return cfg
 }
 
 // --- Test dashboard ---

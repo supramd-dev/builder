@@ -115,7 +115,8 @@ export default function DashboardPage({ onError }: Props) {
       <p className="text-muted">
         One row per recent git push; one column per environment with its
         build, unit and regression stages. Click a stage for details, the
-        commit for the repository, or a graph link for the task pipeline.
+        commit for the repository, or a graph link for the pipeline (graph
+        and live logs on one page).
       </p>
 
       {error && <div className="alert alert-danger">{error}</div>}

@@ -1,16 +1,11 @@
-import { useEffect, useState } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { HashRouter, NavLink as RRNavLink, Navigate, Route, Routes, useLocation } from 'react-router'
 import './App.css'
-import { api, getSiteConfig, type Me } from './api'
+import { api, cachedSiteConfig, type Me } from './api'
 import LoginPage from './LoginPage'
-import UserCenter from './UserCenter'
-import RunPage from './RunPage'
-import SettingsPage from './SettingsPage'
 import DashboardPage from './DashboardPage'
+import TaskPipelinePage from './TaskPipelinePage'
 import TestRunDetailPage from './TestRunDetailPage'
-import DocsPage from './DocsPage'
-import TaskDetailPage from './TaskDetailPage'
-import TaskGraphPage from './TaskGraphPage'
 import { applySiteTimezone, subscribeTimezone } from './timezone'
 
 // The route table (hash-based so the docs' #/docs/... anchors keep working
@@ -22,13 +17,23 @@ import { applySiteTimezone, subscribeTimezone } from './timezone'
 //   #/settings              site settings
 //   #/docs                  documentation
 //   #/docs/:section         documentation, a section preselected
-//   #/tasks/:taskId         task graph (root)
-//   #/tasks/:taskId/log     task log view (root detail + step list)
+//   #/tasks/:taskId         pipeline view: dependency graph + selected
+//                           stage's live log in one page (a sub-task id is
+//                           resolved to its root; the old /log suffix
+//                           redirects here)
 //   #/runs/:runId           test run detail (a regression case row opens
 //                           the child run's own detail page here)
 //
 // Signed-in pages read their ids from the URL (useParams) and link onward
 // with <Link> / useNavigate — no per-page navigation callbacks.
+//
+// The heavier, less-visited pages (Monaco editor, docs viewer) are
+// code-split behind React.lazy so the dashboard stays the first paint.
+
+const UserCenter = lazy(() => import('./UserCenter'))
+const RunPage = lazy(() => import('./RunPage'))
+const SettingsPage = lazy(() => import('./SettingsPage'))
+const DocsPage = lazy(() => import('./DocsPage'))
 
 function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -46,12 +51,14 @@ function App() {
   }, [])
 
   // Load the site timezone (cached in localStorage; a session may not even
-  // be established yet — the timezone applies to any rendered times).
+  // be established yet — the timezone applies to any rendered times). The
+  // module-level site-config cache means this shares one request with other
+  // readers (e.g. the Run command page).
   useEffect(() => {
     let cancelled = false
-    getSiteConfig()
+    cachedSiteConfig()
       .then((cfg) => {
-        if (!cancelled) applySiteTimezone(cfg.timezone)
+        if (!cancelled && cfg) applySiteTimezone(cfg.timezone)
       })
       .catch(() => {
         // Not logged in or offline: the localStorage cache (applied at
@@ -110,18 +117,58 @@ function App() {
   )
 }
 
-// PageRoutes is the signed-in route table.
+// PageRoutes is the signed-in route table. Lazy routes share one Suspense
+// fallback; the eager pages (dashboard, pipeline, run detail) render without
+// it.
 function PageRoutes() {
   return (
     <Routes>
       <Route path="/" element={<DashboardPage onError={console.warn} />} />
-      <Route path="/environments" element={<UserCenter />} />
-      <Route path="/run" element={<RunPage onError={console.warn} />} />
-      <Route path="/settings" element={<SettingsPage onError={console.warn} />} />
-      <Route path="/docs" element={<DocsPage />} />
-      <Route path="/docs/:section" element={<DocsPage />} />
-      <Route path="/tasks/:taskId" element={<TaskGraphPage />} />
-      <Route path="/tasks/:taskId/log" element={<TaskDetailPage />} />
+      <Route
+        path="/environments"
+        element={
+          <Suspense fallback={<p className="text-muted">Loading…</p>}>
+            <UserCenter />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/run"
+        element={
+          <Suspense fallback={<p className="text-muted">Loading…</p>}>
+            <RunPage onError={console.warn} />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <Suspense fallback={<p className="text-muted">Loading…</p>}>
+            <SettingsPage onError={console.warn} />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/docs"
+        element={
+          <Suspense fallback={<p className="text-muted">Loading…</p>}>
+            <DocsPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/docs/:section"
+        element={
+          <Suspense fallback={<p className="text-muted">Loading…</p>}>
+            <DocsPage />
+          </Suspense>
+        }
+      />
+      {/* The old split pages (graph at /tasks/:id, log at /tasks/:id/log)
+          merged into one pipeline view; /log redirects so old links and
+          bookmarks keep working. */}
+      <Route path="/tasks/:taskId" element={<TaskPipelinePage />} />
+      <Route path="/tasks/:taskId/log" element={<Navigate to="../" replace relative="path" />} />
       <Route path="/runs/:runId" element={<TestRunDetailPage onError={console.warn} />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

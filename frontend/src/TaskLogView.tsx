@@ -2,8 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { getTaskLogs } from './api'
 
 // TaskLogView shows one task's incremental log, polling with after=lastSeq
-// while the parent task is live. Shared by the task detail page (following a
-// running task) and the run detail page (a finished stage's stdout).
+// while live is set. Shared by the task pipeline page (following a running
+// stage) and the run detail page (a finished stage's stdout).
+//
+// The poll interval is derived from `live` but taskId alone resets the
+// stream: flipping live (a task finishing while being watched) only stops
+// the timer — the already-streamed text stays put, no re-fetch from 0.
 export default function TaskLogView({
   taskId,
   live,
@@ -16,8 +20,8 @@ export default function TaskLogView({
   const lastSeq = useRef(0)
   const preRef = useRef<HTMLPreElement>(null)
 
+  // Reset + fetch whenever the log's task changes.
   useEffect(() => {
-    // New selection: reset the stream.
     setText('')
     setTruncated(false)
     lastSeq.current = 0
@@ -44,10 +48,40 @@ export default function TaskLogView({
       }
     }
     poll()
-    const timer = live ? setInterval(poll, 2000) : undefined
     return () => {
       stop = true
-      if (timer) clearInterval(timer)
+    }
+  }, [taskId])
+
+  // Follow a live task: poll until live flips false (the task finished) —
+  // the streamed content above is kept, only the timer stops.
+  useEffect(() => {
+    if (!live) return
+    let stop = false
+    async function poll() {
+      try {
+        const res = await getTaskLogs(taskId, lastSeq.current)
+        if (stop) return
+        lastSeq.current = res.lastSeq
+        if (res.chunks.length > 0) {
+          setText((cur) => {
+            const next = cur + res.chunks.map((c) => c.content).join('')
+            if (next.length > 512 * 1024) {
+              setTruncated(true)
+              return next.slice(next.length - 512 * 1024)
+            }
+            return next
+          })
+        }
+      } catch {
+        // Transient poll errors are ignored; the next tick retries.
+      }
+    }
+    poll()
+    const timer = setInterval(poll, 2000)
+    return () => {
+      stop = true
+      clearInterval(timer)
     }
   }, [taskId, live])
 
