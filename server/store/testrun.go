@@ -396,9 +396,14 @@ func recomputeParent(parent *TestRun, children []TestRun) {
 			failed = append(failed, children[i].Name)
 		}
 	}
-	parent.Status = StatusFailed
-	if parent.Failed == 0 {
-		parent.Status = StatusPassed
+	// A run passes when nothing failed — except the all-skipped placeholder
+	// (every case was skipped because an upstream stage failed): that must
+	// not read as a green cell. The "skipped:" summary makes the dashboard
+	// translate it to ⤼, which requires the stored status to be failed.
+	allSkipped := parent.Total > 0 && parent.Passed == 0 && parent.Skipped == parent.Total
+	parent.Status = StatusPassed
+	if parent.Failed > 0 || allSkipped {
+		parent.Status = StatusFailed
 	}
 	switch {
 	case len(failed) > 0:

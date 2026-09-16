@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"md-builder/server/auth"
+	"md-builder/server/runner"
 	"md-builder/server/store"
 )
 
@@ -138,19 +139,30 @@ hwIDAQAB
 	now := time.Now()
 	// report stores one run. statusOverride is only meaningful for runs
 	// without cases (the simplified path); pass "" to derive it from the
-	// cases, or store.StatusFailed/StatusPassed to force it.
-	report := func(envID, commitID int64, kind, summary string, startedAgo time.Duration, cases []store.CaseInput, statusOverride string) {
+	// cases, or store.StatusFailed/StatusPassed to force it. artifacts (the
+	// unit path's results files) attach to the stored run; their root
+	// attributes feed the run's aggregate counts, exactly like the runner
+	// parsing the fetched file.
+	report := func(envID, commitID int64, kind, summary string, startedAgo time.Duration, cases []store.CaseInput, statusOverride string, artifacts ...store.ArtifactInput) {
 		status := statusOverride
 		if status == "" {
 			status = runStatusOf(cases)
 		}
-		t0 := now.Add(-startedAgo)
-		_, err := s.UpsertTestRun(&store.RunInput{
+		in := &store.RunInput{
 			EnvironmentID: envID, CommitID: commitID, Kind: kind,
 			Cases: cases, Status: status, Summary: summary,
-			StartedAt: t0, FinishedAt: t0.Add(4 * time.Minute),
-		})
-		if err != nil {
+			Artifacts: artifacts,
+			StartedAt: now.Add(-startedAgo), FinishedAt: now.Add(-startedAgo).Add(4 * time.Minute),
+		}
+		if len(cases) == 0 && len(artifacts) > 0 {
+			if total, failed, skipped, ok := runner.ExtractGTestCounts([]byte(artifacts[0].Content)); ok {
+				in.Total = total
+				in.Failed = failed
+				in.Skipped = skipped
+				in.Passed = total - failed - skipped
+			}
+		}
+		if _, err := s.UpsertTestRun(in); err != nil {
 			fmt.Fprintf(os.Stderr, "error: report %s run (env %d, commit %d): %v\n", kind, envID, commitID, err)
 			os.Exit(1)
 		}
@@ -164,14 +176,39 @@ hwIDAQAB
 		}
 		return cases
 	}
-	unit := func(statuses ...string) []store.CaseInput {
+	// unit mirrors the runner's real unit path (recordStageRun): a gtest
+	// results file, parsed for the aggregate counts and stored verbatim as a
+	// run artifact — no child runs. The per-case detail comes from the
+	// artifact, parsed in the browser, so the detail page's parsed table
+	// matches the run's headline numbers.
+	unit := func(statuses ...string) []store.ArtifactInput {
 		names := []string{"TestForce::compute", "TestIntegrate::verlet", "TestNeighborList::rebuild", "TestPBC::unwrap"}
-		cases := make([]store.CaseInput, len(statuses))
+		var cases []string
+		total, failed := len(statuses), 0
 		for i, st := range statuses {
-			cases[i] = store.CaseInput{Name: names[i], Status: st,
-				Message: map[string]string{"failed": "assert 1e-12 < |dE| failed"}[st]}
+			var node string
+			switch st {
+			case "failed":
+				failed++
+				node = fmt.Sprintf(`  <testcase name="%s" classname="md" status="run" time="0.31">`+"\n"+
+					`    <failure message="assert 1e-12 &lt; |dE| failed" type="">md_test.cc:118&#x0A;      Expected: 1e-12 &gt; |dE|&#x0A;        Actual: 4.2e-9</failure>`+"\n"+
+					`  </testcase>`, names[i])
+			case "skipped":
+				node = fmt.Sprintf(`  <testcase name="%s" classname="md" status="notrun" time="0"/>`, names[i])
+			default:
+				node = fmt.Sprintf(`  <testcase name="%s" classname="md" status="run" time="0.27"/>`, names[i])
+			}
+			cases = append(cases, node)
 		}
-		return cases
+		xml := fmt.Sprintf(`<testsuites tests="%d" failures="%d" disabled="0" errors="0" time="1.24" name="AllTests">`+"\n"+
+			`  <testsuite name="md" tests="%d" failures="%d" disabled="0" errors="0" time="1.24">`+"\n"+
+			"%s\n  </testsuite>\n</testsuites>\n",
+			total, failed, total, failed, strings.Join(cases, "\n"))
+		return []store.ArtifactInput{{
+			Kind:    store.ArtifactKindResults,
+			Name:    "build/test_detail.xml",
+			Content: xml,
+		}}
 	}
 
 	cpu, gpu, mpi := envs[0].ID, envs[1].ID, envs[2].ID
@@ -183,8 +220,8 @@ hwIDAQAB
 	// link), the "environment never tested this push" case.
 	report(cpu, c1, store.RunKindRegression, "all 3 regression cases within tolerance", 95*time.Hour, reg("passed", "passed", "passed"), "")
 	report(gpu, c1, store.RunKindRegression, "all 3 regression cases within tolerance", 95*time.Hour, reg("passed", "passed", "passed"), "")
-	report(cpu, c1, store.RunKindUnit, "all 4 unit tests passed", 95*time.Hour, unit("passed", "passed", "passed", "passed"), "")
-	report(gpu, c1, store.RunKindUnit, "all 4 unit tests passed", 95*time.Hour, unit("passed", "passed", "passed", "passed"), "")
+	report(cpu, c1, store.RunKindUnit, "all 4 unit tests passed", 95*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
+	report(gpu, c1, store.RunKindUnit, "all 4 unit tests passed", 95*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
 	report(cpu, c1, store.RunKindBuild, "build ok (cmake+ninja, 41s)", 96*time.Hour, nil, "")
 	report(gpu, c1, store.RunKindBuild, "build ok with CUDA arch sm_80 (8m12s)", 96*time.Hour, nil, "")
 
@@ -193,8 +230,8 @@ hwIDAQAB
 	// seeded failed task graph and the runner's recordSkippedRuns).
 	report(cpu, c2, store.RunKindRegression, "all 3 regression cases within tolerance", 71*time.Hour, reg("passed", "passed", "passed"), "")
 	report(mpi, c2, store.RunKindRegression, "2 of 3 regression cases within tolerance", 70*time.Hour, reg("passed", "failed", "passed"), "")
-	report(cpu, c2, store.RunKindUnit, "3 of 4 unit tests passed", 71*time.Hour, unit("passed", "passed", "failed", "passed"), "")
-	report(mpi, c2, store.RunKindUnit, "all 4 unit tests passed", 70*time.Hour, unit("passed", "passed", "passed", "passed"), "")
+	report(cpu, c2, store.RunKindUnit, "3 of 4 unit tests passed", 71*time.Hour, nil, store.StatusFailed, unit("passed", "passed", "failed", "passed")...)
+	report(mpi, c2, store.RunKindUnit, "all 4 unit tests passed", 70*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
 	report(cpu, c2, store.RunKindBuild, "build ok (cmake+ninja, 39s)", 72*time.Hour, nil, "")
 	report(mpi, c2, store.RunKindBuild, "build ok (cmake+make -j64, 1m03s)", 72*time.Hour, nil, "")
 	// The GPU build failed, so its build run and the two skipped-stage runs
@@ -209,8 +246,8 @@ hwIDAQAB
 	// runner's recordSkippedRuns).
 	report(cpu, c3, store.RunKindRegression, "all 3 regression cases within tolerance", 47*time.Hour, reg("passed", "passed", "passed"), "")
 	report(gpu, c3, store.RunKindRegression, "2 of 3 regression cases within tolerance", 47*time.Hour, reg("passed", "failed", "passed"), "")
-	report(cpu, c3, store.RunKindUnit, "all 4 unit tests passed", 47*time.Hour, unit("passed", "passed", "passed", "passed"), "")
-	report(gpu, c3, store.RunKindUnit, "all 4 unit tests passed", 47*time.Hour, unit("passed", "passed", "passed", "passed"), "")
+	report(cpu, c3, store.RunKindUnit, "all 4 unit tests passed", 47*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
+	report(gpu, c3, store.RunKindUnit, "all 4 unit tests passed", 47*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
 	report(cpu, c3, store.RunKindBuild, "build ok (cmake+ninja, 40s)", 48*time.Hour, nil, "")
 	report(gpu, c3, store.RunKindBuild, "build ok with CUDA arch sm_80 (8m30s)", 48*time.Hour, nil, "")
 	mpiBuildFail := "build failed: CMake Error at src/CMakeLists.txt:87 (target_link_libraries): Cannot find package MPI"
@@ -223,9 +260,9 @@ hwIDAQAB
 	report(cpu, c4, store.RunKindRegression, "all 3 regression cases within tolerance", 23*time.Hour, reg("passed", "passed", "passed"), "")
 	report(gpu, c4, store.RunKindRegression, "all 3 regression cases within tolerance", 23*time.Hour, reg("passed", "passed", "passed"), "")
 	report(mpi, c4, store.RunKindRegression, "2 of 3 regression cases within tolerance", 22*time.Hour, reg("passed", "passed", "failed"), "")
-	report(cpu, c4, store.RunKindUnit, "all 4 unit tests passed", 23*time.Hour, unit("passed", "passed", "passed", "passed"), "")
-	report(gpu, c4, store.RunKindUnit, "all 4 unit tests passed", 23*time.Hour, unit("passed", "passed", "passed", "passed"), "")
-	report(mpi, c4, store.RunKindUnit, "3 of 4 unit tests passed", 22*time.Hour, unit("passed", "failed", "passed", "passed"), "")
+	report(cpu, c4, store.RunKindUnit, "all 4 unit tests passed", 23*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
+	report(gpu, c4, store.RunKindUnit, "all 4 unit tests passed", 23*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
+	report(mpi, c4, store.RunKindUnit, "3 of 4 unit tests passed", 22*time.Hour, nil, store.StatusFailed, unit("passed", "failed", "passed", "passed")...)
 	report(cpu, c4, store.RunKindBuild, "build ok (cmake+ninja, 38s)", 24*time.Hour, nil, "")
 	report(gpu, c4, store.RunKindBuild, "build ok with CUDA arch sm_80 (7m58s)", 24*time.Hour, nil, "")
 	report(mpi, c4, store.RunKindBuild, "build ok (cmake+make -j64, 58s)", 24*time.Hour, nil, "")
@@ -233,7 +270,7 @@ hwIDAQAB
 	// e555555 (newest): fully green everywhere — the good state.
 	for _, envID := range []int64{cpu, gpu, mpi} {
 		report(envID, c5, store.RunKindRegression, "all 3 regression cases within tolerance", 2*time.Hour, reg("passed", "passed", "passed"), "")
-		report(envID, c5, store.RunKindUnit, "all 4 unit tests passed", 2*time.Hour, unit("passed", "passed", "passed", "passed"), "")
+		report(envID, c5, store.RunKindUnit, "all 4 unit tests passed", 2*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
 		summary := "build ok (cmake+ninja, 37s)"
 		if envID == gpu {
 			summary = "build ok with CUDA arch sm_80 (7m44s)"
@@ -322,9 +359,11 @@ func seedGraphs(s *store.Store, force bool, commits []*store.Commit, envs []*sto
 	}
 
 	// Look up the run statuses per (env, commit, kind) to mirror the state
-	// the real runner would have produced when reporting these runs.
+	// the real runner would have produced when reporting these runs. Only
+	// top-level runs count: child runs (regression cases, nested under a
+	// parent) would otherwise overwrite the parent's stage status here.
 	var runs []store.TestRun
-	if err := s.DB.Find(&runs).Error; err != nil {
+	if err := s.DB.Where("parent_id = 0").Find(&runs).Error; err != nil {
 		return err
 	}
 	runStateOf := map[store.EnvCommit]map[string]seedRunState{}
@@ -401,7 +440,9 @@ func envByID(envs []*store.TestEnvironment, id int64) *store.TestEnvironment {
 }
 
 // specFor derives the terminal graph spec from the stage runs (passed →
-// done, failed → failed, skipped or missing → skipped).
+// done, failed → failed, skipped or missing → skipped). Each test stage's
+// run summary is carried through so the stage's log line reports the same
+// outcome the run (and the dashboard cell) does.
 func specFor(stageRuns map[string]seedRunState) *graphSpec {
 	spec := &graphSpec{cloneStatus: store.TaskDone}
 	// Every graph carries all four nodes. A stage's status comes from its
@@ -410,14 +451,16 @@ func specFor(stageRuns map[string]seedRunState) *graphSpec {
 	// downstream of a failure, exactly the runner's
 	// SkipDependents/recordSkippedRuns outcome.
 	for _, pair := range []struct {
-		kind   string
-		status *string
+		kind    string
+		status  *string
+		summary *string
 	}{
-		{store.RunKindBuild, &spec.buildStatus},
-		{store.RunKindUnit, &spec.unitStatus},
-		{store.RunKindRegression, &spec.regStatus},
+		{store.RunKindBuild, &spec.buildStatus, &spec.buildSummary},
+		{store.RunKindUnit, &spec.unitStatus, &spec.unitSummary},
+		{store.RunKindRegression, &spec.regStatus, &spec.regSummary},
 	} {
-		switch runSt := stageRuns[pair.kind].status; {
+		state := stageRuns[pair.kind]
+		switch runSt := state.status; {
 		case runSt == "skipped", runSt == "":
 			*pair.status = store.TaskSkipped
 		case runSt == store.StatusFailed:
@@ -425,21 +468,21 @@ func specFor(stageRuns map[string]seedRunState) *graphSpec {
 			// The failed build's error text (the CMake error) feeds the
 			// node's error and log, like the runner's fail path.
 			if pair.kind == store.RunKindBuild {
-				spec.buildErr = stageRuns[pair.kind].summary
-				spec.buildSummary = stageRuns[pair.kind].summary
+				spec.buildErr = state.summary
 			}
+			*pair.summary = state.summary
 		default: // passed
 			*pair.status = store.TaskDone
-			if pair.kind == store.RunKindBuild {
-				spec.buildSummary = stageRuns[pair.kind].summary
-			}
+			*pair.summary = state.summary
 		}
 	}
 	return spec
 }
 
 // graphSpec describes one seeded graph's stage outcomes. Every stage has a
-// status: the graph always carries all four nodes.
+// status: the graph always carries all four nodes. The unit/regression
+// summaries are the stage runs' own summaries, echoed in the stage logs so
+// a red node's log reads as a failure (never as an all-green summary line).
 type graphSpec struct {
 	cloneStatus   string
 	buildStatus   string
@@ -447,6 +490,8 @@ type graphSpec struct {
 	regStatus     string
 	buildSummary  string
 	buildErr      string
+	unitSummary   string
+	regSummary    string
 	cloneDuration time.Duration
 }
 
@@ -531,15 +576,24 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 	}
 
 	// Per-stage logs (matching the statuses) for the log viewer. Skip logs
-	// read as one line, exactly like the runner's skip path.
+	// read as one line, exactly like the runner's skip path. A failed test
+	// stage's ctest output shows the failing case before the summary line.
 	const unitSkipReason = "skipped: upstream task build (ninja) failed"
+	unitLog := []string{"Test project /home/md/build\n    Start 1: TestForce::compute\n1/4 Test #1: TestForce::compute ........ Passed\n"}
+	regLog := []string{"Test project /home/md/build\n    Start 1: lj-argon-nve\n1/3 Test #1: lj-argon-nve ........ Passed\n"}
+	if spec.unitStatus == store.TaskFailed {
+		unitLog = append(unitLog, "2/4 Test #2: TestIntegrate::verlet ........***Failed\n")
+	}
+	if spec.regStatus == store.TaskFailed {
+		regLog = append(regLog, "3/3 Test #3: argon-liquid-nvt ........***Failed\n    energy drift above threshold\n")
+	}
 	logs := map[int64][]string{
 		stored[1].ID: {fmt.Sprintf("Cloning into '%s'...\n", commit.Repo),
 			fmt.Sprintf("* branch main -> FETCH_HEAD\nHEAD is now at %s %s\n", commit.SHA[:7], commit.Message)},
 		stored[2].ID: {"-- The C compiler identification is GNU 13.2.0\n-- The CXX compiler identification is GNU 13.2.0\n",
 			"[42/42] Building CXX object src/CMakeFiles/md.dir/integrate/verlet.cpp.o\n"},
-		stored[3].ID: {"Test project /home/md/build\n    Start 1: TestForce::compute\n1/4 Test #1: TestForce::compute ........ Passed\n"},
-		stored[4].ID: {"Test project /home/md/build\n    Start 1: lj-argon-nve\n1/3 Test #1: lj-argon-nve ........ Passed\n"},
+		stored[3].ID: unitLog,
+		stored[4].ID: regLog,
 	}
 	switch spec.buildStatus {
 	case store.TaskFailed:
@@ -551,12 +605,18 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 	if spec.unitStatus == store.TaskSkipped {
 		logs[stored[3].ID] = []string{unitSkipReason + "\n"}
 	} else if spec.unitStatus == store.TaskDone {
-		logs[stored[3].ID] = append(logs[stored[3].ID], "MD-BUILDER-SUMMARY: all 4 unit tests passed\n")
+		logs[stored[3].ID] = append(logs[stored[3].ID], "MD-BUILDER-SUMMARY: "+spec.unitSummary+"\n")
+	} else if spec.unitSummary != "" {
+		// A failed unit stage echoes the run's own summary so the log —
+		// like the graph node and the dashboard cell — reads as a failure.
+		logs[stored[3].ID] = append(logs[stored[3].ID], "MD-BUILDER-SUMMARY: "+spec.unitSummary+"\n")
 	}
 	if spec.regStatus == store.TaskSkipped {
 		logs[stored[4].ID] = []string{unitSkipReason + "\n"}
 	} else if spec.regStatus == store.TaskDone {
-		logs[stored[4].ID] = append(logs[stored[4].ID], "MD-BUILDER-SUMMARY: all 3 regression cases within tolerance\n")
+		logs[stored[4].ID] = append(logs[stored[4].ID], "MD-BUILDER-SUMMARY: "+spec.regSummary+"\n")
+	} else if spec.regSummary != "" {
+		logs[stored[4].ID] = append(logs[stored[4].ID], "MD-BUILDER-SUMMARY: "+spec.regSummary+"\n")
 	}
 	if spec.buildStatus == store.TaskDone {
 		logs[stored[2].ID] = append(logs[stored[2].ID], "MD-BUILDER-SUMMARY: "+spec.buildSummary+"\n")

@@ -602,6 +602,11 @@ func TestUpsertCaseRunAllSkipped(t *testing.T) {
 	if parent.Total != 2 || parent.Skipped != 2 || parent.Passed != 0 {
 		t.Fatalf("all-skipped aggregate wrong: %+v", parent)
 	}
+	// The all-skipped placeholder must not read as a green cell: the stored
+	// status stays failed so the dashboard's "skipped:" translation kicks in.
+	if parent.Status != StatusFailed {
+		t.Fatalf("all-skipped run should stay failed (⤼ via the skipped summary): %+v", parent)
+	}
 	if !strings.HasPrefix(parent.Summary, "skipped: ") {
 		t.Fatalf("summary should carry the skipped prefix: %q", parent.Summary)
 	}
