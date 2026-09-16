@@ -143,10 +143,11 @@ func (s *Service) runClaimed(ctx context.Context, task *store.Task) {
 
 // recordSkippedRuns writes the dashboard rows for skipped unit/regression
 // sub-tasks so the matrix shows ✗ instead of a blank cell. A skipped unit
-// stage gets a failed run; a skipped regression case sub-task gets a skipped
-// child run (the parent aggregates them — all-skipped surfaces as the
-// "skipped:" summary the dashboard translates). A skipped build needs no
-// row: the failed build itself records its own run.
+// or build stage gets a failed run (the build row normally comes from the
+// build stage itself — this covers builds that were skipped by an upstream
+// clone failure); a skipped regression case sub-task gets a skipped child
+// run (the parent aggregates them — all-skipped surfaces as the "skipped:"
+// summary the dashboard translates).
 func (s *Service) recordSkippedRuns(failed *store.Task) {
 	subs, err := s.Store.ListSubTasks(failed.RootID)
 	if err != nil {
@@ -158,11 +159,12 @@ func (s *Service) recordSkippedRuns(failed *store.Task) {
 			continue
 		}
 		switch sub.Kind {
-		case store.TaskKindUnit:
+		case store.TaskKindUnit, store.TaskKindBuild:
 			input := &store.RunInput{
 				EnvironmentID: sub.EnvironmentID,
 				CommitID:      sub.CommitID,
 				Kind:          sub.Kind,
+				TaskID:        sub.ID,
 				Status:        store.StatusFailed,
 				Summary:       "skipped: " + failed.Name + " failed: " + failed.Error,
 			}

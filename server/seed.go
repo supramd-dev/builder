@@ -507,10 +507,10 @@ func rootStatus(spec *graphSpec) string {
 }
 
 // seedGraph inserts one root + four sub-tasks with logs, directly through
-// the store layer. The graph shape mirrors runner.BuildTaskGraph: clone ←
-// root, build ← clone, unit/regression ← build. A graph for the same
-// (environment, commit) is skipped so re-running the seed does not
-// duplicate rows.
+// the store layer. The graph shape mirrors runner.BuildTaskGraph: build ←
+// clone, unit/regression ← build (the root is a derived container, never a
+// dependency). A graph for the same (environment, commit) is skipped so
+// re-running the seed does not duplicate rows.
 func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit, spec *graphSpec) error {
 	var existing store.Task
 	if err := s.DB.Where("kind = ? AND environment_id = ? AND commit_id = ?",
@@ -522,10 +522,12 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 	root := &store.Task{
 		Kind: store.TaskKindRoot, Name: "test " + commit.SHA, Status: store.TaskDone,
 		CommitID: commit.ID, EnvironmentID: env.ID, Tags: env.Tags,
-		Config: `{"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
+		Config: `{"entry":{"tags":["cpu"]},"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
 	}
-	// The graph always carries all four nodes: clone ← root, build ← clone,
-	// unit/regression ← build.
+	// The graph always carries all four nodes: build ← clone,
+	// unit/regression ← build. The root is a derived container and never a
+	// dependency (CreateTaskGraph rejects root edges — they would deadlock
+	// the scheduler: the root only finishes once every sub-task has).
 	clone := &store.Task{Kind: store.TaskKindClone, Name: "clone repositories",
 		CommitID: commit.ID, EnvironmentID: env.ID}
 	build := &store.Task{Kind: store.TaskKindBuild, Name: "build",
@@ -536,7 +538,7 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 		CommitID: commit.ID, EnvironmentID: env.ID}
 	subs := []*store.Task{clone, build, unitT, regT}
 	deps := [][]int64{
-		{store.TaskRootPlaceholder}, // clone ← root (container, not a gate)
+		{},
 		{store.TaskSubPlaceholderBase + 0},
 		{store.TaskSubPlaceholderBase + 1},
 		{store.TaskSubPlaceholderBase + 1},
@@ -641,6 +643,16 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 // graph is a static snapshot — no worker will ever advance it — but every
 // read path (matrix live overlay, task detail, log polling, graph page)
 // handles it exactly like a real dispatch.
+//
+// Note the scheduler interplay: unlike the finished graphs, an in-flight
+// snapshot is NOT protected from the runner. With a live worker pool a
+// "running" snapshot's remaining pending stages get claimed (and fail on
+// the unreachable demo host, since the stage snapshots carry valid configs
+// but no real environment), and ResetStaleRunning resets running rows to
+// pending on restart. Demo with MD_BUILDER_DISABLE_WORKER=1 for a frozen
+// in-flight state; with workers on, the snapshot degrades into a genuine
+// failing dispatch, which the seeded logs and configs are shaped to
+// survive gracefully.
 func seedLiveGraph(s *store.Store, env *store.TestEnvironment, commitID int64, phase string) error {
 	var commit store.Commit
 	if err := s.DB.Where("id = ?", commitID).First(&commit).Error; err != nil {
@@ -656,7 +668,7 @@ func seedLiveGraph(s *store.Store, env *store.TestEnvironment, commitID int64, p
 	root := &store.Task{
 		Kind: store.TaskKindRoot, Name: "test " + commit.SHA[:7], Status: store.TaskPending,
 		CommitID: commitID, EnvironmentID: env.ID, Tags: env.Tags,
-		Config: `{"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
+		Config: `{"entry":{"tags":["cpu"]},"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
 	}
 	clone := &store.Task{Kind: store.TaskKindClone, Name: "clone repositories",
 		CommitID: commitID, EnvironmentID: env.ID}
@@ -668,7 +680,7 @@ func seedLiveGraph(s *store.Store, env *store.TestEnvironment, commitID int64, p
 		CommitID: commitID, EnvironmentID: env.ID}
 	subs := []*store.Task{clone, build, unitT, regT}
 	deps := [][]int64{
-		{store.TaskRootPlaceholder},
+		{}, // clone has no dependencies (the root is a container, not a gate)
 		{store.TaskSubPlaceholderBase + 0},
 		{store.TaskSubPlaceholderBase + 1},
 		{store.TaskSubPlaceholderBase + 1},
@@ -678,13 +690,26 @@ func seedLiveGraph(s *store.Store, env *store.TestEnvironment, commitID int64, p
 		return err
 	}
 
-	// Statuses and timestamps: the running phase marks root+build running
-	// and clone done (with a started_at each); pending leaves everything
-	// untouched (CreateTaskGraph wrote pending). The running build carries
-	// partial log output, like a session mid-flight.
-	now := time.Now()
+	// Stage config snapshots: valid JSON in the same shape the real
+	// dispatcher writes, so a worker that ever claims one of these tasks
+	// fails on the (unreachable) SSH host — not on a config parse error —
+	// and the log viewer shows plausible stage output rather than
+	// "config snapshot is invalid".
+	stageCfg := map[int64]string{
+		stored[1].ID: `{}`,
+		stored[2].ID: `{"command":"ninja","timeout":3600}`,
+		stored[3].ID: `{"command":"ctest -L unit","timeout":1800}`,
+		stored[4].ID: `{"case":"argon-liquid-nvt","command":"ctest -R argon -L regression","timeout":3600}`,
+	}
+	for id, cfg := range stageCfg {
+		if err := s.DB.Model(&store.Task{}).Where("id = ?", id).
+			Update("config", cfg).Error; err != nil {
+			return err
+		}
+	}
 	statuses := map[*store.Task]string{}
 	logs := map[int64][]string{}
+	now := time.Now()
 	if phase == "running" {
 		statuses[root] = store.TaskRunning
 		statuses[stored[1]] = store.TaskDone    // clone

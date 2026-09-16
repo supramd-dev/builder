@@ -662,7 +662,7 @@ func TestDashboardFullLiveOverlay(t *testing.T) {
 			CommitID: commit.ID, EnvironmentID: envA.ID},
 	}
 	createdA, err := store.CreateTaskGraph(s, rootA, subsA, [][]int64{
-		{}, {subsA[0].ID},
+		{}, {store.TaskSubPlaceholderBase + 0},
 	})
 	if err != nil {
 		t.Fatal(err)

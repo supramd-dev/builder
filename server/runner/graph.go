@@ -25,9 +25,10 @@ type GraphTask struct {
 
 // BuildTaskGraph converts a merged matrix entry into the task list to
 // persist under a root: index 0 is the clone task (always present), the
-// remaining tasks follow in dependency order. Dependencies reference the
-// root (store.TaskRootPlaceholder) and earlier entries by
-// store.TaskSubPlaceholderBase + index.
+// remaining tasks follow in dependency order. Dependencies reference earlier
+// entries by store.TaskSubPlaceholderBase + index (never the root: the root
+// is a container whose status is derived from its sub-tasks, and
+// store.CreateTaskGraph rejects root edges).
 func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 	if entry == nil {
 		return nil, fmt.Errorf("no entry config")

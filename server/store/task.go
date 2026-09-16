@@ -107,12 +107,13 @@ var ErrTaskNotFound = errors.New("store: task not found")
 
 // CreateTaskGraph inserts a root task and its sub-tasks in one transaction:
 // sub-task DependsOn entries are resolved to real IDs inside the transaction
-// (they may reference the root by the TaskRootPlaceholder ID and each other
-// by index into subtasks). Returns the stored rows with IDs filled in.
+// (earlier sub-tasks by index via TaskSubPlaceholderBase+i, or already
+// stored task IDs). Returns the stored rows with IDs filled in.
 //
-// Each subtask entry in deps may use:
-//   - TaskRootPlaceholder: the root task
-//   - 1000+i (TaskSubPlaceholderBase + i): subtasks[i]
+// Sub-tasks must not depend on the root task: the root is a container whose
+// status is derived from its sub-tasks, so a root edge can never become
+// ready and would deadlock the scheduler. CreateTaskGraph rejects such a
+// graph (non-positive or root IDs in deps) with an error.
 func CreateTaskGraph(s *Store, root *Task, subtasks []*Task, deps [][]int64) ([]*Task, error) {
 	if root.Kind != TaskKindRoot {
 		return nil, errors.New("store: task graph requires a root task")
@@ -142,16 +143,16 @@ func CreateTaskGraph(s *Store, root *Task, subtasks []*Task, deps [][]int64) ([]
 			resolved := make([]int64, 0, len(deps[i]))
 			for _, d := range deps[i] {
 				switch {
-				case d == TaskRootPlaceholder:
-					resolved = append(resolved, root.ID)
 				case d >= TaskSubPlaceholderBase:
 					idx := int(d - TaskSubPlaceholderBase)
 					if idx >= i {
 						return errors.New("store: task dependency references a later sub-task")
 					}
 					resolved = append(resolved, subtasks[idx].ID)
-				default:
+				case d > 0:
 					resolved = append(resolved, d)
+				default:
+					return errors.New("store: task dependency on the root task is not allowed (the root is derived from its sub-tasks and can never gate them)")
 				}
 			}
 			st.SetDependsOnIDs(resolved)
@@ -168,11 +169,10 @@ func CreateTaskGraph(s *Store, root *Task, subtasks []*Task, deps [][]int64) ([]
 	return append([]*Task{root}, subtasks...), nil
 }
 
-// Placeholder IDs usable in CreateTaskGraph deps.
-const (
-	TaskRootPlaceholder    int64 = -1
-	TaskSubPlaceholderBase int64 = 1000
-)
+// TaskSubPlaceholderBase is the placeholder base for CreateTaskGraph deps:
+// deps entries of 1000+i reference subtasks[i] (which must be an earlier
+// entry). Dependencies on the root task are rejected — see CreateTaskGraph.
+const TaskSubPlaceholderBase int64 = 1000
 
 // FindRootTaskByCommitEnv returns the root task for a (commit, environment)
 // pair, or ErrTaskNotFound.

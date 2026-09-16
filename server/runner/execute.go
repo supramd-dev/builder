@@ -46,7 +46,7 @@ func (s *Service) ExecuteTask(ctx context.Context, task *store.Task) error {
 	case store.TaskKindRegression:
 		s.executeCase(ctx, task)
 	default:
-		s.failTask(task, fmt.Sprintf("unknown task kind %q", task.Kind))
+		s.failEarly(task, fmt.Sprintf("unknown task kind %q", task.Kind))
 	}
 	return nil
 }
@@ -67,34 +67,53 @@ func (s *Service) loadRootContext(task *store.Task) (*rootContext, bool) {
 	rc := &rootContext{}
 	root, err := s.Store.GetTask(task.RootID)
 	if err != nil {
-		s.failTask(task, fmt.Sprintf("root task lookup failed: %v", err))
+		s.failEarly(task, fmt.Sprintf("root task lookup failed: %v", err))
 		return nil, false
 	}
 	rc.root = root
 	var rootCfg RootConfig
 	if err := json.Unmarshal([]byte(root.Config), &rootCfg); err != nil {
-		s.failTask(task, fmt.Sprintf("root config snapshot is invalid: %v", err))
+		s.failEarly(task, fmt.Sprintf("root config snapshot is invalid: %v", err))
 		return nil, false
 	}
 	rc.entry = &rootCfg.Entry
 	rc.sha = s.Store.CommitSHA(root.CommitID)
 	if rc.sha == "" {
-		s.failTask(task, "commit lookup failed")
+		s.failEarly(task, "commit lookup failed")
 		return nil, false
 	}
 	env, err := s.Store.GetEnvironmentAny(task.EnvironmentID)
 	if err != nil {
-		s.failTask(task, fmt.Sprintf("environment lookup failed: %v", err))
+		s.failEarly(task, fmt.Sprintf("environment lookup failed: %v", err))
 		return nil, false
 	}
-	rc.env = env
 	cfg, err := s.Store.GetSiteConfig()
 	if err != nil {
-		s.failTask(task, fmt.Sprintf("site config lookup failed: %v", err))
+		s.failEarly(task, fmt.Sprintf("site config lookup failed: %v", err))
 		return nil, false
 	}
 	rc.cfg = cfg
+	rc.env = env
 	return rc, true
+}
+
+// failEarly marks a task failed for a reason that surfaced before any
+// command ran (invalid snapshot, broken lookups) and appends the reason to
+// the task log directly — the LogWriter-based failTaskLogged needs a root
+// context that may not exist yet. It also records a failed dashboard run so
+// the matrix cell carries the outcome (and a runId to click through) instead
+// of only the graph showing the failure.
+func (s *Service) failEarly(task *store.Task, msg string) {
+	if cfg, err := s.Store.GetSiteConfig(); err == nil {
+		msg = Redact(msg, cfg.AccessToken)
+	}
+	logw := NewLogWriter(s.Store, task.ID)
+	fmt.Fprintf(logw, "task failed: %s\n", msg)
+	logw.Close()
+	if err := s.Store.FinishTask(task.ID, store.TaskFailed, msg); err != nil {
+		log.Printf("runner: task %d: finish failed: %v", task.ID, err)
+	}
+	s.recordStageRun(task, store.StatusFailed, truncateSummary(msg), 0, 0, 0, nil)
 }
 
 // creds builds the git credentials from the site config.
@@ -212,7 +231,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	}
 	var stage BuildStageConfig
 	if err := json.Unmarshal([]byte(task.Config), &stage); err != nil {
-		s.failTask(task, fmt.Sprintf("build config snapshot is invalid: %v", err))
+		s.failEarly(task, fmt.Sprintf("build config snapshot is invalid: %v", err))
 		return
 	}
 
@@ -239,7 +258,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	if res.ExitCode < 0 {
 		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
 	}
-	s.recordStageRun(task, rc, status, summary, 0, 0, 0, nil)
+	s.recordStageRun(task, status, summary, 0, 0, 0, nil)
 
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
 }
@@ -254,7 +273,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 	}
 	var stage StageConfig
 	if err := json.Unmarshal([]byte(task.Config), &stage); err != nil {
-		s.failTask(task, fmt.Sprintf("stage config snapshot is invalid: %v", err))
+		s.failEarly(task, fmt.Sprintf("stage config snapshot is invalid: %v", err))
 		return
 	}
 
@@ -292,7 +311,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 			summary = s
 		}
 	}
-	s.recordStageRun(task, rc, status, summary, counts.total, counts.failed, counts.skipped, artifacts)
+	s.recordStageRun(task, status, summary, counts.total, counts.failed, counts.skipped, artifacts)
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
 }
 
@@ -306,7 +325,7 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 	}
 	var stage CaseStageConfig
 	if err := json.Unmarshal([]byte(task.Config), &stage); err != nil {
-		s.failTask(task, fmt.Sprintf("case config snapshot is invalid: %v", err))
+		s.failEarly(task, fmt.Sprintf("case config snapshot is invalid: %v", err))
 		return
 	}
 
@@ -447,7 +466,7 @@ func (s *Service) readLogTail(taskID int64) string {
 // recordStageRun upserts the dashboard TestRun for a finished (or failed to
 // even start) test stage. counts/artifacts carry the fetched results files'
 // summed aggregates and raw contents (nil when not configured or unfetchable).
-func (s *Service) recordStageRun(task *store.Task, rc *rootContext, status, summary string,
+func (s *Service) recordStageRun(task *store.Task, status, summary string,
 	total, failed, skipped int, artifacts []store.ArtifactInput) {
 	input := &store.RunInput{
 		EnvironmentID: task.EnvironmentID,
@@ -488,16 +507,6 @@ func (s *Service) finishCommandTask(task *store.Task, logw *LogWriter, exitCode 
 	}
 	if err := s.Store.FinishTask(task.ID, store.TaskDone, ""); err != nil {
 		log.Printf("runner: task %d: finish: %v", task.ID, err)
-	}
-}
-
-// failTask marks a task failed with a redacted message.
-func (s *Service) failTask(task *store.Task, msg string) {
-	if cfg, err := s.Store.GetSiteConfig(); err == nil {
-		msg = Redact(msg, cfg.AccessToken)
-	}
-	if err := s.Store.FinishTask(task.ID, store.TaskFailed, msg); err != nil {
-		log.Printf("runner: task %d: finish failed: %v", task.ID, err)
 	}
 }
 

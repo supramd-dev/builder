@@ -44,7 +44,7 @@ func seedTaskGraph(t *testing.T, s *Store, name string) (*Task, []*Task) {
 		{Kind: TaskKindRegression, Name: "regression", CommitID: commit.ID, EnvironmentID: env.ID},
 	}
 	deps := [][]int64{
-		{TaskRootPlaceholder},
+		{},
 		{TaskSubPlaceholderBase + 0}, // build <- clone
 		{TaskSubPlaceholderBase + 1}, // unit <- build
 		{TaskSubPlaceholderBase + 1}, // regression <- build
@@ -63,9 +63,9 @@ func TestCreateTaskGraphResolvesDeps(t *testing.T) {
 	if root.RootID != root.ID {
 		t.Errorf("root RootID: want %d, got %d", root.ID, root.RootID)
 	}
-	// clone depends on root only.
-	if deps := subs[0].DependsOnIDs(); len(deps) != 1 || deps[0] != root.ID {
-		t.Errorf("clone deps: want [%d], got %v", root.ID, deps)
+	// clone has no dependencies (the root is a container, not a gate).
+	if deps := subs[0].DependsOnIDs(); len(deps) != 0 {
+		t.Errorf("clone deps: want none, got %v", deps)
 	}
 	// build depends on clone.
 	if deps := subs[1].DependsOnIDs(); len(deps) != 1 || deps[0] != subs[0].ID {
@@ -100,28 +100,24 @@ func TestCreateTaskGraphForwardDepRejected(t *testing.T) {
 	if _, err := CreateTaskGraph(s, root, subs, deps); err == nil {
 		t.Error("forward dependency should be rejected")
 	}
+
+	// A dependency on the root task is invalid: the root's status is derived
+	// from its sub-tasks, so a root edge can never become ready (deadlock).
+	// Non-positive dep IDs (the former TaskRootPlaceholder) are rejected.
+	root2 := &Task{Kind: TaskKindRoot, Name: "root2", CommitID: 1, EnvironmentID: 1}
+	subs2 := []*Task{{Kind: TaskKindClone, Name: "clone"}}
+	if _, err := CreateTaskGraph(s, root2, subs2, [][]int64{{0}}); err == nil {
+		t.Error("root dependency should be rejected")
+	}
 }
 
 func TestClaimReadyTaskRespectsDependencies(t *testing.T) {
 	s := newTestTaskStore(t)
-	root, subs := seedTaskGraph(t, s, "claim")
-	_ = root
+	_, subs := seedTaskGraph(t, s, "claim")
 
-	// Initially only clone (deps all done trivially — root counts as done? No:
-	// the root is pending, so clone is NOT ready).
+	// Clone has no dependencies: ready immediately (the root is a derived
+	// container, never a gate).
 	got, err := s.ClaimReadyTask()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != nil {
-		t.Errorf("clone should not be ready while root is pending; got %+v", got)
-	}
-
-	// Mark the root done: clone becomes ready.
-	if err := s.FinishTask(root.ID, TaskDone, ""); err != nil {
-		t.Fatal(err)
-	}
-	got, err = s.ClaimReadyTask()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,17 +158,9 @@ func TestClaimReadyTaskRespectsDependencies(t *testing.T) {
 
 func TestClaimReadyTaskOldestFirst(t *testing.T) {
 	s := newTestTaskStore(t)
-	// Two independent graphs with ready clone tasks.
-	_, subs1 := seedTaskGraph(t, s, "old")
-	if err := s.FinishTask(subs1[0].RootID, TaskDone, ""); err != nil {
-		t.Fatal(err)
-	}
-	// A second graph.
-	root2, subs2 := seedTaskGraph(t, s, "new")
-	if err := s.FinishTask(root2.ID, TaskDone, ""); err != nil {
-		t.Fatal(err)
-	}
-	_ = subs2
+	// Two independent graphs with ready clone tasks (clones have no deps).
+	_, _ = seedTaskGraph(t, s, "old")
+	_, _ = seedTaskGraph(t, s, "new")
 
 	first, err := s.ClaimReadyTask()
 	if err != nil {

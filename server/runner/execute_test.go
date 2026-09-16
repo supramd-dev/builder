@@ -647,10 +647,10 @@ func TestExecuteUnknownKindFails(t *testing.T) {
 	task := &store.Task{ID: 9999, Kind: "perf", RootID: 1}
 	_ = svc
 	// The unknown kind path fails the task without touching SSH.
-	svc.failTask(task, "unknown task kind \"perf\"")
+	svc.failEarly(task, "unknown task kind \"perf\"")
 	got, err := s.GetTask(9999)
 	if err != nil {
-		// Not persisted (no such row): failTask would error-log but not
+		// Not persisted (no such row): failEarly would error-log but not
 		// crash; the branch is exercised for coverage.
 		t.Log("unknown-kind task not persisted (expected in this fixture)")
 		return

@@ -329,7 +329,7 @@ func TestTaskDetailAndLogs(t *testing.T) {
 		{Kind: store.TaskKindUnit, Name: "unit tests", CommitID: commit.ID, EnvironmentID: env.ID},
 	}
 	deps := [][]int64{
-		{store.TaskRootPlaceholder},
+		{},
 		{store.TaskSubPlaceholderBase + 0},
 		{store.TaskSubPlaceholderBase + 1},
 	}
@@ -375,8 +375,8 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	if detail.Environment == nil || detail.Environment.Name != "cpu-detail" {
 		t.Fatalf("environment context missing: %+v", detail.Environment)
 	}
-	if detail.SubTasks[0].DependsOn[0] != root.ID {
-		t.Fatalf("clone should depend on root: %+v", detail.SubTasks[0])
+	if len(detail.SubTasks[0].DependsOn) != 0 {
+		t.Fatalf("clone should have no dependencies (the root is a container): %+v", detail.SubTasks[0])
 	}
 
 	// Sub-task detail: no sub-tasks of its own.
@@ -536,7 +536,7 @@ func TestDashboardOverlaysTaskState(t *testing.T) {
 		{Kind: store.TaskKindRegression, Name: "regression", CommitID: commit.ID, EnvironmentID: env.ID},
 	}
 	created, err := store.CreateTaskGraph(s, root, subs, [][]int64{
-		{store.TaskRootPlaceholder}, {subs[0].ID},
+		{}, {store.TaskSubPlaceholderBase + 0},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -555,7 +555,7 @@ func TestDashboardOverlaysTaskState(t *testing.T) {
 		{Kind: store.TaskKindBuild, Name: "build", CommitID: commit.ID, EnvironmentID: envStageless.ID},
 	}
 	if _, err := store.CreateTaskGraph(s, rootBuildOnly, subsBuildOnly, [][]int64{
-		{store.TaskRootPlaceholder}, {subsBuildOnly[0].ID},
+		{}, {store.TaskSubPlaceholderBase + 0},
 	}); err != nil {
 		t.Fatal(err)
 	}
