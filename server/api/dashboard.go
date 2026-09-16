@@ -450,13 +450,14 @@ func liveSubStatus(sub *store.Task) string {
 
 // --- POST /api/test-runs (result reporting) ---
 
-// caseInput is one test case in a report.
+// caseInput is one test case in a report — it becomes a child TestRun under
+// the reported run.
 type caseInput struct {
 	Name           string  `json:"name"`
-	Status         string  `json:"status"`     // "passed" or "failed"
-	ErrorValue     float64 `json:"errorValue"` // regression error metric
-	Message        string  `json:"message"`    // short note / failure reason
+	Status         string  `json:"status"`  // "passed", "failed" or "skipped"
+	Message        string  `json:"message"` // short note / failure reason
 	DurationMillis float64 `json:"durationMillis"`
+	TaskID         int64   `json:"taskId"` // the case's own sub-task, when known
 }
 
 // runInputJSON is the request body of POST /api/test-runs. When cases are
@@ -485,6 +486,8 @@ type runJSON struct {
 	Kind          string `json:"kind"`
 	Status        string `json:"status"`
 	Summary       string `json:"summary"`
+	Name          string `json:"name"` // child runs: the preset/case name; empty on top-level runs
+	Message       string `json:"message"`
 	Total         int    `json:"total"`
 	Passed        int    `json:"passed"`
 	Failed        int    `json:"failed"`
@@ -560,12 +563,12 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 		Skipped:       in.Skipped,
 	}
 	for i := range in.Cases {
-		input.Cases = append(input.Cases, store.TestCaseResult{
+		input.Cases = append(input.Cases, store.CaseInput{
 			Name:           strings.TrimSpace(in.Cases[i].Name),
 			Status:         in.Cases[i].Status,
-			ErrorValue:     in.Cases[i].ErrorValue,
 			Message:        in.Cases[i].Message,
 			DurationMillis: in.Cases[i].DurationMillis,
+			TaskID:         in.Cases[i].TaskID,
 		})
 	}
 	if t, err := parseOptionalTime(in.StartedAt); err != nil {
@@ -652,7 +655,7 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 	}
-	cases, err := s.Store.ListCaseResults(run.ID)
+	cases, err := s.Store.ListChildRuns(run.ID)
 	if err != nil {
 		log.Printf("test-run cases: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -669,6 +672,13 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 		runJSON:   toRunJSON(run),
 		Cases:     make([]caseJSON, 0, len(cases)),
 		Artifacts: make([]artifactRefJSON, 0, len(artifacts)),
+	}
+	// A child run links back to its parent regression run (the breadcrumb).
+	if run.ParentID != 0 {
+		detail.ParentRunID = run.ParentID
+		if parent, err := s.Store.GetTestRun(run.ParentID); err == nil && parent.Name != "" {
+			detail.ParentName = &parent.Name
+		}
 	}
 	// Root task of the producing stage sub-task (for the breadcrumb link to
 	// the graph page); 0 when the run came from an external report or the
@@ -701,22 +711,21 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 	}
 	for i := range artifacts {
 		detail.Artifacts = append(detail.Artifacts, artifactRefJSON{
-			ID:     artifacts[i].ID,
-			CaseID: artifacts[i].CaseID,
-			Kind:   artifacts[i].Kind,
-			Name:   artifacts[i].Name,
-			Size:   len(artifacts[i].Content),
+			ID:   artifacts[i].ID,
+			Kind: artifacts[i].Kind,
+			Name: artifacts[i].Name,
+			Size: len(artifacts[i].Content),
 		})
 	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
-// caseJSON is one case result in the run detail.
+// caseJSON is one case in the run detail: a summary of the case's own
+// (child) TestRun — id doubles as the runId the UI links into the case page.
 type caseJSON struct {
 	ID             int64   `json:"id"`
 	Name           string  `json:"name"`
 	Status         string  `json:"status"`
-	ErrorValue     float64 `json:"errorValue"`
 	Message        string  `json:"message"`
 	DurationMillis float64 `json:"durationMillis"`
 }
@@ -724,19 +733,21 @@ type caseJSON struct {
 // artifactRefJSON references one stored artifact in the run detail (the
 // content itself comes from GET /api/test-artifacts/{id}).
 type artifactRefJSON struct {
-	ID     int64  `json:"id"`
-	CaseID int64  `json:"caseId"`
-	Kind   string `json:"kind"`
-	Name   string `json:"name"`
-	Size   int    `json:"size"`
+	ID   int64  `json:"id"`
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+	Size int    `json:"size"`
 }
 
 // runDetailJSON is GET /api/test-runs/{id}'s response: the run summary plus
 // environment/commit context, the case list and the artifact references.
-// Pointer fields are null when the referenced record was deleted.
+// Pointer fields are null when the referenced record was deleted. Child runs
+// carry ParentRunID/ParentName so their detail page can link back up.
 type runDetailJSON struct {
 	runJSON
 	RootTaskID      int64             `json:"rootTaskId"` // root of the producing stage task (0 = external report); the graph-page link
+	ParentRunID     int64             `json:"parentRunId"`
+	ParentName      *string           `json:"parentName"` // set only for child runs (the preset name)
 	EnvironmentName *string           `json:"environmentName"`
 	CommitSHA       *string           `json:"commitSha"`
 	CommitShortSHA  *string           `json:"commitShortSha"`
@@ -777,7 +788,6 @@ func (s *Server) handleTestArtifact(w http.ResponseWriter, r *http.Request, user
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      a.ID,
 		"runId":   a.RunID,
-		"caseId":  a.CaseID,
 		"kind":    a.Kind,
 		"name":    a.Name,
 		"content": a.Content,
@@ -990,6 +1000,8 @@ func toRunJSON(run *store.TestRun) runJSON {
 		Kind:          run.Kind,
 		Status:        run.Status,
 		Summary:       run.Summary,
+		Name:          run.Name,
+		Message:       run.Message,
 		Total:         run.Total,
 		Passed:        run.Passed,
 		Failed:        run.Failed,
@@ -1002,12 +1014,11 @@ func toRunJSON(run *store.TestRun) runJSON {
 	}
 }
 
-func toCaseJSON(c *store.TestCaseResult) caseJSON {
+func toCaseJSON(c *store.TestRun) caseJSON {
 	return caseJSON{
 		ID:             c.ID,
 		Name:           c.Name,
 		Status:         c.Status,
-		ErrorValue:     c.ErrorValue,
 		Message:        c.Message,
 		DurationMillis: c.DurationMillis,
 	}

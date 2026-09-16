@@ -325,7 +325,7 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 	finished := time.Now()
 
 	// The case's artifact files (when configured) are fetched back verbatim
-	// and attached to the case row.
+	// and attached to the case's own child run.
 	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
 	logw.Flush() // the case message is derived from the persisted log
@@ -340,9 +340,9 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 		message = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
 	}
 
-	// The case row first (the run aggregates over its cases), then the
-	// artifacts linked to it.
-	_, caseRow, err := s.Store.UpsertCaseResult(&store.CaseResultInput{
+	// The case lands as a child TestRun (the run aggregates over its cases);
+	// its artifacts ride on the child.
+	if _, _, err := s.Store.UpsertCaseRun(&store.CaseRunInput{
 		EnvironmentID:  task.EnvironmentID,
 		CommitID:       task.CommitID,
 		TaskID:         task.ID,
@@ -352,16 +352,9 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 		DurationMillis: float64(finished.Sub(started).Milliseconds()),
 		StartedAt:      started,
 		FinishedAt:     finished,
-	})
-	if err != nil {
+		Artifacts:      artifacts,
+	}); err != nil {
 		log.Printf("runner: task %d: record case %s: %v", task.ID, stage.Case, err)
-	} else if len(artifacts) > 0 {
-		for i := range artifacts {
-			artifacts[i].CaseID = caseRow.ID
-		}
-		if err := s.Store.AppendRunArtifacts(task.EnvironmentID, task.CommitID, store.RunKindRegression, artifacts); err != nil {
-			log.Printf("runner: task %d: append case artifacts: %v", task.ID, err)
-		}
 	}
 
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)

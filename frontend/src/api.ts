@@ -335,12 +335,13 @@ export async function getFullDashboard(
   return api<FullDashboard>(`/api/dashboard/full?commits=${commits}`)
 }
 
+// CaseResult is one case in a regression run's case list: a summary of the
+// case's own child TestRun — id doubles as the runId the UI navigates to.
 export interface CaseResult {
   id: number
   name: string
   // "skipped" marks a case whose sub-task never ran (upstream failure).
   status: 'passed' | 'failed' | 'skipped'
-  errorValue: number
   message: string
   durationMillis: number
 }
@@ -349,7 +350,6 @@ export interface CaseResult {
 // the content itself is fetched via getTestArtifact.
 export interface TestArtifactRef {
   id: number
-  caseId: number
   kind: 'results' | 'log' | 'series'
   name: string
   size: number
@@ -358,7 +358,6 @@ export interface TestArtifactRef {
 export interface TestArtifactContent {
   id: number
   runId: number
-  caseId: number
   kind: string
   name: string
   content: string
@@ -367,11 +366,12 @@ export interface TestArtifactContent {
 export interface TestRunDetail {
   id: number
   kind: DashboardKind
-  // "skipped" marks the runner's recordSkippedRuns artifact: the stage
-  // never ran because an upstream task failed (stored status is failed,
-  // summary starts with "skipped:").
   status: 'passed' | 'failed' | 'skipped'
   summary: string
+  // Child runs carry the case (preset) name and message; empty on
+  // top-level runs.
+  name: string
+  message: string
   total: number
   passed: number
   failed: number
@@ -382,6 +382,10 @@ export interface TestRunDetail {
   // Root of the producing stage task (0 = external report) — the breadcrumb
   // link to the graph page.
   rootTaskId: number
+  // Parent regression run (0 = top-level run); a child's detail page links
+  // back up, parentName is the parent's preset name (usually null).
+  parentRunId: number
+  parentName: string | null
   environmentId: number
   environmentName: string | null
   commitId: number
@@ -389,7 +393,7 @@ export interface TestRunDetail {
   commitShortSha: string | null
   commitMessage: string | null
   commitAuthor: string | null
-  // Repository location and web URL (when derivable) — the case detail page
+  // Repository location and web URL (when derivable) — the run detail page
   // links to the commit on the hosting site.
   commitRepo: string | null
   commitRepoUrl: string | null

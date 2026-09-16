@@ -14,7 +14,8 @@
 - **Unit tests(单元)/ Regression tests(回归)** —— 逐用例矩阵。
 
 有已记录运行的单元格显示通过/失败计数;点击打开运行详情,包含逐用例
-结果(名称、状态、误差值、简短备注)和 worker 报告的一段式摘要。没有
+回归用例的子运行列表(名称、状态、简短备注、耗时)和 worker 报告的
+一段式摘要。没有
 运行但存在活跃任务图的单元格显示 **queued** / **running…**(任务在报告
 前失败则为 ✗);完全不属于图的阶段显示"—"(它从未被请求执行)。每个
 commit 行还带 **graph** 链接:该 commit 任务管线
@@ -63,43 +64,53 @@ commit 行还带 **graph** 链接:该 commit 任务管线
   "startedAt": "2026-09-08T03:00:00Z",
   "finishedAt": "2026-09-08T03:04:00Z",
   "cases": [
-    {"name": "water-tip4p-npt", "status": "failed", "errorValue": 0.02,
-     "message": "drift above threshold"}
+    {"name": "water-tip4p-npt", "status": "failed",
+     "message": "drift above threshold", "durationMillis": 4200}
   ]
 }
 ```
 
 - `commitId` 可以换成 `"commitSha"` + `"commitRepo"`。
 - `startedAt` / `finishedAt` 可选(RFC 3339)。
+- 每个回归用例都会成为所报运行的一个**子测试运行**(child test run):
+  运行详情里的 `cases` 是子运行摘要列表,用例行的 `id` 即子运行的 id,
+  点击即打开该用例自己的运行详情页。用例状态为 `passed` / `failed` /
+  `skipped`(skipped 表示因上游阶段失败、子任务从未执行的用例)。
 - 提供 `cases` 时,运行状态与计数从用例推导。没有用例时,直接存储
   显式的 `"status"`(`passed` | `failed`)、`"summary"` 和可选的聚合计数
   (`"total"` / `"passed"` / `"failed"` / `"skipped"`)—— 这是简化报告
   路径(构建运行和单元测试运行使用;单元测试的逐用例明细存在结果文件
   artifact 里,不进数据库)。
-- 用例可以携带 `"durationMillis"`(回归报告)。
 - 对同一(环境, 提交, 类别)重复报告会替换已存结果 —— API 是幂等的,
   不稳定的报告端可以安全重试。
 - 删除环境会同时删除其测试运行。
 
 `GET /api/test-runs/{id}` 返回运行详情,含 `taskId`(产出该运行的阶段
 子任务,其日志即阶段的 stdout;外部上报为 0)、`rootTaskId`(所在图的
-root 任务 —— 返回流水线页面的链接;外部上报为 0)、`skipped` 计数、
-`cases`(带 `durationMillis`)以及 `artifacts` —— 存储文件的引用,例如
-runner 取回的 googletest 结果文件(一次运行可以产出多个):
+root 任务 —— 返回流水线页面的链接;外部上报为 0)、`name`/`message`
+(仅子运行:预置名与备注)、`parentRunId`/`parentName`(仅子运行 ——
+面包屑返回父回归运行的链接)、`cases`(子运行摘要列表:`id` = 子运行
+id,以及 `name`、`status`、`message`、`durationMillis`)以及
+`artifacts` —— 存储文件的引用,例如 runner 取回的 googletest 结果文件
+(一次运行可以产出多个):
 
 ```json
 {
   "id": 12, "kind": "unit", "status": "failed", "taskId": 77,
   "rootTaskId": 70,
+  "name": "", "message": "", "parentRunId": 0, "parentName": null,
   "total": 12, "passed": 9, "failed": 2, "skipped": 1,
   "artifacts": [
-    {"id": 3, "caseId": 0, "kind": "results",
+    {"id": 3, "kind": "results",
      "name": "build/test_detail.xml", "size": 15832},
-    {"id": 4, "caseId": 0, "kind": "results",
+    {"id": 4, "kind": "results",
      "name": "build/extra.json", "size": 2101}
   ]
 }
 ```
+
+Artifact 归属产出它的运行:单元测试运行的结果文件挂在单元测试运行上;
+回归用例的 artifact 挂在该用例自己的子运行上(父运行只聚合计数)。
 
 `GET /api/test-artifacts/{id}` 返回单个 artifact 的原始 `content` ——
 浏览器端的结果解析和后续回归的"分析"视图都从这里取数。

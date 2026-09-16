@@ -71,21 +71,25 @@ Results are reported with `POST /api/test-runs`:
   "startedAt": "2026-09-08T03:00:00Z",
   "finishedAt": "2026-09-08T03:04:00Z",
   "cases": [
-    {"name": "water-tip4p-npt", "status": "failed", "errorValue": 0.02,
-     "message": "drift above threshold"}
+    {"name": "water-tip4p-npt", "status": "failed",
+     "message": "drift above threshold", "durationMillis": 4200}
   ]
 }
 ```
 
 - `commitId` may be replaced by `"commitSha"` + `"commitRepo"`.
 - `startedAt` / `finishedAt` are optional (RFC 3339).
+- Each regression case becomes a **child test run** of the reported run:
+  the case list in the run detail is a list of run summaries, and a case
+  row's `id` doubles as the child run id its detail page opens. Case
+  statuses are `passed` / `failed` / `skipped` (skipped marks a case whose
+  sub-task never ran because an upstream stage failed).
 - When `cases` are present the run status and counts are derived from
   them. With no cases, an explicit `"status"` (`passed` | `failed`), a
   `"summary"` and optional aggregate counts (`"total"` / `"passed"` /
   `"failed"` / `"skipped"`) are stored directly — the simplified report
   path (build runs and unit runs, whose per-case detail lives in the
   results-file artifact, not in the database).
-- Cases may carry `"durationMillis"` (regression reports).
 - Reporting again for the same (environment, commit, kind) replaces the
   stored result — the API is idempotent, so a flaky reporter can retry
   safely.
@@ -94,24 +98,32 @@ Results are reported with `POST /api/test-runs`:
 `GET /api/test-runs/{id}` returns the run with `taskId` (the stage
 sub-task whose log holds the stage's stdout; 0 for external reports),
 `rootTaskId` (the graph's root task — the link back to the pipeline
-page; 0 for external reports), `skipped` count, `cases` (with
-`durationMillis`) and `artifacts` — references to stored files, e.g. the
-googletest results files the runner fetched back (a run can produce
-several):
+page; 0 for external reports), `name`/`message` (child runs only: the
+preset name and its note), `parentRunId`/`parentName` (child runs only —
+the parent regression run for the breadcrumb link back up), `cases` (a
+child-run summary list: `id` = child run id, plus `name`, `status`,
+`message`, `durationMillis`) and `artifacts` — references to stored
+files, e.g. the googletest results files the runner fetched back (a run
+can produce several):
 
 ```json
 {
   "id": 12, "kind": "unit", "status": "failed", "taskId": 77,
   "rootTaskId": 70,
+  "name": "", "message": "", "parentRunId": 0, "parentName": null,
   "total": 12, "passed": 9, "failed": 2, "skipped": 1,
   "artifacts": [
-    {"id": 3, "caseId": 0, "kind": "results",
+    {"id": 3, "kind": "results",
      "name": "build/test_detail.xml", "size": 15832},
-    {"id": 4, "caseId": 0, "kind": "results",
+    {"id": 4, "kind": "results",
      "name": "build/extra.json", "size": 2101}
   ]
 }
 ```
+
+Artifacts belong to the run they were produced by: a unit run's results
+files attach to the unit run; a regression case's artifacts attach to the
+case's own child run (the parent aggregates counts only).
 
 `GET /api/test-artifacts/{id}` returns one artifact's raw `content` —
 the browser-side results parsing and the upcoming regression "analyze"

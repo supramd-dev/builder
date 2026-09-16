@@ -139,7 +139,7 @@ hwIDAQAB
 	// report stores one run. statusOverride is only meaningful for runs
 	// without cases (the simplified path); pass "" to derive it from the
 	// cases, or store.StatusFailed/StatusPassed to force it.
-	report := func(envID, commitID int64, kind, summary string, startedAgo time.Duration, cases []store.TestCaseResult, statusOverride string) {
+	report := func(envID, commitID int64, kind, summary string, startedAgo time.Duration, cases []store.CaseInput, statusOverride string) {
 		status := statusOverride
 		if status == "" {
 			status = runStatusOf(cases)
@@ -155,21 +155,20 @@ hwIDAQAB
 			os.Exit(1)
 		}
 	}
-	reg := func(statuses ...string) []store.TestCaseResult {
+	reg := func(statuses ...string) []store.CaseInput {
 		names := []string{"lj-argon-nve", "water-tip4p-npt", "argon-liquid-nvt"}
-		errs := map[string]float64{"passed": 3.2e-07, "failed": 0.021}
-		cases := make([]store.TestCaseResult, len(statuses))
+		cases := make([]store.CaseInput, len(statuses))
 		for i, st := range statuses {
-			cases[i] = store.TestCaseResult{Name: names[i], Status: st, ErrorValue: errs[st],
-				Message: map[string]string{"passed": "max rel err", "failed": "energy drift above threshold"}[st]}
+			cases[i] = store.CaseInput{Name: names[i], Status: st,
+				Message: map[string]string{"passed": "max rel err 3.2e-7", "failed": "energy drift above threshold"}[st]}
 		}
 		return cases
 	}
-	unit := func(statuses ...string) []store.TestCaseResult {
+	unit := func(statuses ...string) []store.CaseInput {
 		names := []string{"TestForce::compute", "TestIntegrate::verlet", "TestNeighborList::rebuild", "TestPBC::unwrap"}
-		cases := make([]store.TestCaseResult, len(statuses))
+		cases := make([]store.CaseInput, len(statuses))
 		for i, st := range statuses {
-			cases[i] = store.TestCaseResult{Name: names[i], Status: st,
+			cases[i] = store.CaseInput{Name: names[i], Status: st,
 				Message: map[string]string{"failed": "assert 1e-12 < |dE| failed"}[st]}
 		}
 		return cases
@@ -277,7 +276,7 @@ hwIDAQAB
 
 // runStatusOf derives the run status from the case list (mirrors the
 // UpsertTestRun rule: a run passes when every case passes).
-func runStatusOf(cases []store.TestCaseResult) string {
+func runStatusOf(cases []store.CaseInput) string {
 	if len(cases) == 0 {
 		return store.StatusPassed // not used for build runs (no cases)
 	}

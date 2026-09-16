@@ -82,38 +82,38 @@ func seedDashboardData(t *testing.T, apiServer *Server) {
 	}
 	must(apiServer.Store.UpsertTestRun(&store.RunInput{
 		EnvironmentID: envID("cpu-node-1"), CommitID: commitIDs["1111111"], Kind: "regression",
-		Cases: []store.TestCaseResult{
-			{Name: "lj-argon-nve", Status: "passed", ErrorValue: 1.2e-07, Message: "max rel err"},
-			{Name: "water-tip4p-npt", Status: "failed", ErrorValue: 0.02, Message: "drift above threshold"},
+		Cases: []store.CaseInput{
+			{Name: "lj-argon-nve", Status: "passed", Message: "max rel err"},
+			{Name: "water-tip4p-npt", Status: "failed", Message: "drift above threshold"},
 		},
 		StartedAt: time.Now().Add(-3 * time.Hour), FinishedAt: time.Now().Add(-3 * time.Hour).Add(4 * time.Minute),
 	}))
 	must(apiServer.Store.UpsertTestRun(&store.RunInput{
 		EnvironmentID: envID("cpu-node-1"), CommitID: commitIDs["2222222"], Kind: "regression",
-		Cases: []store.TestCaseResult{
-			{Name: "lj-argon-nve", Status: "passed", ErrorValue: 1.1e-07},
-			{Name: "water-tip4p-npt", Status: "passed", ErrorValue: 9e-05},
+		Cases: []store.CaseInput{
+			{Name: "lj-argon-nve", Status: "passed"},
+			{Name: "water-tip4p-npt", Status: "passed"},
 		},
 	}))
 	must(apiServer.Store.UpsertTestRun(&store.RunInput{
 		EnvironmentID: envID("cpu-node-1"), CommitID: commitIDs["3333333"], Kind: "regression",
-		Cases: []store.TestCaseResult{
-			{Name: "lj-argon-nve", Status: "passed", ErrorValue: 1.3e-07},
-			{Name: "water-tip4p-npt", Status: "passed", ErrorValue: 8.5e-05},
-			{Name: "argon-liquid-nvt", Status: "failed", ErrorValue: 0.01, Message: "energy drift"},
+		Cases: []store.CaseInput{
+			{Name: "lj-argon-nve", Status: "passed"},
+			{Name: "water-tip4p-npt", Status: "passed"},
+			{Name: "argon-liquid-nvt", Status: "failed", Message: "energy drift"},
 		},
 	}))
 	must(apiServer.Store.UpsertTestRun(&store.RunInput{
 		EnvironmentID: envID("mpi-cluster"), CommitID: commitIDs["3333333"], Kind: "regression",
-		Cases: []store.TestCaseResult{
-			{Name: "lj-argon-nve", Status: "passed", ErrorValue: 2e-07},
-			{Name: "water-tip4p-npt", Status: "passed", ErrorValue: 9.1e-05},
+		Cases: []store.CaseInput{
+			{Name: "lj-argon-nve", Status: "passed"},
+			{Name: "water-tip4p-npt", Status: "passed"},
 		},
 	}))
 	// Unit runs for the unit dashboard.
 	must(apiServer.Store.UpsertTestRun(&store.RunInput{
 		EnvironmentID: envID("cpu-node-1"), CommitID: commitIDs["3333333"], Kind: "unit",
-		Cases: []store.TestCaseResult{
+		Cases: []store.CaseInput{
 			{Name: "TestForce", Status: "passed"},
 			{Name: "TestIntegrate", Status: "passed"},
 			{Name: "TestNeighborList", Status: "failed"},
@@ -369,7 +369,7 @@ func TestReportTestRunAndDetail(t *testing.T) {
 
 	// Invalid case status.
 	rec = env.authed(http.MethodPost, "/api/test-runs",
-		`{"environmentId":1,"commitId":1,"kind":"regression","cases":[{"name":"a","status":"skipped"}]}`)
+		`{"environmentId":1,"commitId":1,"kind":"regression","cases":[{"name":"a","status":"pending"}]}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid status: expected 400, got %d", rec.Code)
 	}
@@ -405,8 +405,8 @@ func TestReportTestRunAndDetail(t *testing.T) {
 		"startedAt": "2026-09-08T03:00:00Z",
 		"finishedAt": "2026-09-08T03:04:00Z",
 		"cases": [
-			{"name": "lj-argon-nve", "status": "passed", "errorValue": 1.2e-07, "message": "max rel err"},
-			{"name": "water-tip4p-npt", "status": "passed", "errorValue": 9e-05}
+			{"name": "lj-argon-nve", "status": "passed", "message": "max rel err", "durationMillis": 800},
+			{"name": "water-tip4p-npt", "status": "passed", "durationMillis": 950}
 		]
 	}`, env1.ID)
 	rec = env.authed(http.MethodPost, "/api/test-runs", body)
@@ -435,7 +435,8 @@ func TestReportTestRunAndDetail(t *testing.T) {
 		t.Fatalf("unexpected startedAt: %q", run.StartedAt)
 	}
 
-	// Detail: case list with error values, environment and commit context.
+	// Detail: child-run case list (each case is a run), environment and
+	// commit context.
 	rec = env.authed(http.MethodGet, fmt.Sprintf("/api/test-runs/%d", run.ID), "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("detail: expected 200, got %d, body %s", rec.Code, rec.Body.String())
@@ -446,10 +447,11 @@ func TestReportTestRunAndDetail(t *testing.T) {
 		CommitShortSHA  string `json:"commitShortSha"`
 		CommitAuthor    string `json:"commitAuthor"`
 		Cases           []struct {
-			Name       string  `json:"name"`
-			Status     string  `json:"status"`
-			ErrorValue float64 `json:"errorValue"`
-			Message    string  `json:"message"`
+			ID             int64   `json:"id"`
+			Name           string  `json:"name"`
+			Status         string  `json:"status"`
+			Message        string  `json:"message"`
+			DurationMillis float64 `json:"durationMillis"`
 		} `json:"cases"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
@@ -461,8 +463,32 @@ func TestReportTestRunAndDetail(t *testing.T) {
 	if len(detail.Cases) != 2 || detail.Cases[0].Name != "lj-argon-nve" {
 		t.Fatalf("unexpected cases: %+v", detail.Cases)
 	}
-	if detail.Cases[0].ErrorValue != 1.2e-07 {
-		t.Fatalf("unexpected error value: %v", detail.Cases[0].ErrorValue)
+	// The case id doubles as the child run id — opening the case navigates
+	// to that run's detail page.
+	if detail.Cases[0].ID == 0 || detail.Cases[0].ID == run.ID {
+		t.Fatalf("case id should be a distinct child run id: %+v", detail.Cases)
+	}
+	if detail.Cases[0].Message != "max rel err" || detail.Cases[0].DurationMillis != 800 {
+		t.Fatalf("case fields wrong: %+v", detail.Cases[0])
+	}
+
+	// A child run opens as a full run detail with its own context.
+	rec = env.authed(http.MethodGet, fmt.Sprintf("/api/test-runs/%d", detail.Cases[0].ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("child detail: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var child struct {
+		ID       int64  `json:"id"`
+		Name     string `json:"name"`
+		ParentID int64  `json:"parentRunId"`
+		Status   string `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &child); err != nil {
+		t.Fatalf("decode child detail: %v", err)
+	}
+	if child.ID != detail.Cases[0].ID || child.Name != "lj-argon-nve" ||
+		child.ParentID != run.ID || child.Status != "passed" {
+		t.Fatalf("child run detail wrong: %+v", child)
 	}
 
 	// The dashboard now shows the replaced cell as passed.
@@ -861,11 +887,10 @@ func TestRunDetailArtifactFields(t *testing.T) {
 		CommitRepo    *string `json:"commitRepo"`
 		CommitRepoURL *string `json:"commitRepoUrl"`
 		Artifacts     []struct {
-			ID     int64  `json:"id"`
-			CaseID int64  `json:"caseId"`
-			Kind   string `json:"kind"`
-			Name   string `json:"name"`
-			Size   int    `json:"size"`
+			ID   int64  `json:"id"`
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+			Size int    `json:"size"`
 		} `json:"artifacts"`
 		Cases []struct {
 			DurationMillis float64 `json:"durationMillis"`
@@ -897,7 +922,6 @@ func TestRunDetailArtifactFields(t *testing.T) {
 	}
 	var artifact struct {
 		RunID   int64  `json:"runId"`
-		CaseID  int64  `json:"caseId"`
 		Kind    string `json:"kind"`
 		Name    string `json:"name"`
 		Content string `json:"content"`

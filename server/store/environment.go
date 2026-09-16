@@ -148,9 +148,6 @@ func (s *Store) DeleteEnvironment(ownerID, id int64) error {
 			return err
 		}
 		if len(runIDs) > 0 {
-			if err := tx.Where("test_run_id IN ?", runIDs).Delete(&TestCaseResult{}).Error; err != nil {
-				return err
-			}
 			if err := tx.Where("run_id IN ?", runIDs).Delete(&TestArtifact{}).Error; err != nil {
 				return err
 			}

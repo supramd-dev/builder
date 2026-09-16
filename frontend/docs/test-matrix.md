@@ -133,9 +133,9 @@ presets:
 
 Each referenced preset becomes its **own sub-task** in the task graph
 (“regression: heat”), which runs after the build with its own timeout,
-its own log and its own case row in the regression run. The cases run
-independently — one failing case does not stop the others — and the
-matrix cell aggregates all cases of the entry.
+its own log and its own child test run under the parent regression run.
+The cases run independently — one failing case does not stop the others —
+and the matrix cell aggregates all cases of the entry.
 
 A matrix entry selects presets with `regression.use` and
 `regression.disable`:
@@ -157,8 +157,8 @@ A case's verdict is its **command's exit status** — nothing else:
 - An SSH-level failure (host unreachable, session dropped) fails the
   case the same way, with the transport error as the case's note.
 - The preset's `artifacts` files **never flip the verdict** — they are
-  stored as artifacts of the case (per-case detail parsed in the
-  browser). This differs from the unit stage, where artifact files
+  stored as artifacts of the case's own child run (per-case detail parsed
+  in the browser). This differs from the unit stage, where artifact files
   reporting failed cases also fail the run.
 - An `MD-BUILDER-SUMMARY:` line only becomes the case's note; it cannot
   turn a non-zero exit into a pass.
@@ -323,7 +323,7 @@ Each matched entry becomes a task graph (see
    is stored as a test run.
 5. **regression: one sub-task per selected preset** — each case command
    runs after the build (exporting MD_CASE), collects its own artifact
-   files and records its own case row; the matrix cell shows the
+   files and records its own child test run; the matrix cell shows the
    aggregate across cases.
 
 ## Custom summaries
@@ -337,4 +337,4 @@ MD-BUILDER-SUMMARY: all 8 tests passed, max rel err 3.2e-7
 The text after the prefix becomes the run summary shown on the dashboard.
 Without it, the summary is the exit code plus the last lines of the stage
 log (truncated to 500 characters). For a regression case the summary
-line becomes the case row's note.
+line becomes the child run's note.

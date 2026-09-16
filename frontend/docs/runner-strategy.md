@@ -73,8 +73,9 @@ root (test <sha> on <environment>)
   [the test matrix](#/docs/test-matrix)) becomes its own sub-task named
   `regression: <preset>`, depending on build, with its own command,
   workdir, timeout and artifact files. All cases of an entry share **one**
-  regression run per (environment, commit): each case records its own row
-  (status, message, duration) and its artifact files link to that row.
+  parent regression run per (environment, commit); each case is recorded
+  as a **child test run** under it (status, message, duration) and the
+  case's artifact files attach to that child run.
 - Each node stores a **snapshot** of its config, so later YAML edits or
   manual re-dispatches do not affect already-running graphs.
 - When a sub-task fails, everything that (transitively) depends on it is
@@ -114,8 +115,9 @@ root (test <sha> on <environment>)
   [Dashboard and reporting](#/docs/dashboard)).
 - **regression: <preset>**: one sub-task per case — the preset's command
   runs in the preset's working directory with `MD_CASE` exported; the
-  case's artifact files are collected and linked to the case row. Each case
-  records its row into the shared regression run; the cell aggregates.
+  case's artifact files are collected onto the case's child run. Each case
+  records its child run under the shared parent regression run; the parent
+  aggregates.
 
 Every stage script runs through the same preamble:
 
@@ -169,32 +171,32 @@ when all sub-tasks are done, failed otherwise.
   test binary's exit code).
 - **Regression cases** are judged by their command's exit status alone
   (exit 0 → passed, anything else — timeout, SSH failure, non-zero — →
-  failed); their `artifacts` files are stored for display and never flip
-  the verdict. The run aggregates its cases: any failed case → the cell
-  shows ✗ (see [the test matrix](#/docs/test-matrix)).
+  failed); their `artifacts` files are stored on the case's child run for
+  display and never flip the verdict. The parent run aggregates its
+  cases: any failed case → the cell shows ✗ (see
+  [the test matrix](#/docs/test-matrix)).
 - Unit runs carry aggregate counts only (total / passed / failed /
   skipped), summed across all configured artifact files. The per-case list
   is parsed in the browser from the stored artifact files (see [the test
   matrix](#/docs/test-matrix)); the run's `taskId` links back to the
   stage's task log (stdout).
 - Regression runs aggregate **incrementally**: each case sub-task upserts
-  its own row (re-runs of the same case replace it), and the run's
-  counts/status/summary are recomputed over all rows seen so far ("3/4
-  cases passed; failed: heat"). A re-dispatch resets the run before the
-  new cases land.
+  its child run (re-runs of the same case replace it), and the parent
+  run's counts/status/summary are recomputed over all child runs seen so
+  far ("3/4 cases passed; failed: heat"). A re-dispatch resets the run
+  before the new cases land.
 - There is no automatic retry: re-push the commit or re-run the dispatch
   to retry.
 
 ### Artifacts and the regression extension
 
-Result files live in one `test_artifacts` table keyed by run — a run (or a
-single case) can have several — with a `case_id` column that is 0 for
-run-level files and set for the artifact files a regression case collects.
-This is the extension point for regression tests: their per-case logs and
-series/plot data will be stored as `log` / `series` artifacts behind the
-same table, fetched by an "analyze" view in the browser, while per-case
-outcomes (status, error value, duration) go through the regular
-case-result rows.
+Result files live in one `test_artifacts` table keyed by run — a run can
+have several. Artifacts belong to the run that produced them: a unit
+stage's results files attach to the unit run; a regression case's files
+attach to the case's own child run. Regression cases are nested runs, so
+this is the natural extension point: their per-case logs and series/plot
+data will be stored as `log` / `series` artifacts behind the same table
+and fetched by an "analyze" view in the browser.
 
 ## Prerequisites
 

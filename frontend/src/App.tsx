@@ -8,7 +8,6 @@ import RunPage from './RunPage'
 import SettingsPage from './SettingsPage'
 import DashboardPage from './DashboardPage'
 import TestRunDetailPage from './TestRunDetailPage'
-import CaseDetailPage from './CaseDetailPage'
 import DocsPage from './DocsPage'
 import TaskDetailPage from './TaskDetailPage'
 import TaskGraphPage from './TaskGraphPage'
@@ -25,8 +24,8 @@ import { applySiteTimezone, subscribeTimezone } from './timezone'
 //   #/docs/:section         documentation, a section preselected
 //   #/tasks/:taskId         task graph (root)
 //   #/tasks/:taskId/log     task log view (root detail + step list)
-//   #/runs/:runId           test run detail
-//   #/runs/:runId/case/:caseId  case detail
+//   #/runs/:runId           test run detail (a regression case row opens
+//                           the child run's own detail page here)
 //
 // Signed-in pages read their ids from the URL (useParams) and link onward
 // with <Link> / useNavigate — no per-page navigation callbacks.
@@ -124,7 +123,6 @@ function PageRoutes() {
       <Route path="/tasks/:taskId" element={<TaskGraphPage />} />
       <Route path="/tasks/:taskId/log" element={<TaskDetailPage />} />
       <Route path="/runs/:runId" element={<TestRunDetailPage onError={console.warn} />} />
-      <Route path="/runs/:runId/case/:caseId" element={<CaseDetailPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

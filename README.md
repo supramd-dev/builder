@@ -30,8 +30,7 @@ md-builder/
 │   ├── src/App.tsx        # shell: login + page routing (incl. dashboard)
 │   ├── src/LoginPage.tsx  # static login page
 │   ├── src/DashboardPage.tsx    # test result matrix (regression / unit)
-│   ├── src/TestRunDetailPage.tsx # per-run case results
-│   ├── src/CaseDetailPage.tsx   # per-case detail (placeholder)
+│   ├── src/TestRunDetailPage.tsx # per-run detail: case list (child runs), parsed results
 │   ├── src/UserCenter.tsx # environment management dashboard
 │   ├── src/RunPage.tsx    # remote command/script execution (Monaco editor)
 │   ├── src/SettingsPage.tsx # site config: repos, credentials, webhook notice

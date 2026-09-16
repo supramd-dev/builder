@@ -9,9 +9,9 @@ import (
 // Test artifacts: raw result/log/series files stored alongside a run, parsed
 // on the client side. The runner does not interpret them beyond aggregate
 // counts — the stored bytes are the source of truth for the per-case detail
-// views. Unit tests store their googletest results file as a run-level
-// artifact (CaseID 0); regression tests will store per-case logs and series
-// data files (CaseID set) behind the same table.
+// views. A unit run stores its googletest results file as a run-level
+// artifact; a regression case's fetched files ride on the case's own (child)
+// run. The future per-case log/series artifacts attach the same way.
 
 // Artifact kinds.
 const (
@@ -25,12 +25,11 @@ func ArtifactKindValid(kind string) bool {
 	return kind == ArtifactKindResults || kind == ArtifactKindLog || kind == ArtifactKindSeries
 }
 
-// TestArtifact is one stored file. CaseID 0 means the artifact belongs to the
-// run as a whole; otherwise it belongs to that test case result row.
+// TestArtifact is one stored file of one run (top-level or child — a child
+// run's artifacts are fetched by that run's id).
 type TestArtifact struct {
 	ID        int64     `gorm:"primaryKey"`
 	RunID     int64     `gorm:"index:idx_test_artifacts_run_kind;not null"`
-	CaseID    int64     `gorm:"index;not null;default:0"`
 	Kind      string    `gorm:"index:idx_test_artifacts_run_kind;not null"`
 	Name      string    `gorm:"not null;default:''"` // source path / label
 	Content   string    `gorm:"not null"`            // raw file content
@@ -38,12 +37,10 @@ type TestArtifact struct {
 }
 
 // ArtifactInput is an artifact as submitted with a run report (the runner's
-// fetched results file, or a per-case log/series file). CaseID links the
-// artifact to one case row (per-case results files); 0 attaches it to the
-// run as a whole.
+// fetched results file, or a future per-case log/series file). It attaches
+// to the run the report carries.
 type ArtifactInput struct {
 	Kind    string // ArtifactKindResults / ArtifactKindLog / ArtifactKindSeries
-	CaseID  int64
 	Name    string
 	Content string
 }
@@ -75,7 +72,6 @@ func replaceRunArtifacts(tx *gorm.DB, runID int64, artifacts []ArtifactInput) er
 	for i := range artifacts {
 		a := TestArtifact{
 			RunID:   runID,
-			CaseID:  artifacts[i].CaseID,
 			Kind:    artifacts[i].Kind,
 			Name:    artifacts[i].Name,
 			Content: artifacts[i].Content,

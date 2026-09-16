@@ -284,9 +284,6 @@ func TestExecuteStageFetchesArtifactFile(t *testing.T) {
 	if artifacts[0].Content != sampleGTestXML {
 		t.Errorf("artifact content should be verbatim")
 	}
-	if artifacts[0].CaseID != 0 {
-		t.Errorf("unit artifact should be run-level (case 0): %d", artifacts[0].CaseID)
-	}
 }
 
 // TestExecuteStageMultipleArtifactFiles: a run configured with several
@@ -322,7 +319,7 @@ func TestExecuteStageMultipleArtifactFiles(t *testing.T) {
 	}
 	byName := map[string]string{}
 	for _, a := range artifacts {
-		if a.Kind != store.ArtifactKindResults || a.CaseID != 0 {
+		if a.Kind != store.ArtifactKindResults {
 			t.Errorf("artifact wrong: %+v", a)
 		}
 		byName[a.Name] = a.Content
@@ -463,9 +460,9 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 	if reg.Total != 2 || reg.Passed != 2 || reg.Failed != 0 {
 		t.Errorf("regression run should aggregate 2 passed cases: %+v", reg)
 	}
-	cases, _ := s.ListCaseResults(reg.ID)
-	if len(cases) != 2 || cases[0].Name != "heat" || cases[1].Name != "poisson" {
-		t.Errorf("case rows wrong: %+v", cases)
+	children, _ := s.ListChildRuns(reg.ID)
+	if len(children) != 2 || children[0].Name != "heat" || children[1].Name != "poisson" {
+		t.Errorf("child runs wrong: %+v", children)
 	}
 
 	// The build script ran the configured command; the stage scripts used
@@ -533,7 +530,7 @@ func TestExecuteCloneFailureSkipsDownstream(t *testing.T) {
 	if !ok || unit.Status != store.StatusFailed || !strings.Contains(unit.Summary, "skipped") {
 		t.Errorf("skipped unit run wrong: %+v", unit)
 	}
-	// The regression cases were recorded as skipped case rows; the run
+	// The regression cases were recorded as skipped child runs; the run
 	// summary surfaces as "skipped:" (the dashboard translation).
 	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression,
 		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
@@ -547,11 +544,11 @@ func TestExecuteCloneFailureSkipsDownstream(t *testing.T) {
 	if !strings.HasPrefix(reg.Summary, "skipped:") {
 		t.Errorf("all-skipped run summary should start with skipped:: %q", reg.Summary)
 	}
-	cases, _ := s.ListCaseResults(reg.ID)
-	if len(cases) != 2 {
-		t.Fatalf("want 2 skipped case rows, got %d", len(cases))
+	children, _ := s.ListChildRuns(reg.ID)
+	if len(children) != 2 {
+		t.Fatalf("want 2 skipped child runs, got %d", len(children))
 	}
-	for _, c := range cases {
+	for _, c := range children {
 		if c.Status != store.StatusSkipped {
 			t.Errorf("case %s should be skipped: %s", c.Name, c.Status)
 		}
@@ -771,7 +768,7 @@ func TestExecuteCaseRunsPreset(t *testing.T) {
 	}
 
 	// The regression run carries exactly the heat case, passed, with its
-	// artifact linked to the case row.
+	// artifact riding the case's own child run.
 	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression,
 		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
 	reg, ok := regRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
@@ -781,16 +778,19 @@ func TestExecuteCaseRunsPreset(t *testing.T) {
 	if reg.Total != 1 || reg.Passed != 1 || reg.Status != store.StatusPassed {
 		t.Errorf("case run aggregate wrong: %+v", reg)
 	}
-	cases, _ := s.ListCaseResults(reg.ID)
-	if len(cases) != 1 || cases[0].Name != "heat" || cases[0].Status != store.StatusPassed {
-		t.Fatalf("case rows wrong: %+v", cases)
+	children, _ := s.ListChildRuns(reg.ID)
+	if len(children) != 1 || children[0].Name != "heat" || children[0].Status != store.StatusPassed {
+		t.Fatalf("child runs wrong: %+v", children)
 	}
-	if cases[0].DurationMillis < 0 || cases[0].Message == "" {
-		t.Errorf("case row should carry duration and message: %+v", cases[0])
+	if children[0].DurationMillis < 0 || children[0].Message == "" {
+		t.Errorf("child run should carry duration and message: %+v", children[0])
 	}
-	artifacts, _ := s.ListRunArtifacts(reg.ID)
-	if len(artifacts) != 1 || artifacts[0].Name != "out.xml" || artifacts[0].CaseID != cases[0].ID {
-		t.Errorf("case artifact should link the case row: %+v (case %d)", artifacts, cases[0].ID)
+	artifacts, _ := s.ListRunArtifacts(children[0].ID)
+	if len(artifacts) != 1 || artifacts[0].Name != "out.xml" {
+		t.Errorf("case artifact should ride the child run: %+v", artifacts)
+	}
+	if parentArtifacts, _ := s.ListRunArtifacts(reg.ID); len(parentArtifacts) != 0 {
+		t.Errorf("parent run should stay artifact-free: %+v", parentArtifacts)
 	}
 }
 
@@ -827,12 +827,12 @@ func TestExecuteCaseFailureMarksRunFailed(t *testing.T) {
 	if !strings.Contains(reg.Summary, "heat") {
 		t.Errorf("summary should name the failing case: %q", reg.Summary)
 	}
-	// The failed heat case row carries the MD-BUILDER-SUMMARY message.
-	cases, _ := s.ListCaseResults(reg.ID)
-	for _, c := range cases {
+	// The failed heat child run carries the MD-BUILDER-SUMMARY message.
+	children, _ := s.ListChildRuns(reg.ID)
+	for _, c := range children {
 		if c.Name == "heat" {
 			if c.Status != store.StatusFailed || !strings.Contains(c.Message, "err 1e-3") {
-				t.Errorf("heat case row wrong: %+v", c)
+				t.Errorf("heat child run wrong: %+v", c)
 			}
 		}
 	}

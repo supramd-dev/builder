@@ -97,7 +97,7 @@ func (s *Store) migrate() error {
 	}
 	if err := s.DB.AutoMigrate(
 		&User{}, &Session{}, &TestEnvironment{}, &SiteConfig{},
-		&Commit{}, &TestRun{}, &TestCaseResult{}, &TestArtifact{}, &Task{}, &TaskLog{},
+		&Commit{}, &TestRun{}, &TestArtifact{}, &Task{}, &TaskLog{},
 	); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}

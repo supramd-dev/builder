@@ -47,13 +47,22 @@ export default function TestRunDetailPage({ onError }: Props) {
   }, [runId, onError])
 
   // The breadcrumb trail's task crumb needs the root task id, which arrives
-  // with the run; before that the trail ends at Dashboard.
+  // with the run; before that the trail ends at Dashboard. A child run (a
+  // regression case) also carries the crumb of its parent regression run.
   const trail = [
     { label: 'Dashboard', to: '/' },
     ...(run && run.rootTaskId > 0
       ? [{ label: `Task #${run.rootTaskId}`, to: `/tasks/${run.rootTaskId}` }]
       : []),
-    { label: `Run #${runId}` },
+    ...(run && run.parentRunId > 0
+      ? [
+          {
+            label: run.parentName ?? `Run #${run.parentRunId}`,
+            to: `/runs/${run.parentRunId}`,
+          },
+        ]
+      : []),
+    { label: run?.name ? run.name : `Run #${runId}` },
   ]
 
   if (loading) {
@@ -131,12 +140,18 @@ export default function TestRunDetailPage({ onError }: Props) {
       {run.summary && <pre className="dash-run-summary">{run.summary}</pre>}
 
       {/* Unit runs parse their results file in the browser. */}
-      <ResultsFileSection run={run} onError={onError} />
+      {run.kind !== 'regression' && <ResultsFileSection run={run} onError={onError} />}
 
-      {/* Cases reported through the database (regression reports). */}
+      {/* Regression cases: one child run per preset — each row opens the
+          case's own run detail page. */}
       {run.cases.length > 0 && (
         <>
-          <h3 className="task-section-title">Test cases</h3>
+          <h3 className="task-section-title">
+            Regression cases{' '}
+            <span className="text-muted" style={{ fontWeight: 400 }}>
+              ({run.passed}/{run.total} passed)
+            </span>
+          </h3>
           <CaseTable
             cases={run.cases.map((c) => ({
               id: c.id,
@@ -145,7 +160,7 @@ export default function TestRunDetailPage({ onError }: Props) {
               durationMs: c.durationMillis,
               message: c.message,
             }))}
-            caseHref={(caseId) => `/runs/${runId}/case/${caseId}`}
+            caseHref={(childRunId) => `/runs/${childRunId}`}
           />
         </>
       )}
@@ -321,14 +336,16 @@ function BrowserCaseTable({ cases }: { cases: GTestCase[] }) {
   )
 }
 
-// CaseTable renders database-backed case results (regression reports), with
-// row links into the case detail page.
+// CaseTable renders a regression run's case list (each row is a child run
+// of the parent regression run); clicking a row opens the child run's own
+// detail page. Row styling differs from the browser-parsed unit table (see
+// dash-case-row in index.css).
 function CaseTable({
   cases,
   caseHref,
 }: {
   cases: (GTestCase & { id: number })[]
-  caseHref: (caseId: number) => string
+  caseHref: (childRunId: number) => string
 }) {
   const [note, setNote] = useState<{ name: string; message: string } | null>(null)
   return (
@@ -348,7 +365,7 @@ function CaseTable({
               key={c.id}
               className="dash-case-row"
               onClick={() => (window.location.hash = caseHref(c.id))}
-              title="Click for case details"
+              title="Click to open the case's test run"
             >
               <td>{c.name}</td>
               <td>
