@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -410,6 +411,54 @@ func seedGraphs(s *store.Store, force bool, commits []*store.Commit, envs []*sto
 			return err
 		}
 	}
+	return linkRunsToGraphs(s)
+}
+
+// linkRunsToGraphs points every reported run at its graph's stage sub-task
+// (regression case children at the regression sub-task), so the run detail
+// pages show the stage log and the task breadcrumb exactly like
+// runner-reported runs — which always carry the sub-task id. The demo runs
+// are reported before their graphs exist (and re-reported on every seed),
+// so the links are (re-)established here each time; runs without a graph
+// (an environment registered after the push) stay external (task_id 0, no
+// log — correct: nothing ever ran for them).
+func linkRunsToGraphs(s *store.Store) error {
+	// Every graph's stages keyed by (env, commit): kind → stage sub-task id.
+	stageByKind := map[store.EnvCommit]map[string]int64{}
+	var tasks []store.Task
+	if err := s.DB.Where("kind IN ? AND root_id != id",
+		[]string{store.TaskKindBuild, store.TaskKindUnit, store.TaskKindRegression}).
+		Find(&tasks).Error; err != nil {
+		return err
+	}
+	for _, t := range tasks {
+		key := store.EnvCommit{Env: t.EnvironmentID, Commit: t.CommitID}
+		if stageByKind[key] == nil {
+			stageByKind[key] = map[string]int64{}
+		}
+		// Several regression case sub-tasks share the kind: any of them
+		// works as the log source (they aggregate under one run).
+		stageByKind[key][t.Kind] = t.ID
+	}
+
+	// Runs still missing their link, oldest first (a re-seeded run keeps its
+	// row; the children are re-created, so they always need the link).
+	var runs []store.TestRun
+	if err := s.DB.Where("parent_id = 0 AND task_id = 0").Order("id ASC").Find(&runs).Error; err != nil {
+		return err
+	}
+	for _, r := range runs {
+		stage, ok := stageByKind[store.EnvCommit{Env: r.EnvironmentID, Commit: r.CommitID}][r.Kind]
+		if !ok {
+			continue // no graph for this (env, commit) — stays external
+		}
+		// Link the run and re-create its children's links (the children are
+		// replaced by report(), so they never carry the task id).
+		if err := s.DB.Model(&store.TestRun{}).Where("id = ? OR parent_id = ?", r.ID, r.ID).
+			Update("task_id", stage).Error; err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -522,7 +571,10 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 	root := &store.Task{
 		Kind: store.TaskKindRoot, Name: "test " + commit.SHA, Status: store.TaskDone,
 		CommitID: commit.ID, EnvironmentID: env.ID, Tags: env.Tags,
-		Config: `{"entry":{"tags":["cpu"]},"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
+		// Same shape the real dispatcher stores (RootConfig{Entry: …}): the
+		// merged matrix entry nested under "entry" — the executor's script
+		// generator reads the build command from there.
+		Config: `{"entry":{"tags":["cpu"],"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":[{"name":"argon-liquid-nvt","command":"ctest -R argon -L regression"}]}}`,
 	}
 	// The graph always carries all four nodes: build ← clone,
 	// unit/regression ← build. The root is a derived container and never a
@@ -668,7 +720,10 @@ func seedLiveGraph(s *store.Store, env *store.TestEnvironment, commitID int64, p
 	root := &store.Task{
 		Kind: store.TaskKindRoot, Name: "test " + commit.SHA[:7], Status: store.TaskPending,
 		CommitID: commitID, EnvironmentID: env.ID, Tags: env.Tags,
-		Config: `{"entry":{"tags":["cpu"]},"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":{"command":"ctest -L regression"}}`,
+		// Dispatcher-shaped RootConfig: the entry nested under "entry" so a
+		// worker that claims a stage builds the real scripts (and fails on
+		// the unreachable demo host, not on an empty build command).
+		Config: `{"entry":{"tags":["cpu"],"build":{"command":"ninja"},"unit":{"command":"ctest -L unit"},"regression":[{"name":"argon-liquid-nvt","command":"ctest -R argon -L regression"}]}}`,
 	}
 	clone := &store.Task{Kind: store.TaskKindClone, Name: "clone repositories",
 		CommitID: commitID, EnvironmentID: env.ID}
@@ -734,6 +789,31 @@ func seedLiveGraph(s *store.Store, env *store.TestEnvironment, commitID int64, p
 			return err
 		}
 	}
+
+	// Placeholder runs mirroring the live scheduler: the executing stage's
+	// run is running, the queued stages' runs pending — so the dashboard
+	// cells link into run detail pages that follow the stage live (the real
+	// dispatcher seeds these through seedStageRuns). Refresh the stage rows'
+	// configs into memory first: the stageCfg update above bypassed the
+	// structs (stored[3]/[4] carry the case command seedStageRuns parses).
+	for _, st := range stored[2:] {
+		var fresh store.Task
+		if err := s.DB.Select("config").First(&fresh, st.ID).Error; err != nil {
+			return err
+		}
+		st.Config = fresh.Config
+	}
+	runStatus := map[int64]string{
+		stored[2].ID: store.StatusPending, // build
+		stored[3].ID: store.StatusPending, // unit
+		stored[4].ID: store.StatusPending, // regression (one case child)
+	}
+	if phase == "running" {
+		runStatus[stored[2].ID] = store.StatusRunning
+	}
+	if err := seedStageRuns(s, stored[2:], runStatus); err != nil {
+		return err
+	}
 	for taskID, chunks := range logs {
 		for i, content := range chunks {
 			if err := s.AppendTaskLog(taskID, i+1, content); err != nil {
@@ -743,5 +823,48 @@ func seedLiveGraph(s *store.Store, env *store.TestEnvironment, commitID int64, p
 	}
 	fmt.Printf("seeded live task graph (%s): root #%d (%s on %s)\n",
 		phase, root.ID, commit.SHA[:7], env.Name)
+	return nil
+}
+
+// seedStageRuns writes dispatch-time placeholder runs for the given stage
+// sub-tasks, each in the requested status (pending/running). Regression gets
+// one pending child run per case sub-task, like the runner's seedStageRuns.
+func seedStageRuns(s *store.Store, subs []*store.Task, status map[int64]string) error {
+	// Group by run kind — regression's sub-tasks aggregate under one run.
+	taskID := map[string]int64{}
+	cases := map[string][]store.CaseInput{}
+	for _, sub := range subs {
+		var kind string
+		switch sub.Kind {
+		case store.TaskKindBuild:
+			kind = store.RunKindBuild
+		case store.TaskKindUnit:
+			kind = store.RunKindUnit
+		case store.TaskKindRegression:
+			kind = store.RunKindRegression
+			var stage runner.CaseStageConfig
+			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
+				return fmt.Errorf("seed regression run: %w", err)
+			}
+			cases[kind] = append(cases[kind], store.CaseInput{Name: stage.Case})
+		default:
+			continue
+		}
+		if _, ok := taskID[kind]; !ok {
+			taskID[kind] = sub.ID
+		}
+	}
+	for kind, id := range taskID {
+		if _, err := s.UpsertPlaceholderRun(&store.RunInput{
+			EnvironmentID: subs[0].EnvironmentID,
+			CommitID:      subs[0].CommitID,
+			Kind:          kind,
+			TaskID:        id,
+			Status:        status[id],
+			Cases:         cases[kind],
+		}); err != nil {
+			return fmt.Errorf("seed %s run: %w", kind, err)
+		}
+	}
 	return nil
 }

@@ -356,8 +356,10 @@ export async function getFullDashboard(
 export interface CaseResult {
   id: number
   name: string
-  // "skipped" marks a case whose sub-task never ran (upstream failure).
-  status: 'passed' | 'failed' | 'skipped'
+  // "skipped" marks a case whose sub-task never ran (upstream failure);
+  // "pending"/"running" are dispatch-time placeholders — the case's stage
+  // sub-task has not reported yet.
+  status: 'passed' | 'failed' | 'skipped' | 'pending' | 'running'
   message: string
   durationMillis: number
 }
@@ -382,7 +384,9 @@ export interface TestArtifactContent {
 export interface TestRunDetail {
   id: number
   kind: DashboardKind
-  status: 'passed' | 'failed' | 'skipped'
+  // "pending"/"running" are dispatch-time placeholders: the run follows its
+  // stage sub-task live until the real outcome lands.
+  status: 'passed' | 'failed' | 'skipped' | 'pending' | 'running'
   summary: string
   // Child runs carry the case (preset) name and message; empty on
   // top-level runs.

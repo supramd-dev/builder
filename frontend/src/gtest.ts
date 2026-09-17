@@ -3,7 +3,10 @@
 // root attributes); the per-case list — name, status, duration, failure
 // message — is parsed here, where it is displayed.
 
-export type GTestCaseStatus = 'passed' | 'failed' | 'skipped'
+// GTestCaseStatus covers the stored case statuses. The browser-parsed
+// results files only ever yield passed/failed/skipped; pending/running come
+// from the store's dispatch-time placeholder child runs (regression detail).
+export type GTestCaseStatus = 'passed' | 'failed' | 'skipped' | 'pending' | 'running'
 
 export interface GTestCase {
   name: string

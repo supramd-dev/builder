@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router'
-import { Maximize2 } from 'lucide-react'
+import { LoaderCircle, Maximize2 } from 'lucide-react'
 import {
   getTestArtifact,
   getTestRun,
@@ -28,6 +28,7 @@ export default function TestRunDetailPage({ onError }: Props) {
 
   useEffect(() => {
     let cancelled = false
+    setLoading(true)
     getTestRun(runId)
       .then((r) => {
         if (!cancelled) setRun(r)
@@ -45,6 +46,20 @@ export default function TestRunDetailPage({ onError }: Props) {
       cancelled = true
     }
   }, [runId, onError])
+
+  // A pending/running run follows its stage live: poll until the real
+  // outcome lands (status leaves pending/running). Each poll replaces the
+  // run object, so the case list's per-case states advance on screen.
+  const live = run?.status === 'pending' || run?.status === 'running'
+  useEffect(() => {
+    if (!live) return
+    const timer = setInterval(() => {
+      getTestRun(runId)
+        .then((r) => setRun(r))
+        .catch(() => {}) // transient poll errors keep the last good view
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [live, runId])
 
   // The breadcrumb trail's task crumb needs the root task id, which arrives
   // with the run; before that the trail ends at Dashboard. A child run (a
@@ -84,8 +99,21 @@ export default function TestRunDetailPage({ onError }: Props) {
 
   const failed = run.status === 'failed'
   const skipped = run.status === 'skipped'
-  const statusCls = failed ? 'text-danger' : skipped ? 'text-warn' : 'text-success'
-  const statusText = failed ? '✗ failed' : skipped ? '⤼ skipped' : '✓ passed'
+  const inFlight = run.status === 'pending' || run.status === 'running'
+  const statusCls = failed
+    ? 'text-danger'
+    : skipped
+      ? 'text-warn'
+      : inFlight
+        ? 'text-run'
+        : 'text-success'
+  const statusText = failed
+    ? '✗ failed'
+    : skipped
+      ? '⤼ skipped'
+      : inFlight
+        ? '⏳ ' + run.status
+        : '✓ passed'
   const kindLabel =
     run.kind === 'regression' ? 'Regression tests' : run.kind === 'build' ? 'Build' : 'Unit tests'
 
@@ -96,6 +124,7 @@ export default function TestRunDetailPage({ onError }: Props) {
       {/* Title: kind + status in color. */}
       <h2 className="task-title">
         {kindLabel} · <span className={statusCls}>{statusText}</span>
+        {inFlight && <LoaderCircle size={15} className="spin" style={{ verticalAlign: '-2px' }} />}
         {run.commitShortSha && (
           <>
             {' · '}
@@ -111,6 +140,10 @@ export default function TestRunDetailPage({ onError }: Props) {
         {run.commitAuthor && <>{run.commitAuthor} · </>}
         {skipped ? (
           <span className="text-warn">not executed (upstream failure)</span>
+        ) : inFlight ? (
+          <span className="text-run">
+            {run.status === 'running' ? 'running — following the stage live' : 'queued — waiting for upstream stages'}
+          </span>
         ) : (
           <>
             <span className={failed ? 'text-danger' : 'text-success'}>
@@ -139,11 +172,12 @@ export default function TestRunDetailPage({ onError }: Props) {
 
       {run.summary && <pre className="dash-run-summary">{run.summary}</pre>}
 
-      {/* Unit runs parse their results file in the browser. */}
-      {run.kind !== 'regression' && <ResultsFileSection run={run} onError={onError} />}
+      {/* Unit runs parse their results file in the browser (nothing stored
+          while the stage is still executing). */}
+      {!inFlight && run.kind !== 'regression' && <ResultsFileSection run={run} onError={onError} />}
 
       {/* Regression cases: one child run per preset — each row opens the
-          case's own run detail page. */}
+          case's own run detail page (whose log follows the case live). */}
       {run.cases.length > 0 && (
         <>
           <h3 className="task-section-title">
@@ -171,11 +205,11 @@ export default function TestRunDetailPage({ onError }: Props) {
         </p>
       )}
 
-      {/* The stage's stdout (task log). */}
+      {/* The stage's stdout (task log) — live while the stage executes. */}
       {run.taskId !== 0 && (
         <section>
           <h3 className="task-section-title">Log</h3>
-          <TaskLogView taskId={run.taskId} live={false} />
+          <TaskLogView taskId={run.taskId} live={run.status === 'running'} />
         </section>
       )}
     </div>
@@ -373,6 +407,12 @@ function CaseTable({
                   <span className="text-success">✓ passed</span>
                 ) : c.status === 'skipped' ? (
                   <span className="text-warn">⤼ skipped</span>
+                ) : c.status === 'running' ? (
+                  <span className="text-run">
+                    <LoaderCircle size={13} className="spin" /> running
+                  </span>
+                ) : c.status === 'pending' ? (
+                  <span className="text-muted">· pending</span>
                 ) : (
                   <span className="text-danger">✗ failed</span>
                 )}

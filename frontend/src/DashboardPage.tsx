@@ -422,7 +422,12 @@ function SingleCell({
       ? `${cell.passed}/${cell.total}`
       : undefined
   const title = cell.runId
-    ? (cell.error || `${cell.passed}/${cell.total} passed`) + ' — click for details'
+    ? (cell.error ||
+        (status === 'pending'
+          ? 'queued — the stage has not reported yet'
+          : status === 'running'
+            ? 'running — following the stage live'
+            : `${cell.passed}/${cell.total} passed`)) + ' — click for details'
     : cell.error ||
       (status === 'pending'
         ? 'Task queued — click for details'

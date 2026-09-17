@@ -376,7 +376,10 @@ func (s *Service) createGraph(commit *store.Commit, entry *MergedEntry, env *sto
 	return s.createSubTasks(root, graph)
 }
 
-// createSubTasks materializes the graph nodes under the root.
+// createSubTasks materializes the graph nodes under the root and seeds a
+// placeholder run per test stage so the dashboard cell and the run detail
+// page exist from dispatch time on (status pending/running, following the
+// stage live — the real outcome later replaces the placeholder).
 func (s *Service) createSubTasks(root *store.Task, graph []GraphTask) error {
 	subs := make([]*store.Task, len(graph))
 	deps := make([][]int64, len(graph))
@@ -390,8 +393,59 @@ func (s *Service) createSubTasks(root *store.Task, graph []GraphTask) error {
 		}
 		deps[i] = g.Deps
 	}
-	_, err := store.CreateTaskGraph(s.Store, root, subs, deps)
-	return err
+	stored, err := store.CreateTaskGraph(s.Store, root, subs, deps)
+	if err != nil {
+		return err
+	}
+	return s.seedStageRuns(root, stored[1:])
+}
+
+// seedStageRuns writes the dispatch-time placeholder runs for the graph's
+// test stages: build/unit get one pending top-level run; regression gets a
+// pending parent with one pending child run per case (the detail page lists
+// every case from the start). TaskID links each run to the FIRST sub-task of
+// its kind; the stage overwrites it (the case runs update their own child)
+// when it executes.
+func (s *Service) seedStageRuns(root *store.Task, subs []*store.Task) error {
+	// Group by run kind: regression expands to several sub-tasks (one per
+	// case) that all aggregate under ONE parent run.
+	taskID := map[string]int64{}
+	cases := map[string][]store.CaseInput{}
+	for _, sub := range subs {
+		var kind string
+		switch sub.Kind {
+		case store.TaskKindBuild:
+			kind = store.RunKindBuild
+		case store.TaskKindUnit:
+			kind = store.RunKindUnit
+		case store.TaskKindRegression:
+			kind = store.RunKindRegression
+			var stage CaseStageConfig
+			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
+				return fmt.Errorf("seed regression run: %w", err)
+			}
+			cases[kind] = append(cases[kind], store.CaseInput{Name: stage.Case})
+		default:
+			continue // clone has no run
+		}
+		if _, ok := taskID[kind]; !ok {
+			taskID[kind] = sub.ID // first sub-task of the kind
+		}
+	}
+	for kind, id := range taskID {
+		_, err := s.Store.UpsertPlaceholderRun(&store.RunInput{
+			EnvironmentID: root.EnvironmentID,
+			CommitID:      root.CommitID,
+			Kind:          kind,
+			TaskID:        id,
+			Status:        store.StatusPending,
+			Cases:         cases[kind],
+		})
+		if err != nil {
+			return fmt.Errorf("seed %s run: %w", kind, err)
+		}
+	}
+	return nil
 }
 
 // shortSHA abbreviates a commit id for display.

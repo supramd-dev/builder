@@ -18,10 +18,16 @@ const (
 	RunKindBuild      = "build"
 )
 
-// Test case / run statuses. StatusSkipped is a case-level status only (a
-// child run whose sub-task was skipped because an upstream task failed);
-// top-level runs themselves stay passed/failed.
+// Test case / run statuses. StatusPending/StatusRunning are placeholder
+// statuses: the runner writes them at dispatch time (one run per stage
+// sub-task, before the stage executes) so the matrix cells and run detail
+// pages exist and follow the stage live. They never come from reporters —
+// UpsertTestRun/UpsertCaseRun overwrite them with the real outcome.
+// StatusSkipped is a case-level status only (a child run whose sub-task was
+// skipped because an upstream task failed).
 const (
+	StatusPending = "pending"
+	StatusRunning = "running"
 	StatusPassed  = "passed"
 	StatusFailed  = "failed"
 	StatusSkipped = "skipped"
@@ -379,11 +385,15 @@ func (s *Store) UpsertCaseRun(in *CaseRunInput) (*TestRun, *TestRun, error) {
 // recomputeParent derives the parent's counts/status/summary from its child
 // runs. A skipped child never fails the parent by itself; the all-skipped
 // placeholder (upstream failure before any case could run) is surfaced by
-// the summary's "skipped:" prefix, which the dashboard translates.
+// the summary's "skipped:" prefix, which the dashboard translates. Children
+// still pending/running are dispatch-time placeholders (UpsertPlaceholderRun
+// created them): they don't count toward passed/failed/skipped — the parent
+// stays running until every case lands a real outcome.
 func recomputeParent(parent *TestRun, children []TestRun) {
 	parent.Total = len(children)
 	parent.Passed, parent.Failed, parent.Skipped = 0, 0, 0
 	var failed, skipped []string
+	inFlight := 0
 	for i := range children {
 		switch {
 		case children[i].Status == StatusPassed:
@@ -391,6 +401,8 @@ func recomputeParent(parent *TestRun, children []TestRun) {
 		case children[i].Status == StatusSkipped:
 			parent.Skipped++
 			skipped = append(skipped, children[i].Name)
+		case children[i].Status == StatusPending || children[i].Status == StatusRunning:
+			inFlight++
 		default:
 			parent.Failed++
 			failed = append(failed, children[i].Name)
@@ -404,6 +416,14 @@ func recomputeParent(parent *TestRun, children []TestRun) {
 	parent.Status = StatusPassed
 	if parent.Failed > 0 || allSkipped {
 		parent.Status = StatusFailed
+	}
+	if inFlight > 0 && parent.Failed == 0 {
+		// Some cases have not reported yet: the aggregate stays in flight
+		// (the dashboard shows the spinner, the detail page the per-case
+		// states) regardless of the cases that already passed.
+		parent.Status = StatusRunning
+		parent.Summary = fmt.Sprintf("%d/%d cases passed; %d in progress", parent.Passed, parent.Total, inFlight)
+		return
 	}
 	switch {
 	case len(failed) > 0:
@@ -495,10 +515,88 @@ func (s *Store) FindRunsByCommits(kind string, envIDs, commitIDs []int64) (map[E
 	return runs, nil
 }
 
+// MarkRunRunning flips the top-level run of (environment, commit, kind)
+// from pending to running: the scheduler claimed the stage sub-task and the
+// run detail page follows the stage live. A no-op when the run is not
+// pending (already running, terminal, or never created).
+func (s *Store) MarkRunRunning(envID, commitID int64, kind string) error {
+	return s.DB.Model(&TestRun{}).
+		Where("environment_id = ? AND commit_id = ? AND kind = ? AND parent_id = 0 AND name = '' AND status = ?",
+			envID, commitID, kind, StatusPending).
+		Updates(map[string]any{"status": StatusRunning}).Error
+}
+
 // EnvCommit keys a run by its environment and commit.
 type EnvCommit struct {
 	Env    int64
 	Commit int64
+}
+
+// UpsertPlaceholderRun creates (or resets) the placeholder run of one stage
+// for (environment, commit, kind): status pending or running, linked to the
+// stage sub-task. Called at dispatch time so the matrix cell and run detail
+// page exist before the stage executes and follow it live. The real
+// outcome later replaces the placeholder through the normal report paths
+// (UpsertTestRun/UpsertCaseRun keep the row and overwrite every field).
+func (s *Store) UpsertPlaceholderRun(in *RunInput) (*TestRun, error) {
+	if !RunKindValid(in.Kind) {
+		return nil, ErrInvalidRunKind
+	}
+	status := in.Status
+	if status != StatusPending && status != StatusRunning {
+		return nil, errors.New("store: placeholder run status must be pending or running")
+	}
+	var run TestRun
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ? AND parent_id = 0 AND name = ''",
+			in.EnvironmentID, in.CommitID, in.Kind).First(&run).Error
+		if err != nil && err != ErrNotFound {
+			return err
+		}
+		if err != nil {
+			run = TestRun{EnvironmentID: in.EnvironmentID, CommitID: in.CommitID, Kind: in.Kind}
+		} else {
+			// A re-dispatch replaces the previous outcome with the fresh
+			// placeholder: drop the old child runs and artifacts.
+			if err := deleteRunChildren(tx, run.ID); err != nil {
+				return err
+			}
+			if err := tx.Where("run_id = ?", run.ID).Delete(&TestArtifact{}).Error; err != nil {
+				return err
+			}
+		}
+		run.TaskID = in.TaskID
+		run.Status = status
+		run.Summary = ""
+		run.Message = ""
+		run.Total, run.Passed, run.Failed, run.Skipped = 0, 0, 0, 0
+		run.StartedAt = in.StartedAt
+		run.FinishedAt = time.Time{}
+		if err := tx.Save(&run).Error; err != nil {
+			return err
+		}
+		// Regression placeholders get their case children right away (one
+		// pending child per preset), so the detail page lists every case
+		// with live status from the start.
+		for i := range in.Cases {
+			child := childFromCase(in, &in.Cases[i], run.ID, i)
+			child.Status = StatusPending
+			child.Total = 0
+			child.Passed, child.Failed, child.Skipped = 0, 0, 0
+			child.Message = ""
+			child.DurationMillis = 0
+			child.StartedAt = time.Time{}
+			child.FinishedAt = time.Time{}
+			if err := tx.Create(&child).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
 }
 
 // DeleteTestRun removes one run, its child runs and their artifacts (requeue

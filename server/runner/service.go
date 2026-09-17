@@ -118,6 +118,9 @@ func (s *Service) loop(ctx context.Context) {
 // runClaimed executes one claimed sub-task and then updates the graph
 // state: skipping blocked dependents on failure and refreshing the root.
 func (s *Service) runClaimed(ctx context.Context, task *store.Task) {
+	// The stage's placeholder run (seeded at dispatch) flips to running so
+	// the matrix cell and run detail page follow the live stage.
+	s.markStageRunRunning(task)
 	if err := s.ExecuteTask(ctx, task); err != nil {
 		log.Printf("runner: task %d: execute: %v", task.ID, err)
 	}
@@ -142,12 +145,33 @@ func (s *Service) runClaimed(ctx context.Context, task *store.Task) {
 }
 
 // recordSkippedRuns writes the dashboard rows for skipped unit/regression
+// markStageRunRunning flips the claimed stage's placeholder run from
+// pending to running (a no-op for stages without a run). The run detail
+// page and matrix cell follow the stage live from this moment on.
+func (s *Service) markStageRunRunning(task *store.Task) {
+	var kind string
+	switch task.Kind {
+	case store.TaskKindBuild:
+		kind = store.RunKindBuild
+	case store.TaskKindUnit:
+		kind = store.RunKindUnit
+	case store.TaskKindRegression:
+		kind = store.RunKindRegression
+	default:
+		return // clone: no run
+	}
+	if err := s.Store.MarkRunRunning(task.EnvironmentID, task.CommitID, kind); err != nil {
+		log.Printf("runner: task %d: mark %s run running: %v", task.ID, kind, err)
+	}
+}
+
 // sub-tasks so the matrix shows ✗ instead of a blank cell. A skipped unit
 // or build stage gets a failed run (the build row normally comes from the
 // build stage itself — this covers builds that were skipped by an upstream
 // clone failure); a skipped regression case sub-task gets a skipped child
 // run (the parent aggregates them — all-skipped surfaces as the "skipped:"
-// summary the dashboard translates).
+// summary the dashboard translates). Every skipped stage's placeholder run
+// (pending since dispatch) is replaced by the real skipped outcome.
 func (s *Service) recordSkippedRuns(failed *store.Task) {
 	subs, err := s.Store.ListSubTasks(failed.RootID)
 	if err != nil {

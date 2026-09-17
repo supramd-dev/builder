@@ -12,6 +12,7 @@ package store
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -75,6 +76,14 @@ func openDB(dsn string) (*gorm.DB, error) {
 	case isPostgres(dsn):
 		db, err = gorm.Open(postgres.Open(dsn), gormCfg)
 	default:
+		// WAL + a busy timeout: the runner workers write concurrently with
+		// the API server; without these, concurrent writers fail with
+		// SQLITE_BUSY ("database is locked") instead of waiting briefly.
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		dsn += sep + "_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 		db, err = gorm.Open(sqlite.Open(dsn), gormCfg)
 	}
 	if err != nil {

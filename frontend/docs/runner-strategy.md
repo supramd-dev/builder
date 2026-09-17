@@ -152,8 +152,10 @@ lives server-side, the UI shows the tail.
 - `GET /api/tasks/{id}/log?after=<seq>` — log chunks after the given
   sequence (incremental, for live-following).
 
-The dashboard matrix cells link to the task detail for graphs that have
-not reported a run yet (queued / running / failed-before-report).
+The dashboard matrix cells link to the run detail whenever a run exists
+(placeholder runs cover every queued/running stage — see
+[Live runs](#live-runs-and-the-placeholder-lifecycle)); only a cell with
+no run at all falls back to the task detail.
 
 ## Report handling
 
@@ -197,6 +199,84 @@ attach to the case's own child run. Regression cases are nested runs, so
 this is the natural extension point: their per-case logs and series/plot
 data will be stored as `log` / `series` artifacts behind the same table
 and fetched by an "analyze" view in the browser.
+
+### Runs with and without a task link
+
+A run's `taskId` (and the derived `rootTaskId`) decides what its detail
+page can show. Two kinds of runs exist:
+
+- **Graph-linked runs** (`taskId ≠ 0`): reported by the runner, they carry
+  the stage sub-task's ID. Their detail page shows the stage's stdout log
+  (`GET /api/tasks/{taskId}/log`) and a breadcrumb link to the task graph;
+  the dashboard cell links to the run detail. Regression case **children**
+  carry their own case sub-task's ID, so each case row opens a run detail
+  with that case's log.
+- **External reports** (`taskId = 0`, `rootTaskId = 0`): a run recorded
+  without a task graph behind it — e.g. a CI system pushing its results
+  through the report API directly. There is no server-side task, hence no
+  stdout log and no graph page; the detail page shows only the run's own
+  summary, counts, artifacts and (for regression) the case list. The
+  dashboard cell links to the run detail as well, and falls back to the
+  task detail only when no run exists.
+
+## Live runs and the placeholder lifecycle
+
+A graph-linked run exists **before** its stage executes. At dispatch time
+the runner seeds a **placeholder run** per stage kind (status `pending`,
+linked to the stage's first sub-task via `taskId`; regression additionally
+gets one `pending` child run per preset, so the detail page lists every
+case from the start):
+
+```
+dispatch    claim          outcome
+pending  →  running    →   passed/failed (stage report)
+                         ↘ skipped      (an upstream stage failed)
+```
+
+- When the scheduler claims the stage sub-task, its placeholder flips
+  `pending → running` — the matrix cell shows the spinner and the run
+  detail page follows live (3 s run polling, 2 s log polling).
+- When the stage finishes, its report **replaces** the placeholder in
+  place (same row, every field overwritten): the status becomes terminal
+  and the log stops growing.
+- When an upstream stage fails, the skipped stage's placeholder is
+  replaced by a failed run whose summary starts with `skipped: …` (and the
+  regression children by skipped child runs). A placeholder that fails to
+  even build its stage script is closed out the same way.
+- The dashboard cell therefore links to the **run detail in every state**
+  (queued, running, passed, failed, skipped); the task graph is reachable
+  from there via the breadcrumb. Only cells without any run at all (a
+  stage not part of the graph, "—") have nothing to link to.
+- `pending`/`running` are the only non-terminal run statuses; anything
+  else is final until a re-dispatch resets it (the placeholder lifecycle
+  above starts over).
+
+## Demo seeds and frozen live graphs
+
+The `seed` subcommand populates a demo database with two kinds of graphs,
+which are also the reference for how the two scheduling modes behave:
+
+- **Finished graphs** (older commits): terminal tasks with log chunks, and
+  their runs reported with the matching `taskId` links. Nothing here is
+  claimable.
+- **Live graphs** (the newest commit): an in-flight snapshot — one graph
+  mid-build (clone done, build `running` with partial output, tests
+  queued), one fully queued. Their placeholder runs carry real task IDs,
+  so the matrix cells, run detail pages and log polling all behave exactly
+  like a genuine dispatch.
+
+The scheduler treats the live graphs like any other graph; the difference
+is entirely in how the demo is served:
+
+- With `MD_BUILDER_DISABLE_WORKER=1` the pool is off: the snapshot is
+  frozen forever — no task is ever claimed, placeholder runs stay
+  pending/running, logs stop growing. Use this for a stable demo.
+- With workers enabled, the pending stages of a live graph **are claimed
+  and genuinely executed** (and fail on the unreachable demo SSH host):
+  the placeholders flip through running to failed, dependents are skipped
+  and reported, and the root becomes failed. Note that a restart also
+  resets `running` tasks to pending (crash recovery), so a frozen
+  "running" demo becomes schedulable again whenever the pool is on.
 
 ## Prerequisites
 

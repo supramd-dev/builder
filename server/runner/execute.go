@@ -240,7 +240,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 
 	script, err := BuildScript(rc.scriptInput(nil, stage.Workdir, "", stage.Timeout))
 	if err != nil {
-		s.failTaskLogged(task, logw, err.Error())
+		s.failScriptBuild(task, logw, err.Error())
 		return
 	}
 
@@ -282,7 +282,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 
 	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, "", stage.Timeout))
 	if err != nil {
-		s.failTaskLogged(task, logw, err.Error())
+		s.failScriptBuild(task, logw, err.Error())
 		return
 	}
 
@@ -334,7 +334,7 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 
 	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, stage.Case, stage.Timeout))
 	if err != nil {
-		s.failTaskLogged(task, logw, err.Error())
+		s.failScriptBuild(task, logw, err.Error())
 		return
 	}
 
@@ -511,6 +511,9 @@ func (s *Service) finishCommandTask(task *store.Task, logw *LogWriter, exitCode 
 }
 
 // failTaskLogged marks a task failed and appends the reason to its log.
+// Callers that already recorded the stage's dashboard run (the normal
+// command-exit path) must use this — recording again here would overwrite
+// the outcome with a bare failure.
 func (s *Service) failTaskLogged(task *store.Task, logw *LogWriter, msg string) {
 	if cfg, err := s.Store.GetSiteConfig(); err == nil {
 		msg = Redact(msg, cfg.AccessToken)
@@ -519,6 +522,37 @@ func (s *Service) failTaskLogged(task *store.Task, logw *LogWriter, msg string) 
 	if err := s.Store.FinishTask(task.ID, store.TaskFailed, msg); err != nil {
 		log.Printf("runner: task %d: finish failed: %v", task.ID, err)
 	}
+}
+
+// failScriptBuild fails a stage whose remote script could not even be
+// generated (empty command, bad entry snapshot): nothing ran, so no run has
+// been recorded yet and the dispatch-time placeholder run (pending/running)
+// must be closed out here — otherwise the run detail page and matrix cell
+// spin on "running" forever.
+func (s *Service) failScriptBuild(task *store.Task, logw *LogWriter, msg string) {
+	s.failTaskLogged(task, logw, msg)
+	if task.Kind == store.TaskKindRegression {
+		// The case lands as a skipped child run under the regression run
+		// (UpsertCaseRun replaces the pending placeholder child); the
+		// aggregate then stops reading as in flight.
+		var stage CaseStageConfig
+		name := task.Name
+		if err := json.Unmarshal([]byte(task.Config), &stage); err == nil && stage.Case != "" {
+			name = stage.Case
+		}
+		if _, _, err := s.Store.UpsertCaseRun(&store.CaseRunInput{
+			EnvironmentID: task.EnvironmentID,
+			CommitID:      task.CommitID,
+			TaskID:        task.ID,
+			Name:          name,
+			Status:        store.StatusSkipped,
+			Message:       truncateSummary(msg),
+		}); err != nil {
+			log.Printf("runner: task %d: record failed case %s: %v", task.ID, name, err)
+		}
+		return
+	}
+	s.recordStageRun(task, store.StatusFailed, truncateSummary("task failed: "+msg), 0, 0, 0, nil)
 }
 
 func taskStart(task *store.Task) time.Time {

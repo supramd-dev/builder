@@ -604,6 +604,53 @@ func TestExecuteBuildFailureRecordsFailedBuildRun(t *testing.T) {
 	}
 }
 
+// TestExecuteBuildScriptBuildFailureClosesPlaceholderRun: a build stage whose
+// remote script cannot even be generated (the entry snapshot carries no build
+// command) must flip the dispatch-time placeholder run from pending/running
+// to failed — the old code failed the task but left the run "running", so the
+// matrix cell and run detail page spun forever.
+func TestExecuteBuildScriptBuildFailureClosesPlaceholderRun(t *testing.T) {
+	svc, s, _, _, cloneTask := newExecuteFixture(t, execYAML)
+	ctx := context.Background()
+	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
+		t.Fatal(err)
+	}
+	build, err := s.ClaimReadyTask()
+	if err != nil || build == nil || build.Kind != store.TaskKindBuild {
+		t.Fatalf("claim build: %v %v", build, err)
+	}
+
+	// The placeholder run exists from dispatch, pending.
+	envs := []int64{build.EnvironmentID}
+	commits := []int64{build.CommitID}
+	runs, _ := s.FindRunsByCommits(store.RunKindBuild, envs, commits)
+	if run, ok := runs[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]; !ok || run.Status != store.StatusPending {
+		t.Fatalf("placeholder build run should exist and be pending: %+v", run)
+	}
+
+	// An empty entry snapshot makes BuildScript fail ("build has no command"):
+	// empty the root's entry so rc.entry.Build.Command is blank.
+	if err := s.UpdateTaskConfig(build.RootID, "{}", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ExecuteTask(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := s.GetTask(build.ID)
+	if got.Status != store.TaskFailed {
+		t.Fatalf("build should be failed: %+v", got)
+	}
+	runs, _ = s.FindRunsByCommits(store.RunKindBuild, envs, commits)
+	run, ok := runs[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]
+	if !ok || run.Status != store.StatusFailed {
+		t.Fatalf("placeholder run should be failed after script-build error: %+v", run)
+	}
+	if !strings.Contains(run.Summary, "build has no command") {
+		t.Errorf("run summary should carry the reason: %q", run.Summary)
+	}
+}
+
 func TestExecuteStageFailureRecordsFailedRun(t *testing.T) {
 	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
 	// Make the unit stage fail (its script contains the command).
