@@ -51,6 +51,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/logout", s.handleLogout)
 	mux.HandleFunc("/api/me", s.handleMe)
 	mux.HandleFunc("/api/health", s.handleHealth)
+	// Deep health: the site-status board (git repo reachability, future
+	// object storage). Authenticated — the probes read site configuration.
+	mux.HandleFunc("/api/health/deep", s.requireAuth(s.handleHealthDeep))
 
 	// Site configuration (requires an authenticated user).
 	mux.HandleFunc("/api/site-config", s.requireAuth(s.handleSiteConfig))

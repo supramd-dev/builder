@@ -23,6 +23,8 @@ import { applySiteTimezone, subscribeTimezone } from './timezone'
 //                           redirects here)
 //   #/runs/:runId           test run detail (a regression case row opens
 //                           the child run's own detail page here)
+//   #/health                site health board (footer link): backend
+//                           liveness, git repository, object storage
 //
 // Signed-in pages read their ids from the URL (useParams) and link onward
 // with <Link> / useNavigate — no per-page navigation callbacks.
@@ -34,6 +36,7 @@ const UserCenter = lazy(() => import('./UserCenter'))
 const RunPage = lazy(() => import('./RunPage'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
 const DocsPage = lazy(() => import('./DocsPage'))
+const HealthPage = lazy(() => import('./HealthPage'))
 
 function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -123,6 +126,8 @@ function App() {
           </span>
           {me && (
             <span className="footer-nav">
+              <RRNavLink to="/health">Site health</RRNavLink>
+              {' · '}
               <RRNavLink to="/docs">Documentation</RRNavLink>
             </span>
           )}
@@ -185,6 +190,14 @@ function PageRoutes() {
       <Route path="/tasks/:taskId" element={<TaskPipelinePage />} />
       <Route path="/tasks/:taskId/log" element={<Navigate to="../" replace relative="path" />} />
       <Route path="/runs/:runId" element={<TestRunDetailPage onError={console.warn} />} />
+      <Route
+        path="/health"
+        element={
+          <Suspense fallback={<p className="text-muted">Loading…</p>}>
+            <HealthPage onError={console.warn} />
+          </Suspense>
+        }
+      />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

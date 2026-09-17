@@ -538,3 +538,30 @@ export interface ServerHealth {
 export async function getHealth(): Promise<ServerHealth> {
   return api<ServerHealth>('/api/health')
 }
+
+// --- Site health board ---
+
+// HealthCheck is one probe of the deep health endpoint: the git repository
+// reachability, the future object storage, ...
+export interface HealthCheck {
+  name: string
+  status: 'ok' | 'fail' | 'skipped'
+  target?: string
+  detail?: string
+  durationMillis: number
+}
+
+// DeepHealth is GET /api/health/deep: the liveness probe plus one row per
+// external dependency, probed on demand.
+export interface DeepHealth {
+  version?: string
+  checks: HealthCheck[]
+  checkedAt: string
+}
+
+// getDeepHealth runs the site's dependency probes (git repo, object
+// storage) and returns their outcomes. Requires a session.
+export async function getDeepHealth(): Promise<DeepHealth> {
+  return api<DeepHealth>('/api/health/deep')
+}
+
