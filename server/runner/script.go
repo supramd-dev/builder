@@ -80,25 +80,9 @@ func (in *ScriptInput) TimeoutOr(fallback int) int {
 	return fallback
 }
 
-// BuildScript renders the remote bash script for the build sub-task: the
-// shared preamble plus the build command (whatever the yaml author chose —
-// cmake, make, a script) in the configured workdir under `timeout`.
-func BuildScript(in *ScriptInput) (string, error) {
-	if in == nil || in.Entry == nil {
-		return "", fmt.Errorf("no entry config")
-	}
-	cmd := strings.TrimSpace(in.Entry.Build.Command)
-	if cmd == "" {
-		return "", fmt.Errorf("build has no command")
-	}
-	return renderScript(in, scriptBody{cmds: []string{
-		fmt.Sprintf("timeout %d bash -c %s", in.TimeoutOr(DefaultStageTimeoutSeconds), shq(cmd)),
-	}})
-}
-
-// BuildStageScript renders the remote bash script for a test sub-task
-// (unit / regression case): the shared preamble plus the command list in
-// the configured workdir. Each command runs under its own `timeout`
+// BuildStageScript renders the remote bash script for a stage sub-task
+// (build, unit, regression case): the shared preamble plus the command list
+// in the configured workdir. Each command runs under its own `timeout`
 // wrapper, chained with `&&`: a failing command stops the stage right
 // there (the remaining ones do not run) and its exit code becomes the
 // stage's exit code.

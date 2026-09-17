@@ -41,7 +41,7 @@ func TestParseExampleYAML(t *testing.T) {
 	if e1.Unit.Timeout != 600 {
 		t.Errorf("unit timeout should be 600, got %d", e1.Unit.Timeout)
 	}
-	if e1.Build.Workdir != "" || !strings.Contains(e1.Build.Command, "ENABLE_MPI=OFF") {
+	if e1.Build.Workdir != "" || !strings.Contains(e1.Build.Command.String(), "ENABLE_MPI=OFF") {
 		t.Errorf("entry 1 build wrong: %+v", e1.Build)
 	}
 	if e1.Env["CC"] != "gcc" || e1.Env["OMP_NUM_THREADS"] != "4" {
@@ -50,7 +50,7 @@ func TestParseExampleYAML(t *testing.T) {
 
 	// Entry 2: build in a workdir, all three presets.
 	e2 := entries[1]
-	if e2.Build.Workdir != "build" || !strings.Contains(e2.Build.Command, "ENABLE_MPI=ON") {
+	if e2.Build.Workdir != "build" || !strings.Contains(e2.Build.Command.String(), "ENABLE_MPI=ON") {
 		t.Errorf("entry 2 build wrong: %+v", e2.Build)
 	}
 	if len(e2.Regression) != 3 {
@@ -62,7 +62,7 @@ func TestParseExampleYAML(t *testing.T) {
 
 	// Entry 3: script build, all presets minus heat.
 	e3 := entries[2]
-	if e3.Build.Command != "$MD_CODE_DIR/build.sh --cuda -j8" || e3.Build.Workdir != "build" {
+	if e3.Build.Command.String() != "$MD_CODE_DIR/build.sh --cuda -j8" || e3.Build.Workdir != "build" {
 		t.Errorf("entry 3 build wrong: %+v", e3.Build)
 	}
 	if len(e3.Regression) != 2 || e3.Regression[0].Name != "eos-table" || e3.Regression[1].Name != "poisson" {

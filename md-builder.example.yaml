@@ -42,13 +42,21 @@ defaults:
     OMP_NUM_THREADS: "4"
 
   # Build defaults for every entry (same fields as matrix[].build).
-  # The build stage is just a shell command — there is no built-in cmake
+  # The build stage is a shell command — there is no built-in cmake
   # support: write the cmake (or make, ninja, script) invocation yourself.
+  # Like the test stages, the command may be a scalar string or a list
+  # (see the "Command lists" section of the docs): a list runs the
+  # entries in order, each under its own timeout wrapper, and the first
+  # failure fails the build.
   # artifacts (optional): files the build leaves behind that the runner
   # fetches back — stored on the build run, downloadable from its detail
   # page (individually or as one zip). Never parsed; display/download only.
   build:
     command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
+    # List form, equivalent to the scalar above:
+    #   command:
+    #     - cmake -DCMAKE_BUILD_TYPE=Release .
+    #     - cmake --build . -j8
     artifacts: "build/.ninja_log"          # a single path or a list
 
 # ---------------------------------------------------------------------------

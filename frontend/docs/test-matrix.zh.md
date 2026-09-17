@@ -83,12 +83,12 @@ matrix:
 | unit.artifacts                | 否       | 工件文件路径(或路径列表),runner 会在阶段结束后取回(见工件文件)。 |
 | unit.timeout                 | 否       | 覆盖默认值的阶段超时。                                              |
 
-构建阶段就是一条 shell 命令(没有内置的 cmake 支持 —— cmake/make/ninja/
-脚本调用自己写):
+构建阶段是一条 shell 命令 —— 或者像测试阶段一样是命令列表(没有内置的
+cmake 支持 —— cmake/make/ninja/脚本调用自己写):
 
 | 字段           | 说明                                                              |
 |----------------|-------------------------------------------------------------------|
-| build.command  | 编译代码的 shell 命令(必填 —— 条目或 defaults 提供)。             |
+| build.command  | 编译代码的 shell 命令(必填 —— 条目或 defaults 提供),或命令列表(见命令列表)。 |
 | build.workdir  | 命令运行目录(语义与 unit/presets 相同)。                         |
 | build.artifacts | 可选的文件路径(或列表):构建结束后 runner 取回并存到构建运行上,可在运行详情页下载。不做任何解析 —— 构建结论只看退出码。 |
 
@@ -160,7 +160,7 @@ clone 或 build 失败时,所有用例被记录为 **skipped**(⤼),备注为上
 
 ## 命令列表
 
-unit 阶段或回归预设的 `command` 可以是**单条命令,也可以是列表**:
+构建阶段、unit 阶段或回归预设的 `command` 都可以是**单条命令,也可以是列表**:
 
 ```yaml
 command: "make data && ctest -L unit"       # 标量:一条 bash -c 命令

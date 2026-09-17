@@ -86,12 +86,13 @@ matrix:
 | unit.artifacts               | no       | Artifact file path (or list) the runner fetches back (see Artifact files). |
 | unit.timeout                 | no       | Stage timeout overriding defaults.                                  |
 
-The build stage is one shell command (no built-in cmake support — write
-the cmake/make/ninja/script invocation yourself):
+The build stage is one shell command — or a list of them, like the
+test stages (no built-in cmake support — write the
+cmake/make/ninja/script invocation yourself):
 
 | Field          | Description                                                          |
 |----------------|----------------------------------------------------------------------|
-| build.command  | Shell command compiling the code (required — entry or defaults).     |
+| build.command  | Shell command compiling the code (required — entry or defaults), or a list of commands (see Command lists). |
 | build.workdir  | Directory the command runs in (same semantics as unit/presets).      |
 | build.artifacts | Optional file path (or list) the runner fetches back after the build and stores on the build run — downloadable from the run's detail page. Never parsed: the build verdict is its exit code alone. |
 
@@ -172,8 +173,8 @@ upstream error as its note.
 
 ## Command lists
 
-The `command` of a unit stage or a regression preset may be **one
-command or a list**:
+The `command` of the build stage, a unit stage or a regression preset
+may be **one command or a list**:
 
 ```yaml
 command: "make data && ctest -L unit"       # scalar: one bash -c line

@@ -645,9 +645,13 @@ func TestExecuteBuildScriptBuildFailureClosesPlaceholderRun(t *testing.T) {
 		t.Fatalf("placeholder build run should exist and be pending: %+v", run)
 	}
 
-	// An empty entry snapshot makes BuildScript fail ("build has no command"):
-	// empty the root's entry so rc.entry.Build.Command is blank.
-	if err := s.UpdateTaskConfig(build.RootID, "{}", ""); err != nil {
+	// An empty build snapshot makes BuildStageScript fail ("no stage
+	// command"): blank the build sub-task's config, then re-fetch the task so
+	// the executor sees the emptied snapshot.
+	if err := s.UpdateTaskConfig(build.ID, "{}", ""); err != nil {
+		t.Fatal(err)
+	}
+	if build, err = s.GetTask(build.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.ExecuteTask(ctx, build); err != nil {
@@ -663,7 +667,7 @@ func TestExecuteBuildScriptBuildFailureClosesPlaceholderRun(t *testing.T) {
 	if !ok || run.Status != store.StatusFailed {
 		t.Fatalf("placeholder run should be failed after script-build error: %+v", run)
 	}
-	if !strings.Contains(run.Summary, "build has no command") {
+	if !strings.Contains(run.Summary, "no stage command") {
 		t.Errorf("run summary should carry the reason: %q", run.Summary)
 	}
 }

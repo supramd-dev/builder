@@ -2,7 +2,6 @@ package runner
 
 import (
 	"fmt"
-	"strings"
 
 	"md-builder/server/store"
 )
@@ -52,9 +51,9 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 	// stored so the executor can export env vars. Test stages depend on
 	// build when present, else on clone.
 	testDep := store.TaskSubPlaceholderBase + 0 // clone
-	if cmd := strings.TrimSpace(entry.Build.Command); cmd != "" {
+	if !entry.Build.Command.IsEmpty() {
 		buildJSON, err := marshalJSON(BuildStageConfig{
-			Command:   cmd,
+			Command:   entry.Build.Command.Clean(),
 			Workdir:   entry.Build.Workdir,
 			Artifacts: entry.Build.Artifacts.Clean(),
 			Timeout:   resolveStageTimeout(0, entry),

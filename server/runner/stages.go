@@ -15,9 +15,11 @@ import (
 // place without a schema change.
 type CloneConfig struct{}
 
-// BuildStageConfig is the build sub-task snapshot.
+// BuildStageConfig is the build sub-task snapshot. Command is a CommandList
+// (legacy snapshots storing a single string still decode); the commands run
+// in order, stopping at the first failure, like the test stages.
 type BuildStageConfig struct {
-	Command   string            `json:"command"`             // the build command
+	Command   CommandList       `json:"command"`
 	Workdir   string            `json:"workdir,omitempty"`   // command workdir (empty = code dir)
 	Artifacts ArtifactPaths     `json:"artifacts,omitempty"` // files fetched back after the build (stored as-is)
 	Timeout   int               `json:"timeout"`             // seconds

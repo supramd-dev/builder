@@ -249,7 +249,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	logw := s.stageLogWriter(rc, task)
 	defer logw.Close()
 
-	script, err := BuildScript(rc.scriptInput(nil, stage.Workdir, "", stage.Timeout))
+	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, "", stage.Timeout))
 	if err != nil {
 		s.failScriptBuild(task, logw, err.Error())
 		return

@@ -202,9 +202,11 @@ func (r ArtifactPaths) Clean() ArtifactPaths {
 	return out
 }
 
-// BuildConfig describes the build stage of an entry.
+// BuildConfig describes the build stage of an entry. Like the test stages,
+// the command is a CommandList: one command or several, run in order and
+// stopping at the first failure.
 type BuildConfig struct {
-	Command   string        `yaml:"command,omitempty" json:"command,omitempty"`   // the build command
+	Command   CommandList   `yaml:"command,omitempty" json:"command,omitempty"`   // one build command or a list
 	Workdir   string        `yaml:"workdir,omitempty" json:"workdir,omitempty"`   // command workdir; empty = code dir
 	Artifacts ArtifactPaths `yaml:"artifacts,omitempty" json:"artifacts,omitempty"` // files the build produces and the runner fetches back (stored as-is; never parsed for counts)
 }
@@ -296,7 +298,7 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		if entry.Unit != nil && entry.Unit.Command.IsEmpty() {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d has unit without a command", i+1)
 		}
-		if strings.TrimSpace(entry.Build.Command) == "" && (raw.Defaults == nil || strings.TrimSpace(raw.Defaults.Build.Command) == "") {
+		if entry.Build.Command.IsEmpty() && (raw.Defaults == nil || raw.Defaults.Build.Command.IsEmpty()) {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d: build requires a command (entry or defaults.build)", i+1)
 		}
 
@@ -419,7 +421,7 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 
 	build := entry.Build
 	if defaults != nil {
-		if build.Command == "" {
+		if build.Command.IsEmpty() {
 			build.Command = defaults.Build.Command
 		}
 		if build.Workdir == "" {

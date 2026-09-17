@@ -14,7 +14,7 @@ func sampleEntry() *MergedEntry {
 		Tags:    []string{"cpu"},
 		Timeout: 300,
 		Env:     map[string]string{"CC": "gcc"},
-		Build:   BuildConfig{Command: "cmake -DX=1 . && cmake --build . -j4"},
+		Build:   BuildConfig{Command: CommandList{"cmake -DX=1 . && cmake --build . -j4"}},
 		Unit:    &EnvConfig{Command: CommandList{"ctest -L unit"}, Timeout: 100},
 		Regression: []RegressionCase{
 			{Name: "heat", Command: CommandList{"python3 run_heat.py"}, Timeout: 200},
@@ -65,7 +65,7 @@ func TestBuildTaskGraphShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(tasks[1].Config), &build); err != nil {
 		t.Fatal(err)
 	}
-	if build.Command != "cmake -DX=1 . && cmake --build . -j4" {
+	if build.Command.String() != "cmake -DX=1 . && cmake --build . -j4" {
 		t.Errorf("build snapshot wrong: %+v", build)
 	}
 	if build.Timeout != 300 || build.Env["CC"] != "gcc" {
@@ -128,7 +128,7 @@ func TestBuildTaskGraphArtifactsPassthrough(t *testing.T) {
 // it through verbatim; no recipe is generated server-side.
 func TestBuildTaskGraphBuildCommandPassthrough(t *testing.T) {
 	entry := sampleEntry()
-	entry.Build = BuildConfig{Command: "./build.sh --cuda"}
+	entry.Build = BuildConfig{Command: CommandList{"./build.sh --cuda"}}
 	entry.Regression = nil
 	tasks, err := BuildTaskGraph(entry)
 	if err != nil {
@@ -141,7 +141,7 @@ func TestBuildTaskGraphBuildCommandPassthrough(t *testing.T) {
 	if err := json.Unmarshal([]byte(tasks[1].Config), &build); err != nil {
 		t.Fatal(err)
 	}
-	if build.Command != "./build.sh --cuda" {
+	if build.Command.String() != "./build.sh --cuda" {
 		t.Errorf("build snapshot wrong: %+v", build)
 	}
 }
@@ -173,19 +173,20 @@ func TestBuildTaskGraphNil(t *testing.T) {
 	}
 }
 
-// The build command runs verbatim under timeout, in the workdir like any
+// The build commands run verbatim under timeout, in the workdir like any
 // other stage (an out-of-source cmake is just `cmake <src>` written by hand).
 func TestBuildScript(t *testing.T) {
 	in := &ScriptInput{
-		CommitSHA: "abcdef123456",
-		EnvName:   "cpu-node",
-		EnvTags:   "cpu",
-		TaskDir:   "$HOME/.md-builder/tasks/abcdef123456",
-		CodeDir:   "$HOME/.md-builder/tasks/abcdef123456/code",
-		Entry:     sampleEntry(),
-		Timeout:   120,
+		CommitSHA:    "abcdef123456",
+		EnvName:      "cpu-node",
+		EnvTags:      "cpu",
+		TaskDir:      "$HOME/.md-builder/tasks/abcdef123456",
+		CodeDir:      "$HOME/.md-builder/tasks/abcdef123456/code",
+		Entry:        sampleEntry(),
+		StageCommand: sampleEntry().Build.Command,
+		Timeout:      120,
 	}
-	script, err := BuildScript(in)
+	script, err := BuildStageScript(in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,23 +207,26 @@ func TestBuildScript(t *testing.T) {
 // A build command with a workdir runs there — the same workdir semantics
 // as unit/regression stages.
 func TestBuildScriptWorkdir(t *testing.T) {
-	in := &ScriptInput{
-		TaskDir: "$HOME/.md-builder/tasks/abcdef123456",
-		CodeDir: "$HOME/.md-builder/tasks/abcdef123456/code",
-		Entry: &MergedEntry{
-			Tags:  []string{"cpu"},
-			Build: BuildConfig{Command: `cmake "$MD_CODE_DIR" && cmake --build .`},
-		},
-		Workdir: "build",
-		Timeout: 120,
+	entry := &MergedEntry{
+		Tags:  []string{"cpu"},
+		Build: BuildConfig{Command: CommandList{`cmake "$MD_CODE_DIR"`, "cmake --build ."}},
 	}
-	script, err := BuildScript(in)
+	in := &ScriptInput{
+		TaskDir:      "$HOME/.md-builder/tasks/abcdef123456",
+		CodeDir:      "$HOME/.md-builder/tasks/abcdef123456/code",
+		Entry:        entry,
+		StageCommand: entry.Build.Command,
+		Workdir:      "build",
+		Timeout:      120,
+	}
+	script, err := BuildStageScript(in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
 		`cd "$MD_CODE_DIR/build" || exit 1`,
-		`timeout 120 bash -c 'cmake "$MD_CODE_DIR" && cmake --build .'`,
+		`timeout 120 bash -c 'cmake "$MD_CODE_DIR"' && \`,
+		`timeout 120 bash -c 'cmake --build .'`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("workdir build script missing %q:\n%s", want, script)

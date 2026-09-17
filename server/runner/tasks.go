@@ -214,7 +214,7 @@ func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnviron
 		Tags:    env.TagList(),
 		Timeout: DefaultTimeoutSeconds,
 		Build: BuildConfig{
-			Command: strings.TrimSpace(in.BuildCommand),
+			Command: CommandList{strings.TrimSpace(in.BuildCommand)},
 		},
 	}
 	if cmd := strings.TrimSpace(in.UnitCommand); cmd != "" {
