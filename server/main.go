@@ -22,6 +22,11 @@ import (
 
 const listenAddr = ":8080"
 
+// version is the build's source revision, embedded at link time (see the
+// Makefile's build-server target): -ldflags "-X main.version=<git describe>".
+// "dev" means a plain `go build` without the stamp.
+var version = "dev"
+
 // defaultDSN determines the database DSN: MD_BUILDER_DSN env var first, then
 // a sensible SQLite file location.
 func defaultDSN() string {
@@ -81,6 +86,7 @@ func main() {
 
 	// --- JSON API (auth) ---
 	apiServer := api.New(s)
+	apiServer.Version = version
 	apiServer.Register(mux)
 	apiServer.SetRunner(runnerSvc)
 
@@ -102,8 +108,8 @@ func main() {
 		http.ServeFile(w, r, distDir+"/index.html")
 	})
 
-	log.Printf("md-builder listening on http://localhost%s (dist: %s, db: %s)",
-		listenAddr, distDir, defaultDSN())
+	log.Printf("md-builder %s listening on http://localhost%s (dist: %s, db: %s)",
+		version, listenAddr, distDir, defaultDSN())
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
 	}

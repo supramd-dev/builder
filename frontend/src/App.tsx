@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { HashRouter, NavLink as RRNavLink, Navigate, Route, Routes, useLocation } from 'react-router'
 import './App.css'
-import { api, cachedSiteConfig, type Me } from './api'
+import { api, cachedSiteConfig, getHealth, type Me } from './api'
 import LoginPage from './LoginPage'
 import DashboardPage from './DashboardPage'
 import TaskPipelinePage from './TaskPipelinePage'
@@ -41,6 +41,15 @@ function App() {
   // Bumped when the display timezone changes so every page re-renders its
   // timestamps (the formatters read the module-level state directly).
   const [, setTimezoneTick] = useState(0)
+  // The served build's source revision, shown in the footer. The health
+  // probe is unauthenticated, so the version renders even on the login page.
+  const [version, setVersion] = useState('')
+
+  useEffect(() => {
+    getHealth()
+      .then((h) => setVersion(h.version ?? ''))
+      .catch(() => {}) // offline: the footer simply shows no version
+  }, [])
 
   // Check for an existing session on mount.
   useEffect(() => {
@@ -105,6 +114,12 @@ function App() {
         <footer className="container">
           <span className="text-muted">
             md-builder · Scientific computing test platform
+            {version && (
+              <>
+                {' · '}
+                <code style={{ fontSize: '0.85em' }}>{version}</code>
+              </>
+            )}
           </span>
           {me && (
             <span className="footer-nav">

@@ -517,3 +517,15 @@ export async function getTaskLogs(
 ): Promise<TaskLogs> {
   return api<TaskLogs>(`/api/tasks/${id}/log?after=${after}`)
 }
+
+// ServerHealth is the unauthenticated health probe; version is the served
+// build's source revision (git commit id, "dev" for an unstamped build).
+export interface ServerHealth {
+  status: string
+  version?: string
+}
+
+// getHealth fetches the server health/version (no session needed).
+export async function getHealth(): Promise<ServerHealth> {
+  return api<ServerHealth>('/api/health')
+}

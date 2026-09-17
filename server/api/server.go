@@ -24,6 +24,10 @@ const (
 type Server struct {
 	Store *store.Store
 
+	// Version is the served build's source revision (git commit id), shown
+	// in the frontend footer. Injected by main; empty = unknown.
+	Version string
+
 	// Runner, when non-nil, creates task graphs for pushed commits
 	// (webhook) and manual triggers. Injected by main so API tests can run
 	// without it or with a fake executor.
@@ -77,7 +81,7 @@ func (s *Server) Register(mux *http.ServeMux) {
 // --- handlers ---
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": s.Version})
 }
 
 type loginRequest struct {

@@ -1,4 +1,4 @@
-.PHONY: dev-frontend dev-backend build serve test smoke-test seed-demo clean adduser seed
+.PHONY: dev-frontend dev-backend build build-server serve test smoke-test seed-demo clean adduser seed
 
 # --- Frontend (Vite dev server, hot reload, :5173) ---
 dev-frontend:
@@ -10,6 +10,12 @@ dev-backend:
 
 build:
 	cd frontend && npm run build
+
+# build-server compiles the backend with the source revision stamped in
+# (shown in the web footer via /api/health). The git command fails cleanly
+# outside a git checkout — the binary then reports the fallback version.
+build-server: build
+	cd server && go build -ldflags "-X main.version=$$(git -C .. describe --always --dirty 2>/dev/null || echo dev)" -o md-builder .
 
 serve: build
 	cd server && go run .
