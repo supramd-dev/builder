@@ -334,6 +334,46 @@ Any file the build leaves behind works — logs, `compile_commands.json`,
 size reports. As with the test stages, paths are relative to the build's
 workdir and each file is capped at 8 MiB at fetch time.
 
+### Plot artifacts (`*.plot.json`)
+
+A regression case's artifacts may include **plot figures**: files whose
+name ends in `.plot.json` and whose content is a [Plotly] figure
+document — a `data` array of traces plus an optional `layout` object:
+
+```yaml
+presets:
+  heat:
+    command: "python3 run_heat.py --plot drift.plot.json"
+    workdir: "regression/heat"
+    artifacts: "drift.plot.json"
+```
+
+```json
+{
+  "data": [
+    { "x": [1, 2, 3], "y": [2, 6, 3], "type": "scatter", "mode": "lines+markers" }
+  ],
+  "layout": { "width": 320, "height": 240, "title": "A Fancy Plot" }
+}
+```
+
+When you open the case's run detail page, every `*.plot.json` artifact
+is fetched and rendered as an interactive chart (zoom, hover, legend
+toggle — the standard Plotly toolbar). The document is passed through
+almost verbatim: every [Plotly trace type] (scatter, bar, heatmap, 3D
+surface, …) works, and the file's `layout` wins over the defaults —
+including `layout.height` (capped at 1200 px; the width is always
+responsive). A malformed file shows its error inline and still downloads
+from the artifacts table.
+
+[Plotly]: https://plotly.com/javascript/
+[Plotly trace type]: https://plotly.com/javascript/chart-studio/
+
+Plot files are ordinary artifacts otherwise: stored verbatim, capped at
+8 MiB, downloaded with the zip bundle, and irrelevant to the case's
+verdict (the exit code decides, as always). They also work on unit and
+build runs — the detail page charts them wherever they appear.
+
 ### Downloading artifacts
 
 Every stored artifact of a run (build files, unit/regression results

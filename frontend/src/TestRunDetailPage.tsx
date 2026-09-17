@@ -11,6 +11,7 @@ import MessageDialog from './MessageDialog'
 import TaskLogView from './TaskLogView'
 import { formatTime } from './timezone'
 import { Breadcrumbs } from './Breadcrumbs'
+import PlotSection from './plot/PlotSection'
 
 interface Props {
   onError: (message: string) => void
@@ -176,6 +177,10 @@ export default function TestRunDetailPage({ onError }: Props) {
           (never parsed), results files (parsed in the browser below) —
           each downloadable; the whole bundle as one zip. */}
       {!inFlight && run.artifacts.length > 0 && <ArtifactsSection run={run} />}
+
+      {/* Plot artifacts (*.plot.json): one interactive Plotly chart per
+          file, fetched and rendered client-side like the results files. */}
+      {!inFlight && <PlotSection artifacts={run.artifacts} onError={onError} />}
 
       {/* Unit runs parse their results file in the browser (nothing stored
           while the stage is still executing). */}

@@ -306,6 +306,42 @@ build:
 告。与测试阶段相同,路径相对于 build 的 workdir,每个文件取回时以
 8 MiB 为上限。
 
+### 绘图工件(`*.plot.json`)
+
+回归用例的 artifacts 里可以包含**绘图图表**:文件名以 `.plot.json`
+结尾、内容是一个 [Plotly] 图表文档 —— `data` 轨迹数组加可选的
+`layout` 对象:
+
+```yaml
+presets:
+  heat:
+    command: "python3 run_heat.py --plot drift.plot.json"
+    workdir: "regression/heat"
+    artifacts: "drift.plot.json"
+```
+
+```json
+{
+  "data": [
+    { "x": [1, 2, 3], "y": [2, 6, 3], "type": "scatter", "mode": "lines+markers" }
+  ],
+  "layout": { "width": 320, "height": 240, "title": "A Fancy Plot" }
+}
+```
+
+打开用例的运行详情页时,每个 `*.plot.json` 工件都会被取回并渲染为
+可交互的图表(缩放、悬浮、图例开关 —— 标准的 Plotly 工具栏)。文档
+几乎原样透传:[Plotly 支持的每种轨迹类型](https://plotly.com/javascript/)
+(scatter、bar、heatmap、3D surface 等)都可用;文件里的 `layout`
+优先于默认值 —— 包括 `layout.height`(上限 1200 像素;宽度始终自适
+应)。格式坏的文件在页面内显示错误信息,仍可从工件表下载。
+
+绘图文件在其他方面就是普通工件:原样存储、8 MiB 上限、随 zip 一起
+下载,且与用例的判定无关(退出码说了算,一如既往)。unit 和 build
+运行同样支持 —— 详情页遇到它们就会画图。
+
+[Plotly]: https://plotly.com/javascript/
+
 ### 下载工件
 
 运行(构建文件、unit / 回归结果文件)的每个已存储工件都可以在运行

@@ -1333,3 +1333,10 @@ code {
 .note-expand:hover {
   color: var(--fg, inherit);
 }
+
+/* Run detail: one rendered *.plot.json figure. The chart is responsive
+   (useResizeHandler + width 100%); the wrapper just keeps the file label
+   and successive figures from crowding. */
+.plot-figure {
+  margin-bottom: 1rem;
+}
