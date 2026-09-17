@@ -2,12 +2,14 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // YAMLFetcher returns the md-builder.yaml contents at a specific commit of the
@@ -60,6 +62,11 @@ func GitYAMLFetcher(codeRepoURL, sha string, creds *GitCredentials) ([]byte, err
 	}
 	entry, err := tree.File(YAMLPath)
 	if err != nil {
+		if errors.Is(err, object.ErrFileNotFound) {
+			// The most common dispatch failure: the yaml is simply absent at
+			// that commit. Spell out where it was looked for and what to do.
+			return nil, fmt.Errorf("%s:%s: file not found — commit the md-builder.yaml to the repository root (site config code repo %s)", sha, YAMLPath, codeRepoURL)
+		}
 		return nil, fmt.Errorf("%s:%s: %w", sha, YAMLPath, err)
 	}
 	content, err := entry.Contents()

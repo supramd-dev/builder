@@ -1,13 +1,18 @@
 // Minimal API client. Cookies (session token) are sent automatically since
 // /api is same-origin (via the Vite dev proxy or the Go server).
+// Dispatch endpoints (manual, manual-yaml, webhook replays) carry the
+// failure reason in `dispatchError` while still returning partial results
+// (e.g. the recorded commit) — prefer `error`, fall back to `dispatchError`.
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })
-  const data = (await res.json().catch(() => null)) as (T & { error?: string }) | null
+  const data = (await res.json().catch(() => null)) as
+    | (T & { error?: string; dispatchError?: string })
+    | null
   if (!res.ok) {
-    throw new Error(data?.error || `Request failed (${res.status})`)
+    throw new Error(data?.error || data?.dispatchError || `Request failed (${res.status})`)
   }
   return data as T
 }
