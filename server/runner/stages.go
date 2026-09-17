@@ -17,10 +17,11 @@ type CloneConfig struct{}
 
 // BuildStageConfig is the build sub-task snapshot.
 type BuildStageConfig struct {
-	Command string            `json:"command"`           // the build command
-	Workdir string            `json:"workdir,omitempty"` // command workdir (empty = code dir)
-	Timeout int               `json:"timeout"`           // seconds
-	Env     map[string]string `json:"env,omitempty"`     // exported for the stage
+	Command   string            `json:"command"`             // the build command
+	Workdir   string            `json:"workdir,omitempty"`   // command workdir (empty = code dir)
+	Artifacts ArtifactPaths     `json:"artifacts,omitempty"` // files fetched back after the build (stored as-is)
+	Timeout   int               `json:"timeout"`             // seconds
+	Env       map[string]string `json:"env,omitempty"`       // exported for the stage
 }
 
 // StageConfig is the unit sub-task snapshot: the command list with its

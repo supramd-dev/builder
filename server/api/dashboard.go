@@ -1,10 +1,12 @@
 package api
 
 import (
+	"archive/zip"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -601,21 +603,34 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 }
 
 // handleTestRunItem routes GET /api/test-runs/{id} — the detail view of one
-// run, including its case results.
+// run, including its case results — and GET /api/test-runs/{id}/artifacts/zip,
+// a download bundle of the run's artifacts (children included).
 func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	rest := strings.TrimPrefix(r.URL.Path, "/api/test-runs/")
-	if rest == "" || strings.Contains(rest, "/") {
+	if rest == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
-	id, err := strconv.ParseInt(rest, 10, 64)
+	idStr, sub := rest, ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		idStr, sub = rest[:i], rest[i+1:]
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid run id"})
 		return
 	}
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if sub == "artifacts/zip" {
+		s.downloadRunArtifactsZip(w, r, id)
+		return
+	}
+	if sub != "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
 
@@ -762,7 +777,8 @@ type runDetailJSON struct {
 // handleTestArtifact routes GET /api/test-artifacts/{id} — one stored
 // artifact's raw content (the run detail lists references only; this is the
 // fetch entry point for the browser-side results parsing and the future
-// regression "analyze" view).
+// regression "analyze" view) — and GET /api/test-artifacts/{id}/download,
+// the same bytes as a file download.
 func (s *Server) handleTestArtifact(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	if r.Method != http.MethodGet {
@@ -770,9 +786,25 @@ func (s *Server) handleTestArtifact(w http.ResponseWriter, r *http.Request, user
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/api/test-artifacts/")
-	id, err := strconv.ParseInt(rest, 10, 64)
+	if rest == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	idStr, sub := rest, ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		idStr, sub = rest[:i], rest[i+1:]
+	}
+	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil || id <= 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid artifact id"})
+		return
+	}
+	if sub == "download" {
+		s.downloadArtifact(w, r, id)
+		return
+	}
+	if sub != "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
 	a, err := s.Store.GetArtifact(id)
@@ -792,6 +824,149 @@ func (s *Server) handleTestArtifact(w http.ResponseWriter, r *http.Request, user
 		"name":    a.Name,
 		"content": a.Content,
 	})
+}
+
+// downloadArtifact streams one artifact as a file download. The name is the
+// artifact's path basename (artifact names are remote paths like
+// "build/test_detail.xml"); an empty or dotted name falls back to a
+// kind-based default so the browser always gets a sensible filename.
+func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request, id int64) {
+	a, err := s.Store.GetArtifact(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "artifact not found"})
+			return
+		}
+		log.Printf("artifact download: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	name := artifactDownloadName(a, id)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	w.Header().Set("Content-Length", strconv.Itoa(len(a.Content)))
+	if r.Method == http.MethodGet {
+		_, _ = w.Write([]byte(a.Content))
+	}
+}
+
+// artifactDownloadName derives a safe download filename: the source path's
+// basename, ASCII-only, never "." / ".." / empty.
+func artifactDownloadName(a *store.TestArtifact, id int64) string {
+	base := path.Base(strings.TrimSpace(a.Name))
+	base = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '.' || r == '-' || r == '_' || r == '+':
+			return r
+		default:
+			return '-'
+		}
+	}, base)
+	if base == "" || base == "." || base == ".." || strings.Trim(base, ".-") == "" {
+		return fmt.Sprintf("artifact-%d.%s.txt", id, a.Kind)
+	}
+	return base
+}
+
+// downloadRunArtifactsZip streams one zip of the run's artifacts: the run's
+// own at the archive root, regression child runs' under cases/<case name>/.
+// Runs with no artifacts anywhere get a 404 JSON error (an empty archive
+// would look like success).
+func (s *Server) downloadRunArtifactsZip(w http.ResponseWriter, r *http.Request, runID int64) {
+	if _, err := s.Store.GetTestRun(runID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "test run not found"})
+			return
+		}
+		log.Printf("run artifacts zip: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	byRun, err := s.Store.ListRunArtifactsDeep(runID)
+	if err != nil {
+		log.Printf("run artifacts zip: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	children, err := s.Store.ListChildRuns(runID)
+	if err != nil {
+		log.Printf("run artifacts zip: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
+	total := 0
+	for _, list := range byRun {
+		total += len(list)
+	}
+	if total == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "run has no artifacts"})
+		return
+	}
+
+	// Archive layout: the run's own files at the root, each child run's under
+	// cases/<case name>/ (the names children carry are the preset names).
+	nameOf := make(map[int64]string, len(children))
+	for i := range children {
+		nameOf[children[i].ID] = children[i].Name
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("run-%d-artifacts.zip", runID)))
+	zw := zip.NewWriter(w)
+	used := map[string]int{}
+	add := func(name string, content string) {
+		// Two artifacts with the same basename (the path prefix was the only
+		// difference) must not overwrite each other: suffix " (2)", " (3)".
+		key := strings.ToLower(name)
+		n := used[key]
+		used[key] = n + 1
+		if n > 0 {
+			ext := path.Ext(name)
+			stem := strings.TrimSuffix(name, ext)
+			name = fmt.Sprintf("%s (%d)%s", stem, n+1, ext)
+		}
+		fw, err := zw.Create(name)
+		if err != nil {
+			return // a single bad entry must not abort the stream mid-way
+		}
+		_, _ = fw.Write([]byte(content))
+	}
+	for i := range byRun[runID] {
+		a := byRun[runID][i]
+		add(artifactDownloadName(&a, a.ID), a.Content)
+	}
+	for i := range children {
+		c := children[i]
+		for j := range byRun[c.ID] {
+			a := byRun[c.ID][j]
+			add(path.Join("cases", sanitizeZipSegment(c.Name), artifactDownloadName(&a, a.ID)), a.Content)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		log.Printf("run artifacts zip: close: %v", err) // headers already sent; the client sees a truncated zip
+	}
+}
+
+// sanitizeZipSegment makes a child-run (case) name safe as one zip path
+// segment: separators and empty/dotted segments collapse to "case".
+func sanitizeZipSegment(name string) string {
+	s := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '.' || r == '-' || r == '_' || r == '+' || r == ' ':
+			return r
+		default:
+			return '-'
+		}
+	}, strings.TrimSpace(name))
+	if s == "" || s == "." || s == ".." || strings.Trim(s, ".- ") == "" {
+		return "case"
+	}
+	return s
 }
 
 // --- helpers ---

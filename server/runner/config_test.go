@@ -342,3 +342,32 @@ matrix:
 		t.Errorf("empty command list should fail validation: %v", err)
 	}
 }
+
+func TestParseConfigV2BuildArtifacts(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make -C src"
+    artifacts: "build/.ninja_log"
+matrix:
+  - tags: [cpu]
+    build:
+      command: "ninja"
+      artifacts: ["build/.ninja_log", "build/compile_commands.json"]
+    unit:
+      command: "ctest"
+  - tags: [gpu]
+    unit:
+      command: "ctest"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entries[0].Build.Artifacts; len(got) != 2 || got[0] != "build/.ninja_log" || got[1] != "build/compile_commands.json" {
+		t.Errorf("entry build artifacts should win: %v", got)
+	}
+	// No entry value: defaults.build.artifacts applies.
+	if got := entries[1].Build.Artifacts; len(got) != 1 || got[0] != "build/.ninja_log" {
+		t.Errorf("defaults build artifacts should apply: %v", got)
+	}
+}

@@ -18,11 +18,13 @@ const (
 	ArtifactKindResults = "results" // unit/regression result file (gtest XML/JSON)
 	ArtifactKindLog     = "log"     // per-case log (regression; reserved)
 	ArtifactKindSeries  = "series"  // per-case series/plot data (regression; reserved)
+	ArtifactKindFile    = "file"    // raw file fetched back as-is (build artifacts); never parsed
 )
 
 // ArtifactKindValid returns whether kind is a supported artifact kind.
 func ArtifactKindValid(kind string) bool {
-	return kind == ArtifactKindResults || kind == ArtifactKindLog || kind == ArtifactKindSeries
+	return kind == ArtifactKindResults || kind == ArtifactKindLog ||
+		kind == ArtifactKindSeries || kind == ArtifactKindFile
 }
 
 // TestArtifact is one stored file of one run (top-level or child — a child
@@ -61,6 +63,30 @@ func (s *Store) GetArtifact(id int64) (*TestArtifact, error) {
 		return nil, err
 	}
 	return &a, nil
+}
+
+// ListRunArtifactsDeep returns a run's artifacts plus every child run's
+// (regression cases carry their own). The map keys are the owning run ids;
+// the parent's entry is present even when empty so callers can distinguish
+// "no artifacts anywhere" from "run not found".
+func (s *Store) ListRunArtifactsDeep(runID int64) (map[int64][]TestArtifact, error) {
+	runIDs := []int64{runID}
+	var children []TestRun
+	if err := s.DB.Where("parent_id = ?", runID).Order("id ASC").Find(&children).Error; err != nil {
+		return nil, err
+	}
+	for _, c := range children {
+		runIDs = append(runIDs, c.ID)
+	}
+	var all []TestArtifact
+	if err := s.DB.Where("run_id IN ?", runIDs).Order("id ASC").Find(&all).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[int64][]TestArtifact, len(runIDs))
+	for i := range all {
+		out[all[i].RunID] = append(out[all[i].RunID], all[i])
+	}
+	return out, nil
 }
 
 // replaceRunArtifacts swaps a run's artifacts for the submitted list (the

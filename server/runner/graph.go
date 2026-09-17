@@ -54,10 +54,11 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 	testDep := store.TaskSubPlaceholderBase + 0 // clone
 	if cmd := strings.TrimSpace(entry.Build.Command); cmd != "" {
 		buildJSON, err := marshalJSON(BuildStageConfig{
-			Command: cmd,
-			Workdir: entry.Build.Workdir,
-			Timeout: resolveStageTimeout(0, entry),
-			Env:     entry.Env,
+			Command:   cmd,
+			Workdir:   entry.Build.Workdir,
+			Artifacts: entry.Build.Artifacts.Clean(),
+			Timeout:   resolveStageTimeout(0, entry),
+			Env:       entry.Env,
 		})
 		if err != nil {
 			return nil, err

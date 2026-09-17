@@ -172,6 +172,11 @@ export default function TestRunDetailPage({ onError }: Props) {
 
       {run.summary && <pre className="dash-run-summary">{run.summary}</pre>}
 
+      {/* Every stored artifact of the run, whatever its kind: build files
+          (never parsed), results files (parsed in the browser below) —
+          each downloadable; the whole bundle as one zip. */}
+      {!inFlight && run.artifacts.length > 0 && <ArtifactsSection run={run} />}
+
       {/* Unit runs parse their results file in the browser (nothing stored
           while the stage is still executing). */}
       {!inFlight && run.kind !== 'regression' && <ResultsFileSection run={run} onError={onError} />}
@@ -214,6 +219,63 @@ export default function TestRunDetailPage({ onError }: Props) {
       )}
     </div>
   )
+}
+
+// ArtifactsSection lists every stored artifact of the run (build files,
+// results files, future logs/series) with a per-file download link and one
+// zip bundling them all — the run's own plus its regression children's
+// (the backend packs children under cases/<name>/).
+function ArtifactsSection({ run }: { run: TestRunDetail }) {
+  if (run.artifacts.length === 0) return null
+  return (
+    <section>
+      <h3 className="task-section-title">
+        Artifacts{' '}
+        <span className="text-muted" style={{ fontWeight: 400 }}>
+          ({run.artifacts.length} file{run.artifacts.length === 1 ? '' : 's'})
+        </span>
+      </h3>
+      <table className="table" style={{ marginBottom: '0.5rem' }}>
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Kind</th>
+            <th>Size</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {run.artifacts.map((a) => (
+            <tr key={a.id}>
+              <td>
+                <code>{a.name}</code>
+              </td>
+              <td className="text-muted">{a.kind}</td>
+              <td className="text-muted">{formatBytes(a.size)}</td>
+              <td style={{ textAlign: 'right' }}>
+                <a href={`/api/test-artifacts/${a.id}/download`}>Download</a>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {run.artifacts.length > 1 && (
+        <p style={{ marginBottom: '1rem' }}>
+          <a href={`/api/test-runs/${run.id}/artifacts/zip`}>Download all as zip</a>
+          {run.cases.length > 0 && (
+            <span className="text-muted"> (includes every case's files)</span>
+          )}
+        </p>
+      )}
+    </section>
+  )
+}
+
+// formatBytes renders a byte count the way file listings do.
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KiB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MiB`
 }
 
 // ResultsFileSection fetches every stored results file of the run and

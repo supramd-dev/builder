@@ -212,6 +212,31 @@ hwIDAQAB
 		}}
 	}
 
+	// buildFiles mirrors the runner's build path (executeBuild): the
+	// configured artifact files are fetched back verbatim as file-kind
+	// artifacts — stored as-is, never parsed for counts. A ninja log plus
+	// the compile commands database make a realistic download bundle.
+	buildFiles := func(names ...string) []store.ArtifactInput {
+		out := make([]store.ArtifactInput, 0, len(names))
+		for _, n := range names {
+			var content string
+			switch n {
+			case "build/.ninja_log":
+				content = "# ninja log\n5\t10\t0\tcmake\ta1b2c3\n12\t48\t1\tlink\td4e5f6\n"
+			case "build/compile_commands.json":
+				content = "[\n  {\n    \"directory\": \"/tmp/md/code/build\",\n    \"command\": \"/usr/bin/c++ -O2 src/md.cc -o md.o\",\n    \"file\": \"../src/md.cc\"\n  }\n]\n"
+			default:
+				content = "md-builder demo build artifact: " + n + "\n"
+			}
+			out = append(out, store.ArtifactInput{
+				Kind:    store.ArtifactKindFile,
+				Name:    n,
+				Content: content,
+			})
+		}
+		return out
+	}
+
 	cpu, gpu, mpi := envs[0].ID, envs[1].ID, envs[2].ID
 	c1, c2, c3, c4, c5 := commits[0].ID, commits[1].ID, commits[2].ID, commits[3].ID, commits[4].ID
 
@@ -223,7 +248,7 @@ hwIDAQAB
 	report(gpu, c1, store.RunKindRegression, "all 3 regression cases within tolerance", 95*time.Hour, reg("passed", "passed", "passed"), "")
 	report(cpu, c1, store.RunKindUnit, "all 4 unit tests passed", 95*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
 	report(gpu, c1, store.RunKindUnit, "all 4 unit tests passed", 95*time.Hour, nil, store.StatusPassed, unit("passed", "passed", "passed", "passed")...)
-	report(cpu, c1, store.RunKindBuild, "build ok (cmake+ninja, 41s)", 96*time.Hour, nil, "")
+	report(cpu, c1, store.RunKindBuild, "build ok (cmake+ninja, 41s)", 96*time.Hour, nil, "", buildFiles("build/.ninja_log", "build/compile_commands.json")...)
 	report(gpu, c1, store.RunKindBuild, "build ok with CUDA arch sm_80 (8m12s)", 96*time.Hour, nil, "")
 
 	// b222222: a unit regression on the MPI cluster; the GPU build fails so

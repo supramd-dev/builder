@@ -114,6 +114,10 @@ Artifact 归属产出它的运行:单元测试运行的结果文件挂在单元�
 
 `GET /api/test-artifacts/{id}` 返回单个 artifact 的原始 `content` ——
 浏览器端的结果解析和后续回归的"分析"视图都从这里取数。
+`GET /api/test-artifacts/{id}/download` 以文件下载(Content-Disposition
+附件)形式返回同样的字节;`GET /api/test-runs/{id}/artifacts/zip` 把该
+运行的全部工件 —— 自身的加上所有子运行的(回运用例在
+`cases/<名称>/` 下)—— 打包成一个 zip。
 
 ## 脚本执行(交互式)
 
@@ -225,6 +229,8 @@ source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。�
 | POST   | `/api/test-runs`                | 报告测试运行结果                              |
 | GET    | `/api/test-runs/{id}`           | 单次运行详情:用例、计数、artifact            |
 | GET    | `/api/test-artifacts/{id}`      | 单个存储 artifact 的原始内容                 |
+| GET    | `/api/test-artifacts/{id}/download` | 单个 artifact 以文件下载               |
+| GET    | `/api/test-runs/{id}/artifacts/zip` | 一个运行的全部工件(含子运行)打成 zip |
 | POST   | `/api/jobs`                     | 手动重新派发某提交的任务图(webhook 方式,读取 YAML) |
 | POST   | `/api/jobs/manual`              | 派发自定义测试(仓库、ref、阶段命令、环境;无需 YAML) |
 | POST   | `/api/jobs/manual-yaml`         | 派发某 ref 上的 md-builder.yaml 矩阵(按需执行的 webhook 流程) |

@@ -1,8 +1,11 @@
 package api
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1049,4 +1052,171 @@ func TestReportRunAggregateCounts(t *testing.T) {
 	if run.Status != "failed" || run.Total != 10 || run.Passed != 8 || run.Failed != 2 {
 		t.Fatalf("unexpected run: %+v", run)
 	}
+}
+
+// TestArtifactDownloadAndRunZip checks the download endpoints: per-artifact
+// raw bytes with a Content-Disposition filename, and the per-run zip bundling
+// the run's own files plus its regression children's (under cases/<name>/).
+func TestArtifactDownloadAndRunZip(t *testing.T) {
+	apiServer, env := newDashboardEnv(t)
+
+	var env1 store.TestEnvironment
+	apiServer.Store.DB.Where("name = ?", "cpu-node-1").First(&env1)
+	commit := &store.Commit{Repo: "group/md-code", SHA: "2222222"}
+	if _, err := apiServer.Store.GetOrCreateCommit(commit); err != nil {
+		t.Fatalf("get commit: %v", err)
+	}
+
+	ninjaLog := "# ninja log\n5\t10\t0\tcmake\n"
+	run, err := apiServer.Store.UpsertTestRun(&store.RunInput{
+		EnvironmentID: env1.ID,
+		CommitID:      commit.ID,
+		Kind:          store.RunKindBuild,
+		StatusFailed:  false,
+		Artifacts: []store.ArtifactInput{
+			{Kind: store.ArtifactKindFile, Name: "build/.ninja_log", Content: ninjaLog},
+			{Kind: store.ArtifactKindFile, Name: "build/compile_commands.json", Content: "[]\n"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("upsert build run: %v", err)
+	}
+	// A regression child run with its own artifact (the zip nests it). The
+	// child attaches to the parent regression run keyed by (env, commit),
+	// kind regression — a separate run from the build one above.
+	if _, _, err := apiServer.Store.UpsertCaseRun(&store.CaseRunInput{
+		EnvironmentID: env1.ID,
+		CommitID:      commit.ID,
+		Name:          "heat",
+		Status:        store.StatusPassed,
+		Artifacts: []store.ArtifactInput{
+			{Kind: store.ArtifactKindResults, Name: "out.xml", Content: "<testsuites/>"},
+		},
+	}); err != nil {
+		t.Fatalf("upsert case run: %v", err)
+	}
+	// The parent regression run the child row resolved to.
+	regRuns, err := apiServer.Store.FindRunsByCommits(store.RunKindRegression, []int64{env1.ID}, []int64{commit.ID})
+	if err != nil {
+		t.Fatalf("find regression run: %v", err)
+	}
+	regRun, ok := regRuns[store.EnvCommit{Env: env1.ID, Commit: commit.ID}]
+	if !ok {
+		t.Fatal("regression parent run missing")
+	}
+
+	// Run detail lists the build's two file artifacts (the case's rides on the
+	// child run, not the parent).
+	rec := env.authed(http.MethodGet, fmt.Sprintf("/api/test-runs/%d", run.ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		Artifacts []struct {
+			ID   int64  `json:"id"`
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"artifacts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if len(detail.Artifacts) != 2 || detail.Artifacts[0].Kind != "file" {
+		t.Fatalf("artifact refs wrong: %+v", detail.Artifacts)
+	}
+
+	// Per-artifact download: raw bytes, attachment filename from the path
+	// basename.
+	rec = env.authed(http.MethodGet, fmt.Sprintf("/api/test-artifacts/%d/download", detail.Artifacts[0].ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("download: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/octet-stream" {
+		t.Errorf("Content-Type = %q", got)
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename=".ninja_log"` {
+		t.Errorf("Content-Disposition = %q", got)
+	}
+	if rec.Body.String() != ninjaLog {
+		t.Errorf("download body wrong: %q", rec.Body.String())
+	}
+
+	// Zip of the build run: its own two files at the archive root.
+	readZip := func(runID int64) map[string]string {
+		t.Helper()
+		rec := env.authed(http.MethodGet, fmt.Sprintf("/api/test-runs/%d/artifacts/zip", runID), "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("zip %d: %d %s", runID, rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Content-Type"); got != "application/zip" {
+			t.Errorf("zip Content-Type = %q", got)
+		}
+		if got := rec.Header().Get("Content-Disposition"); got != fmt.Sprintf(`attachment; filename="run-%d-artifacts.zip"`, runID) {
+			t.Errorf("zip Content-Disposition = %q", got)
+		}
+		zr, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+		if err != nil {
+			t.Fatalf("zip reader: %v", err)
+		}
+		out := map[string]string{}
+		for _, f := range zr.File {
+			rc, err := f.Open()
+			if err != nil {
+				t.Fatalf("zip entry %s: %v", f.Name, err)
+			}
+			b, _ := io.ReadAll(rc)
+			rc.Close()
+			out[f.Name] = string(b)
+		}
+		return out
+	}
+	got := readZip(run.ID)
+	if got[".ninja_log"] != ninjaLog {
+		t.Errorf("zip .ninja_log wrong: %q (has %v)", got[".ninja_log"], keysOf(got))
+	}
+	if got["compile_commands.json"] != "[]\n" {
+		t.Errorf("zip compile_commands.json wrong: %q (has %v)", got["compile_commands.json"], keysOf(got))
+	}
+
+	// Zip of the regression run: the case's file under cases/heat/.
+	got = readZip(regRun.ID)
+	if got["cases/heat/out.xml"] != "<testsuites/>" {
+		t.Errorf("zip cases/heat/out.xml wrong: %q (has %v)", got["cases/heat/out.xml"], keysOf(got))
+	}
+
+	// A run with no artifacts anywhere gets 404, not an empty archive.
+	bare, err := apiServer.Store.UpsertTestRun(&store.RunInput{
+		EnvironmentID: env1.ID,
+		CommitID:      commit.ID,
+		Kind:          store.RunKindUnit,
+	})
+	if err != nil {
+		t.Fatalf("upsert bare run: %v", err)
+	}
+	rec = env.authed(http.MethodGet, fmt.Sprintf("/api/test-runs/%d/artifacts/zip", bare.ID), "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("bare zip: expected 404, got %d", rec.Code)
+	}
+	// Unknown run: 404; unknown artifact download: 404; bad subpath: 404.
+	rec = env.authed(http.MethodGet, "/api/test-runs/999999/artifacts/zip", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown run zip: expected 404, got %d", rec.Code)
+	}
+	rec = env.authed(http.MethodGet, "/api/test-artifacts/999999/download", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown artifact download: expected 404, got %d", rec.Code)
+	}
+	rec = env.authed(http.MethodGet, "/api/test-artifacts/1/other", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown subpath: expected 404, got %d", rec.Code)
+	}
+}
+
+// keysOf lists a zip map's entry names for failure messages.
+func keysOf(m map[string]string) []string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	return names
 }

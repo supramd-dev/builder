@@ -204,8 +204,9 @@ func (r ArtifactPaths) Clean() ArtifactPaths {
 
 // BuildConfig describes the build stage of an entry.
 type BuildConfig struct {
-	Command string `yaml:"command,omitempty" json:"command,omitempty"` // the build command
-	Workdir string `yaml:"workdir,omitempty" json:"workdir,omitempty"` // command workdir; empty = code dir
+	Command   string        `yaml:"command,omitempty" json:"command,omitempty"`   // the build command
+	Workdir   string        `yaml:"workdir,omitempty" json:"workdir,omitempty"`   // command workdir; empty = code dir
+	Artifacts ArtifactPaths `yaml:"artifacts,omitempty" json:"artifacts,omitempty"` // files the build produces and the runner fetches back (stored as-is; never parsed for counts)
 }
 
 // RegressionUse is the matrix entry's regression stanza: it references
@@ -423,6 +424,9 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 		}
 		if build.Workdir == "" {
 			build.Workdir = defaults.Build.Workdir
+		}
+		if len(build.Artifacts) == 0 {
+			build.Artifacts = defaults.Build.Artifacts
 		}
 	}
 	m.Build = build

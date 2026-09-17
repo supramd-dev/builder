@@ -44,8 +44,12 @@ defaults:
   # Build defaults for every entry (same fields as matrix[].build).
   # The build stage is just a shell command — there is no built-in cmake
   # support: write the cmake (or make, ninja, script) invocation yourself.
+  # artifacts (optional): files the build leaves behind that the runner
+  # fetches back — stored on the build run, downloadable from its detail
+  # page (individually or as one zip). Never parsed; display/download only.
   build:
     command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
+    artifacts: "build/.ninja_log"          # a single path or a list
 
 # ---------------------------------------------------------------------------
 # presets (optional) — shared regression test cases
@@ -175,6 +179,8 @@ matrix:
     build:
       command: "$MD_CODE_DIR/build.sh --cuda -j8"
       workdir: "build"                # the script runs in <code>/build
+      # Entry-level artifacts override defaults.build.artifacts:
+      artifacts: ["build/cuda_build.log", "build/compile_commands.json"]
 
     unit:
       command: "./build/unit_tests --gtest_output=xml:build/unit_cuda.xml"

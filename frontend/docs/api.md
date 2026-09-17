@@ -127,7 +127,11 @@ case's own child run (the parent aggregates counts only).
 
 `GET /api/test-artifacts/{id}` returns one artifact's raw `content` —
 the browser-side results parsing and the upcoming regression "analyze"
-view fetch through it.
+view fetch through it. `GET /api/test-artifacts/{id}/download` streams
+the same bytes as a file download (Content-Disposition attachment), and
+`GET /api/test-runs/{id}/artifacts/zip` bundles the run's artifacts —
+its own plus every child run's (regression cases under `cases/<name>/`)
+— as one zip.
 
 ## Script execution (interactive)
 
@@ -251,6 +255,8 @@ script is (it is not a secret).
 | POST   | `/api/test-runs`                | Report a test run result                      |
 | GET    | `/api/test-runs/{id}`           | One run's detail: cases, counts, artifacts    |
 | GET    | `/api/test-artifacts/{id}`      | One stored artifact's raw content             |
+| GET    | `/api/test-artifacts/{id}/download` | One artifact as a file download          |
+| GET    | `/api/test-runs/{id}/artifacts/zip` | One run's artifacts (children included) as a zip |
 | POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit (webhook-style, reads the YAML) |
 | POST   | `/api/jobs/manual`              | Dispatch a user-configured test (repo, ref, stage commands, environments; no YAML) |
 | POST   | `/api/jobs/manual-yaml`         | Dispatch the md-builder.yaml matrix at a ref (webhook flow on demand) |

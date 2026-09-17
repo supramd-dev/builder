@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -188,6 +189,22 @@ matrix:
     unit:
       command: "ctest -L unit --output-junit junit.xml"
       artifacts: "build/test_detail.xml"
+`
+
+// buildArtifactsYAML exercises the build-stage artifacts field: files the
+// build command leaves behind, fetched back as file-kind artifacts (never
+// parsed for counts — the build verdict is its exit code alone).
+const buildArtifactsYAML = `version: 2
+defaults:
+  build:
+    command: "cmake . && ninja"
+    artifacts: "build/.ninja_log"
+matrix:
+  - tags: [cpu]
+    build:
+      artifacts: ["build/.ninja_log", "build/compile_commands.json"]
+    unit:
+      command: "ctest -L unit"
 `
 
 const multiArtifactsYAML = `version: 2
@@ -648,6 +665,67 @@ func TestExecuteBuildScriptBuildFailureClosesPlaceholderRun(t *testing.T) {
 	}
 	if !strings.Contains(run.Summary, "build has no command") {
 		t.Errorf("run summary should carry the reason: %q", run.Summary)
+	}
+}
+
+// TestExecuteBuildFetchesArtifacts: a build with configured artifact files
+// fetches them back and stores them as file-kind artifacts on the build run
+// — verbatim, no counts parsing (a passing build with a non-gtest file stays
+// passed with zero counts).
+func TestExecuteBuildFetchesArtifacts(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, buildArtifactsYAML)
+	// The fetch scripts cat the artifact path; the fake keys its canned
+	// output off outcome markers, so both paths need an outcome entry.
+	exec.outcome[".ninja_log"] = 0
+	exec.output[".ninja_log"] = "# ninja log\n5\t10\t0\tcmake\n"
+	exec.outcome["compile_commands.json"] = 0
+	exec.output["compile_commands.json"] = "[{\"file\": \"../src/md.cc\"}]\n"
+
+	ctx := context.Background()
+	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
+		t.Fatal(err)
+	}
+	build, err := s.ClaimReadyTask()
+	if err != nil || build == nil || build.Kind != store.TaskKindBuild {
+		t.Fatalf("claim build: %v %v", build, err)
+	}
+
+	// The build snapshot carries the artifacts list.
+	var stage BuildStageConfig
+	if err := json.Unmarshal([]byte(build.Config), &stage); err != nil {
+		t.Fatal(err)
+	}
+	if len(stage.Artifacts) != 2 || stage.Artifacts[0] != "build/.ninja_log" {
+		t.Fatalf("build config artifacts wrong: %v", stage.Artifacts)
+	}
+
+	if err := svc.ExecuteTask(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+
+	envs := []int64{build.EnvironmentID}
+	commits := []int64{build.CommitID}
+	runs, _ := s.FindRunsByCommits(store.RunKindBuild, envs, commits)
+	run, ok := runs[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]
+	if !ok || run.Status != store.StatusPassed {
+		t.Fatalf("build run should pass: %+v", run)
+	}
+	if run.Total != 0 || run.Failed != 0 || run.Skipped != 0 {
+		t.Errorf("build counts must stay zero: total=%d failed=%d skipped=%d", run.Total, run.Failed, run.Skipped)
+	}
+
+	artifacts, err := s.ListRunArtifacts(run.ID)
+	if err != nil || len(artifacts) != 2 {
+		t.Fatalf("artifacts: %v %v", artifacts, err)
+	}
+	if artifacts[0].Kind != store.ArtifactKindFile || artifacts[0].Name != "build/.ninja_log" {
+		t.Errorf("artifact[0] wrong: %+v", artifacts[0])
+	}
+	if artifacts[0].Content != "# ninja log\n5\t10\t0\tcmake\n" {
+		t.Errorf("artifact[0] content not verbatim: %q", artifacts[0].Content)
+	}
+	if artifacts[1].Kind != store.ArtifactKindFile || artifacts[1].Name != "build/compile_commands.json" {
+		t.Errorf("artifact[1] wrong: %+v", artifacts[1])
 	}
 }
 

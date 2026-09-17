@@ -93,6 +93,7 @@ the cmake/make/ninja/script invocation yourself):
 |----------------|----------------------------------------------------------------------|
 | build.command  | Shell command compiling the code (required — entry or defaults).     |
 | build.workdir  | Directory the command runs in (same semantics as unit/presets).      |
+| build.artifacts | Optional file path (or list) the runner fetches back after the build and stores on the build run — downloadable from the run's detail page. Never parsed: the build verdict is its exit code alone. |
 
 Example — out-of-source cmake via the workdir and the built-in
 `$MD_CODE_DIR` variable:
@@ -286,6 +287,33 @@ cases in the artifact file fail the run even when the command exited zero
 (ctest-style wrappers can swallow the test binary's exit code). For
 **regression presets** the files are display-only — the case's verdict is
 its command's exit status (see Pass / fail of a case).
+
+### Build artifacts
+
+The **build** stage accepts the same `artifacts` field, with different
+semantics: the files are stored **verbatim** and never parsed — the build's
+verdict is its command's exit code alone (a results-looking file fetched
+from a build cannot flip the cell to failed).
+
+```yaml
+build:
+  command: "cmake . && ninja"
+  artifacts: ["build/.ninja_log", "build/compile_commands.json"]
+```
+
+Any file the build leaves behind works — logs, `compile_commands.json`,
+size reports. As with the test stages, paths are relative to the build's
+workdir and each file is capped at 8 MiB at fetch time.
+
+### Downloading artifacts
+
+Every stored artifact of a run (build files, unit/regression results
+files) is downloadable from the run's detail page: each file individually,
+or the whole bundle as one zip (`GET /api/test-runs/{id}/artifacts/zip`).
+A regression run's zip includes every case's files, nested under
+`cases/<case name>/`. File contents live in the platform's database; an
+S3-compatible object store (e.g. Garage) is a planned storage backend —
+the download endpoints stay the same either way.
 
 ## Validation rules
 

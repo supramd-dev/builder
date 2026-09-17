@@ -364,11 +364,12 @@ export interface CaseResult {
   durationMillis: number
 }
 
-// TestArtifactRef references one stored result/log/series file of a run;
-// the content itself is fetched via getTestArtifact.
+// TestArtifactRef references one stored result/log/series/file artifact of a
+// run; the content itself is fetched via getTestArtifact (or the download
+// endpoint, which serves the same bytes as a file).
 export interface TestArtifactRef {
   id: number
-  kind: 'results' | 'log' | 'series'
+  kind: 'results' | 'log' | 'series' | 'file'
   name: string
   size: number
 }

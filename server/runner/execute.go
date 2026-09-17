@@ -246,6 +246,10 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 
 	h := envToSSHHost(rc.env)
 	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
+
+	// Build artifacts (when configured) are fetched back verbatim as file
+	// artifacts — no results parsing, the build verdict is the exit code.
+	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindFile, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 	logw.Flush() // the build run's summary is derived from the persisted log
 
 	// Record the dashboard build run from the log tail (no per-case results).
@@ -258,7 +262,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	if res.ExitCode < 0 {
 		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
 	}
-	s.recordStageRun(task, status, summary, 0, 0, 0, nil)
+	s.recordStageRun(task, status, summary, 0, 0, 0, artifacts)
 
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
 }
@@ -289,7 +293,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 	h := envToSSHHost(rc.env)
 	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
 
-	counts, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
+	counts, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindResults, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
 	logw.Flush() // the summary is derived from the persisted log
 
@@ -345,7 +349,7 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 
 	// The case's artifact files (when configured) are fetched back verbatim
 	// and attached to the case's own child run.
-	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
+	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindResults, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
 	logw.Flush() // the case message is derived from the persisted log
 	output := s.readLogTail(task.ID)
@@ -386,9 +390,11 @@ type stageCounts struct{ total, failed, skipped int }
 // remote host and returns the summed aggregate counts plus the artifact
 // inputs (run-scoped for unit; the caller links them to the case). Relative
 // paths resolve against the stage's workdir. Nothing runs when the session
-// never started (exitCode < 0).
+// never started (exitCode < 0). kind selects the stored artifact kind:
+// results files feed the aggregate counts, file artifacts (build) are stored
+// as-is and never parsed.
 func (s *Service) fetchStageArtifacts(ctx context.Context, h SSHHost, rc *rootContext, task *store.Task,
-	workdir string, artifacts ArtifactPaths, logw *LogWriter, exitCode int) (stageCounts, []store.ArtifactInput) {
+	kind string, workdir string, artifacts ArtifactPaths, logw *LogWriter, exitCode int) (stageCounts, []store.ArtifactInput) {
 	var counts stageCounts
 	var out []store.ArtifactInput
 	for _, path := range artifacts.Clean() {
@@ -403,10 +409,13 @@ func (s *Service) fetchStageArtifacts(ctx context.Context, h SSHHost, rc *rootCo
 			fmt.Fprintf(logw, "artifact %s: not found or empty; skipping counts\n", path)
 		default:
 			out = append(out, store.ArtifactInput{
-				Kind:    store.ArtifactKindResults,
+				Kind:    kind,
 				Name:    path,
 				Content: content,
 			})
+			if kind != store.ArtifactKindResults {
+				break // file artifacts are stored verbatim; no counts parsing
+			}
 			if total, failed, skipped, ok := ExtractGTestCounts([]byte(content)); ok {
 				counts.total += total
 				counts.failed += failed
