@@ -201,6 +201,10 @@ matrix:
 #   MD_TASK_DIR  ~/.md-builder/tasks/<sha12> on the environment
 #   MD_CODE_DIR  $MD_TASK_DIR/code — the extracted source tree
 #   MD_CASE      preset name (regression case sub-tasks only)
+#   MD_SECRET_TOKEN  the site's secret token (Settings → Repository), when
+#                one is configured — for authenticating against internal
+#                services (mirrors, artifact stores, license servers);
+#                echoed values are REDACTED from the task log
 #
 # The environment setup script (md-builder-env-*.sh) is configured PER
 # ENVIRONMENT on the server (Runner Envs → edit), not in this file: it is

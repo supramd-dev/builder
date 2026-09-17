@@ -193,6 +193,7 @@ command: |                                  # 块标量:仍是一条命令
 | MD_TASK_DIR   | 远程任务目录(~/.md-builder/tasks/<sha12>)。                  |
 | MD_CODE_DIR   | 代码目录,即 MD_TASK_DIR/code。                               |
 | MD_CASE       | 用例名称(仅回归用例脚本导出)。                                |
+| MD_SECRET_TOKEN | 站点的 secret token(设置 → 仓库),配置后才导出 —— 见下。     |
 
 yaml 的 `env` 变量在 MD_* 变量之后导出(要覆盖它们请用环境设置脚本,
 见下)。
@@ -201,6 +202,30 @@ yaml 的 `env` 变量在 MD_* 变量之后导出(要覆盖它们请用环境设�
 unit:
   command: "$MD_CODE_DIR/build/unit_tests --gtest_output=xml:$MD_CODE_DIR/build/test_detail.xml"
 ```
+
+### Secret token(MD_SECRET_TOKEN)
+
+命令经常需要凭证 —— 私有软件源、工件存储、付费软件的 license 服务器
+—— 这些不能提交进代码仓库。站点的 **secret token**(设置 → 仓库 →
+“命令用 Secret token”)解决这个问题:配置后,它会(与其他 MD_* 变量
+一样)导出到每个阶段脚本(build、unit、回归用例),变量名为
+`MD_SECRET_TOKEN`:
+
+```yaml
+build:
+  command: "cmake -DFETCH_TOKEN=\"$MD_SECRET_TOKEN\" . && cmake --build . -j8"
+```
+
+```yaml
+presets:
+  eos-table:
+    command: "curl -sS -H \"Authorization: Bearer $MD_SECRET_TOKEN\" -o eos.tbl https://data.internal/eos.tbl && ./check_eos eos.tbl"
+```
+
+它与仓库 access token 一样是只写的:设置表单只显示是否已配置,不显示
+值本身。若命令把它回显出来(`env`、`set -x`、`curl -v`),runner 会在
+写入任务日志前把每一处出现都替换为 `REDACTED`。未配置时该变量为未设
+置状态。
 
 ## 环境设置脚本
 

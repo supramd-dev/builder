@@ -348,3 +348,41 @@ func TestExportEnvShape(t *testing.T) {
 		}
 	}
 }
+
+// TestScriptSecretTokenExport: the site's secret token, when set, is
+// exported as MD_SECRET_TOKEN in every stage script — quoted so
+// metacharacters stay inert; unset leaves no trace of the variable.
+func TestScriptSecretTokenExport(t *testing.T) {
+	in := &ScriptInput{
+		CommitSHA:    "abcdef123456",
+		EnvName:      "cpu-node",
+		EnvTags:      "cpu",
+		TaskDir:      "$HOME/.md-builder/tasks/abcdef123456",
+		CodeDir:      "$HOME/.md-builder/tasks/abcdef123456/code",
+		Entry:        sampleEntry(),
+		StageCommand: CommandList{"curl -H \"Authorization: Bearer $MD_SECRET_TOKEN\" https://mirror.internal/dataset"},
+		Timeout:      90,
+	}
+
+	// Without a secret: no export line, the command reference stays.
+	script, err := BuildStageScript(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, "MD_SECRET_TOKEN=") {
+		t.Errorf("unset secret must not be exported:\n%s", script)
+	}
+	if !strings.Contains(script, "$MD_SECRET_TOKEN") {
+		t.Errorf("command's reference should survive verbatim:\n%s", script)
+	}
+
+	// With a secret containing metacharacters: exported single-quoted.
+	in.SecretToken = "s3cr't-$(rm -rf /)"
+	script, err = BuildStageScript(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `export MD_SECRET_TOKEN='s3cr'\''t-$(rm -rf /)'`; !strings.Contains(script, want) {
+		t.Errorf("secret export should be shell-quoted, want %q in:\n%s", want, script)
+	}
+}

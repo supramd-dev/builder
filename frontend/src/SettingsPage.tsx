@@ -78,6 +78,9 @@ function RepositoryTab({ onError }: { onError: (message: string) => void }) {
   const [accessToken, setAccessToken] = useState('')
   const [clearAccessToken, setClearAccessToken] = useState(false)
   const [accessTokenSet, setAccessTokenSet] = useState(false)
+  const [secretToken, setSecretToken] = useState('')
+  const [clearSecretToken, setClearSecretToken] = useState(false)
+  const [secretTokenSet, setSecretTokenSet] = useState(false)
   const [timezone, setTimezone] = useState('')
   const [updatedAt, setUpdatedAt] = useState('')
 
@@ -88,6 +91,7 @@ function RepositoryTab({ onError }: { onError: (message: string) => void }) {
         if (cancelled) return
         setCodeRepo(cfg.codeRepo)
         setAccessTokenSet(cfg.accessTokenSet)
+        setSecretTokenSet(cfg.secretTokenSet)
         setTimezone(cfg.timezone)
         setUpdatedAt(cfg.updatedAt)
       })
@@ -117,12 +121,17 @@ function RepositoryTab({ onError }: { onError: (message: string) => void }) {
         // Keep the timezone as-is from this tab (the Display tab owns it).
         timezone,
         clearAccessToken,
+        secretToken: clearSecretToken ? '' : secretToken,
+        clearSecretToken,
       })
       setCodeRepo(cfg.codeRepo)
       setAccessTokenSet(cfg.accessTokenSet)
+      setSecretTokenSet(cfg.secretTokenSet)
       setTimezone(cfg.timezone)
       setAccessToken('')
       setClearAccessToken(false)
+      setSecretToken('')
+      setClearSecretToken(false)
       setUpdatedAt(cfg.updatedAt)
       setSaved(true)
     } catch (err: unknown) {
@@ -224,6 +233,68 @@ function RepositoryTab({ onError }: { onError: (message: string) => void }) {
                 style={{ marginRight: '0.35rem', position: 'relative', top: '2px' }}
               />
               Remove stored access token
+            </label>
+          </div>
+        )}
+
+        <h4>Secret token for commands (optional)</h4>
+        <p className="text-muted">
+          A site-wide secret exported to <strong>every</strong> stage command
+          (build, unit, regression cases) as the environment variable{' '}
+          <code>MD_SECRET_TOKEN</code>. Use it in{' '}
+          <code>md-builder.yaml</code> commands to authenticate against
+          internal services — package mirrors, artifact stores, licensed
+          software servers — without hardcoding credentials in the
+          repository. The value is stored server-side, never shown again,
+          and scrubbed (<code>REDACTED</code>) from task logs if a command
+          echoes it.
+        </p>
+
+        <div className="form-group">
+          <label htmlFor="cfg-secret-token">
+            Secret token{' '}
+            {secretTokenSet &&
+              !clearSecretToken &&
+              '(configured — leave blank to keep)'}
+          </label>
+          <input
+            id="cfg-secret-token"
+            type="password"
+            value={secretToken}
+            onChange={(e) => {
+              setSecretToken(e.target.value)
+              if (e.target.value) setClearSecretToken(false)
+              setSaved(false)
+            }}
+            placeholder={
+              secretTokenSet ? '••••••••' : 'any secret string'
+            }
+            autoComplete="new-password"
+          />
+          <small className="text-muted">
+            Referenced as{' '}
+            <code>
+              $MD_SECRET_TOKEN
+            </code>{' '}
+            in md-builder.yaml commands, e.g.{' '}
+            <code>curl -H &quot;Authorization: Bearer $MD_SECRET_TOKEN&quot; …</code>
+          </small>
+        </div>
+
+        {secretTokenSet && (
+          <div className="form-group">
+            <label style={{ fontWeight: 'normal' }}>
+              <input
+                type="checkbox"
+                checked={clearSecretToken}
+                onChange={(e) => {
+                  setClearSecretToken(e.target.checked)
+                  if (e.target.checked) setSecretToken('')
+                  setSaved(false)
+                }}
+                style={{ marginRight: '0.35rem', position: 'relative', top: '2px' }}
+              />
+              Remove stored secret token
             </label>
           </div>
         )}

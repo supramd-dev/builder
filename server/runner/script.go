@@ -13,6 +13,7 @@ import (
 //	#!/usr/bin/env bash
 //	set -uo pipefail
 //	export MD_COMMIT=... MD_ENV_NAME=... MD_ENV_TAGS=... MD_TASK_DIR=... MD_CODE_DIR=...
+//	export MD_SECRET_TOKEN=...                                                # when the site has one
 //	export <entry env, sorted>
 //	[ -f "$MD_TASK_DIR/md-builder-env-<hash>.sh" ] && . ... || warn   # when the env has one
 //	cd "<workdir>" || exit 1
@@ -59,6 +60,13 @@ type ScriptInput struct {
 	// CaseName names the regression case (empty for build/unit); exported
 	// as MD_CASE so commands can tell which preset they are running.
 	CaseName string
+
+	// SecretToken is the site's write-only secret (Settings → Repository);
+	// when set it is exported as MD_SECRET_TOKEN so yaml commands can
+	// authenticate against internal services without hardcoding
+	// credentials in the repository. Empty = not configured, the variable
+	// stays unset.
+	SecretToken string
 
 	// Timeout is the stage timeout in seconds.
 	Timeout int
@@ -153,6 +161,11 @@ func exportEnv(w func(format string, args ...any), in *ScriptInput) {
 	w("export MD_CODE_DIR=%s", shellExpand(in.CodeDir))
 	if in.CaseName != "" {
 		w("export MD_CASE=%s", shq(in.CaseName))
+	}
+	if in.SecretToken != "" {
+		// Single-quoted: the token may contain shell metacharacters, and
+		// unlike the directory exports nothing in it should ever expand.
+		w("export MD_SECRET_TOKEN=%s", shq(in.SecretToken))
 	}
 	if in.Entry != nil {
 		keys := make([]string, 0, len(in.Entry.Env))

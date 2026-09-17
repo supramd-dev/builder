@@ -207,6 +207,7 @@ the stage command runs — the commands can rely on them:
 | MD_TASK_DIR    | Remote task directory (~/.md-builder/tasks/<sha12>).            |
 | MD_CODE_DIR    | Code directory — MD_TASK_DIR/code.                              |
 | MD_CASE        | Case name (regression case scripts only).                       |
+| MD_SECRET_TOKEN | The site's secret token (Settings → Repository), when one is configured — see below. |
 
 The yaml `env` variables are exported right after the MD_* variables,
 so a command can override neither (they are exported earlier — see the
@@ -216,6 +217,33 @@ env setup script below for the override point).
 unit:
   command: "$MD_CODE_DIR/build/unit_tests --gtest_output=xml:$MD_CODE_DIR/build/test_detail.xml"
 ```
+
+### Secret token (MD_SECRET_TOKEN)
+
+Commands frequently need credentials — a private package mirror, an
+artifact store, a licensed-software license server — that must not be
+committed to the code repository. The site's **secret token**
+(Settings → Repository → *Secret token for commands*) covers this: when
+configured, it is exported to every stage script (build, unit,
+regression cases — the same stages as the other MD_* variables) as
+`MD_SECRET_TOKEN`:
+
+```yaml
+build:
+  command: "cmake -DFETCH_TOKEN=\"$MD_SECRET_TOKEN\" . && cmake --build . -j8"
+```
+
+```yaml
+presets:
+  eos-table:
+    command: "curl -sS -H \"Authorization: Bearer $MD_SECRET_TOKEN\" -o eos.tbl https://data.internal/eos.tbl && ./check_eos eos.tbl"
+```
+
+The token is write-only like the repository access token: the settings
+form shows whether one is set, never the value. If a command echoes it
+(`env`, `set -x`, `curl -v`), the runner replaces every occurrence with
+`REDACTED` in the task log before storing it. When no token is
+configured the variable is simply unset.
 
 ## Environment setup script
 

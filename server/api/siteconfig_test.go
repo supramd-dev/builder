@@ -333,3 +333,103 @@ func TestGitLabWebhook(t *testing.T) {
 		t.Fatalf("expected ignored status, got %v", res)
 	}
 }
+
+func TestSiteConfigSecretToken(t *testing.T) {
+	apiServer, _ := newTestServer(t)
+	seedUser(t, apiServer.Store, "carol", "carol@example.com", "s3cret")
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "carol", "s3cret")
+
+	authed := func(method, target, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		var req *http.Request
+		if body == "" {
+			req = httptest.NewRequest(method, target, nil)
+		} else {
+			req = httptest.NewRequest(method, target, strings.NewReader(body))
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	base := `{"codeRepo":"https://gitlab.com/g/code"`
+
+	// Initial state: nothing set.
+	rec := authed(http.MethodGet, "/api/site-config", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: %d", rec.Code)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["secretTokenSet"] != false {
+		t.Fatalf("expected no secret token, got %v", cfg)
+	}
+
+	// Set the secret token (with shell metacharacters — it must survive
+	// the export quoting).
+	rec = authed(http.MethodPut, "/api/site-config", base+`,"secretToken":"s3cr't-$(pw)"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set secret: %d body %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["secretTokenSet"] != true {
+		t.Fatalf("expected secret set, got %v", cfg)
+	}
+	if strings.Contains(rec.Body.String(), "s3cr't-$(pw)") {
+		t.Fatalf("secret leaked in response: %s", rec.Body.String())
+	}
+
+	// Re-read: persisted, still masked.
+	rec = authed(http.MethodGet, "/api/site-config", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["secretTokenSet"] != true {
+		t.Fatalf("secret not persisted: %v", cfg)
+	}
+	if strings.Contains(rec.Body.String(), "s3cr't-$(pw)") {
+		t.Fatalf("secret leaked on read: %s", rec.Body.String())
+	}
+
+	// An update without the field keeps it (empty = keep).
+	rec = authed(http.MethodPut, "/api/site-config", base+`}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update without secret: %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["secretTokenSet"] != true {
+		t.Fatalf("secret should be kept: %v", cfg)
+	}
+
+	// The explicit clear flag removes it.
+	rec = authed(http.MethodPut, "/api/site-config", base+`,"clearSecretToken":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear secret: %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg["secretTokenSet"] != false {
+		t.Fatalf("secret should be cleared: %v", cfg)
+	}
+
+	// The stored row itself carries the value while set (the runner's
+	// scriptInput reads it there): set again and check the model.
+	authed(http.MethodPut, "/api/site-config", base+`,"secretToken":"tok"}`)
+	stored, err := apiServer.Store.GetSiteConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SecretToken != "tok" {
+		t.Fatalf("stored secret wrong: %q", stored.SecretToken)
+	}
+}

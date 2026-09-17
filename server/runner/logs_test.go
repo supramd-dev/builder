@@ -117,3 +117,47 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// TestLogWriterRedactsSecrets: after SetSecrets, everything written is
+// scrubbed before it reaches the task log — a command echoing its
+// environment must not persist the site's secrets.
+func TestLogWriterRedactsSecrets(t *testing.T) {
+	s := openTestStore(t)
+	lw := NewLogWriter(s, 43)
+	lw.SetSecrets("glpat-tok", "s3cr't-value", "  ") // last one is blank: ignored
+
+	out := "env: MD_SECRET_TOKEN=s3cr't-value\nauth: glpat-tok\nplain: untouched\n"
+	if _, err := lw.Write([]byte(out)); err != nil {
+		t.Fatal(err)
+	}
+	lw.Close()
+
+	logs, err := s.ReadTaskLogs(43, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := ""
+	for _, l := range logs {
+		all += l.Content
+	}
+	if strings.Contains(all, "glpat-tok") || strings.Contains(all, "s3cr't-value") {
+		t.Fatalf("secret leaked into log: %q", all)
+	}
+	if !strings.Contains(all, "REDACTED") || !strings.Contains(all, "plain: untouched") {
+		t.Fatalf("redaction misplaced: %q", all)
+	}
+
+	// Before SetSecrets, output passes through untouched (failEarly's
+	// pre-redacted messages, plain clone output).
+	lw2 := NewLogWriter(s, 44)
+	lw2.Write([]byte("raw token glpat-tok here\n"))
+	lw2.Close()
+	logs, _ = s.ReadTaskLogs(44, 0)
+	all = ""
+	for _, l := range logs {
+		all += l.Content
+	}
+	if !strings.Contains(all, "glpat-tok") {
+		t.Fatalf("unarmed writer should pass through: %q", all)
+	}
+}

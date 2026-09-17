@@ -106,6 +106,7 @@ func (s *Service) loadRootContext(task *store.Task) (*rootContext, bool) {
 func (s *Service) failEarly(task *store.Task, msg string) {
 	if cfg, err := s.Store.GetSiteConfig(); err == nil {
 		msg = Redact(msg, cfg.AccessToken)
+		msg = Redact(msg, cfg.SecretToken)
 	}
 	logw := NewLogWriter(s.Store, task.ID)
 	fmt.Fprintf(logw, "task failed: %s\n", msg)
@@ -119,6 +120,15 @@ func (s *Service) failEarly(task *store.Task, msg string) {
 // creds builds the git credentials from the site config.
 func (rc *rootContext) creds() *GitCredentials {
 	return &GitCredentials{AccessToken: rc.cfg.AccessToken}
+}
+
+// stageLogWriter returns the task's log writer with the site's secrets
+// (access token, MD_SECRET_TOKEN) armed for scrubbing — a stage command
+// echoing its environment would otherwise persist them in the log.
+func (s *Service) stageLogWriter(rc *rootContext, task *store.Task) *LogWriter {
+	logw := NewLogWriter(s.Store, task.ID)
+	logw.SetSecrets(rc.cfg.AccessToken, rc.cfg.SecretToken)
+	return logw
 }
 
 // scriptInput assembles the shared ScriptInput for sub-task scripts.
@@ -135,6 +145,7 @@ func (rc *rootContext) scriptInput(stageCommand CommandList, workdir, caseName s
 		StageCommand:  stageCommand,
 		Workdir:       workdir,
 		CaseName:      caseName,
+		SecretToken:   rc.cfg.SecretToken,
 		Timeout:       timeout,
 	}
 }
@@ -235,7 +246,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 		return
 	}
 
-	logw := NewLogWriter(s.Store, task.ID)
+	logw := s.stageLogWriter(rc, task)
 	defer logw.Close()
 
 	script, err := BuildScript(rc.scriptInput(nil, stage.Workdir, "", stage.Timeout))
@@ -281,7 +292,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 		return
 	}
 
-	logw := NewLogWriter(s.Store, task.ID)
+	logw := s.stageLogWriter(rc, task)
 	defer logw.Close()
 
 	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, "", stage.Timeout))
@@ -333,7 +344,7 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 		return
 	}
 
-	logw := NewLogWriter(s.Store, task.ID)
+	logw := s.stageLogWriter(rc, task)
 	defer logw.Close()
 
 	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, stage.Case, stage.Timeout))
@@ -526,6 +537,7 @@ func (s *Service) finishCommandTask(task *store.Task, logw *LogWriter, exitCode 
 func (s *Service) failTaskLogged(task *store.Task, logw *LogWriter, msg string) {
 	if cfg, err := s.Store.GetSiteConfig(); err == nil {
 		msg = Redact(msg, cfg.AccessToken)
+		msg = Redact(msg, cfg.SecretToken)
 	}
 	fmt.Fprintf(logw, "task failed: %s\n", msg)
 	if err := s.Store.FinishTask(task.ID, store.TaskFailed, msg); err != nil {

@@ -31,6 +31,27 @@ The token is write-only: the form shows whether one is configured, never
 the value itself; leave the field blank to keep the stored token, tick
 the *Remove* checkbox to clear it.
 
+## Secret token for commands
+
+The **Settings → Repository** tab also carries an optional **secret
+token** — a site-wide secret exported to every stage command
+(`build.command`, `unit.command`, regression preset commands in
+md-builder.yaml) as the environment variable `MD_SECRET_TOKEN`. It lets
+those commands authenticate against internal services — package mirrors,
+artifact stores, licensed-software license servers — without hardcoding
+credentials in the code repository.
+
+```yaml
+build:
+  command: "cmake -DFETCH_TOKEN=\"$MD_SECRET_TOKEN\" . && cmake --build ."
+```
+
+The same write-only convention applies: only whether it is set is ever
+reported. If a command echoes the value into its output (`env`,
+`set -x`, `curl -v`), the runner replaces every occurrence with
+`REDACTED` in the task log before storing it. See
+[Test matrix → Secret token](#/docs/test-matrix) for usage.
+
 ## Display timezone
 
 The **Settings → Display** tab sets the timezone every timestamp is

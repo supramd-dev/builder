@@ -27,6 +27,24 @@ GitLab 的 *Settings → Access Tokens* 下创建,勾选 `read_repository`
 令牌为只写:表单只显示是否已配置,绝不显示其值;留空表示保留已存的
 令牌,勾选 *Remove* 复选框则删除。
 
+## 命令用 Secret token
+
+**Settings → Repository** 标签页还提供一个可选的 **secret token** ——
+一个站点级密钥,以环境变量 `MD_SECRET_TOKEN` 导出到每个阶段命令
+(md-builder.yaml 中的 `build.command`、`unit.command`、回归预设的
+command)。它让这些命令能向内部服务认证 —— 软件源镜像、工件存储、
+付费软件的 license 服务器 —— 而无需把凭证硬编码进代码仓库。
+
+```yaml
+build:
+  command: "cmake -DFETCH_TOKEN=\"$MD_SECRET_TOKEN\" . && cmake --build ."
+```
+
+同样的只写约定:表单只报告是否已设置。若命令把值回显到输出中
+(`env`、`set -x`、`curl -v`),runner 会在写入任务日志前把每一处出现
+都替换为 `REDACTED`。用法见
+[测试矩阵 → Secret token](#/docs/test-matrix)。
+
 ## 显示时区
 
 **Settings → Display** 标签页设置所有时间戳(仪表板、任务与运行页面)

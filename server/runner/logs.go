@@ -3,6 +3,7 @@ package runner
 import (
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,9 +27,13 @@ const (
 // LogWriter is an io.Writer that persists task output incrementally. It is
 // safe for concurrent use (SSH multiplexes stdout and stderr into separate
 // writers). Close flushes the remainder and stops the background timer.
+// Output passes through RedactSecrets first: anything a command prints
+// that contains the site's secrets (the access token, the MD_SECRET_TOKEN
+// value) is replaced with REDACTED before it is stored.
 type LogWriter struct {
 	store  *store.Store
 	taskID int64
+	redact func(string) string // built once at construction; nil = nothing to scrub
 
 	mu        sync.Mutex
 	buf       []byte
@@ -48,6 +53,36 @@ func NewLogWriter(s *store.Store, taskID int64) *LogWriter {
 	return lw
 }
 
+// SetSecrets scrubs the given secrets from everything written from now on.
+// The site's access token and secret token belong here: a command echoing
+// its environment (or a curl -v printing an Authorization header) would
+// otherwise persist them in the task log. Empty strings are ignored.
+// Call before the session's output starts streaming.
+func (lw *LogWriter) SetSecrets(secrets ...string) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	lw.redact = redactorFor(secrets)
+}
+
+// redactorFor builds the redaction function for the given secrets.
+func redactorFor(secrets []string) func(string) string {
+	vals := make([]string, 0, len(secrets))
+	for _, s := range secrets {
+		if s = strings.TrimSpace(s); s != "" {
+			vals = append(vals, s)
+		}
+	}
+	if len(vals) == 0 {
+		return nil
+	}
+	return func(s string) string {
+		for _, v := range vals {
+			s = Redact(s, v)
+		}
+		return s
+	}
+}
+
 // Write buffers p and flushes when the buffer is full. It never returns an
 // error: log failures are logged but must not fail the SSH session.
 func (lw *LogWriter) Write(p []byte) (int, error) {
@@ -55,6 +90,9 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 	defer lw.mu.Unlock()
 	if lw.closed {
 		return len(p), nil // drop output after close (session teardown)
+	}
+	if lw.redact != nil {
+		p = []byte(lw.redact(string(p)))
 	}
 	n := len(p)
 	if lw.written+int64(n) > maxLogBytes {

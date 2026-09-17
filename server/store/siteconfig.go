@@ -31,6 +31,16 @@ type SiteConfig struct {
 	// display-only — server internals always work in UTC.
 	Timezone string
 
+	// SecretToken is a site-wide secret exported to every stage command as
+	// MD_SECRET_TOKEN (build / unit / regression case scripts in
+	// md-builder.yaml). It lets commands authenticate against internal
+	// services (package mirrors, artifact stores, licensed software
+	// servers) without hardcoding credentials in the repository. Like
+	// AccessToken it is write-only: never returned by the API, and the
+	// runner redacts it from task logs. Empty = not configured (the
+	// variable is unset).
+	SecretToken string
+
 	UpdatedAt time.Time
 }
 

@@ -10,23 +10,26 @@ import (
 )
 
 // siteConfigJSON is the wire representation of the site configuration. The
-// access token is a write-only secret: only whether it is set is reported,
-// never the value itself.
+// access token and the secret token are write-only secrets: only whether
+// they are set is reported, never the values themselves.
 type siteConfigJSON struct {
-	CodeRepo       string `json:"codeRepo"`
-	AccessTokenSet bool   `json:"accessTokenSet"`
-	Timezone       string `json:"timezone"` // IANA name, "" = browser local
-	UpdatedAt      string `json:"updatedAt"`
+	CodeRepo        string `json:"codeRepo"`
+	AccessTokenSet  bool   `json:"accessTokenSet"`
+	Timezone        string `json:"timezone"` // IANA name, "" = browser local
+	SecretTokenSet  bool   `json:"secretTokenSet"`
+	UpdatedAt       string `json:"updatedAt"`
 }
 
 // siteConfigInput is the request body for updating the configuration. The
-// token follows the environment private-key convention: an empty value
+// tokens follow the environment private-key convention: an empty value
 // keeps the stored one; the explicit Clear flag removes it.
 type siteConfigInput struct {
 	CodeRepo         string `json:"codeRepo"`
-	AccessToken      string `json:"accessToken"` // empty = keep current
-	Timezone         string `json:"timezone"`    // IANA name, "" = browser local
+	AccessToken      string `json:"accessToken"`      // empty = keep current
+	Timezone         string `json:"timezone"`         // IANA name, "" = browser local
+	SecretToken      string `json:"secretToken"`      // empty = keep current
 	ClearAccessToken bool   `json:"clearAccessToken"`
+	ClearSecretToken bool   `json:"clearSecretToken"`
 }
 
 // handleSiteConfig routes GET/PUT /api/site-config. Any logged-in user may
@@ -78,6 +81,12 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request) {
 	} else if tok := strings.TrimSpace(in.AccessToken); tok != "" {
 		cfg.AccessToken = tok
 	}
+	// Secret token: the same write-only convention.
+	if in.ClearSecretToken {
+		cfg.SecretToken = ""
+	} else if tok := strings.TrimSpace(in.SecretToken); tok != "" {
+		cfg.SecretToken = tok
+	}
 	cfg.Timezone = strings.TrimSpace(in.Timezone)
 	if err := s.Store.SaveSiteConfig(cfg); err != nil {
 		log.Printf("save site config: %v", err)
@@ -107,6 +116,7 @@ func toSiteConfigJSON(cfg *store.SiteConfig) siteConfigJSON {
 		CodeRepo:       cfg.CodeRepo,
 		AccessTokenSet: strings.TrimSpace(cfg.AccessToken) != "",
 		Timezone:       cfg.Timezone,
+		SecretTokenSet: strings.TrimSpace(cfg.SecretToken) != "",
 		UpdatedAt:      cfg.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 }

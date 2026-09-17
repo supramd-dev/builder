@@ -129,16 +129,19 @@ export interface SiteConfig {
   // IANA timezone name every timestamp is displayed in; "" = the viewer's
   // browser-local zone.
   timezone: string
+  secretTokenSet: boolean
   updatedAt: string
 }
 
-// SiteConfigUpdate is the PUT body: the access token is write-only.
-// An empty accessToken keeps the stored one; the clear flag removes it.
+// SiteConfigUpdate is the PUT body: the tokens are write-only.
+// An empty value keeps the stored one; the clear flags remove it.
 export interface SiteConfigUpdate {
   codeRepo: string
   accessToken?: string
   timezone?: string
+  secretToken?: string
   clearAccessToken?: boolean
+  clearSecretToken?: boolean
 }
 
 export async function getSiteConfig(): Promise<SiteConfig> {
