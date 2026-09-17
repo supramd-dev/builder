@@ -871,7 +871,9 @@ func seedStageRuns(s *store.Store, subs []*store.Task, status map[int64]string) 
 			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
 				return fmt.Errorf("seed regression run: %w", err)
 			}
-			cases[kind] = append(cases[kind], store.CaseInput{Name: stage.Case})
+			// The case child links to its own sub-task (the per-case log
+			// source), exactly like the dispatch path's placeholders.
+			cases[kind] = append(cases[kind], store.CaseInput{Name: stage.Case, TaskID: sub.ID})
 		default:
 			continue
 		}
