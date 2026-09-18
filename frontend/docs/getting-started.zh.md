@@ -65,14 +65,27 @@ go run ./server -config /etc/md-builder/server.yaml
 一起启动:
 
 ```sh
-cp .env.example .env    # 然后修改 MINIO_ROOT_PASSWORD
-docker compose up -d    # 或者:podman compose up -d
+export MINIO_ROOT_PASSWORD='换成一个足够长的密码'
+mkdir -p data/md-builder data/minio   # 第一次 up 之前先建好
+docker compose up -d                  # 或者:podman compose up -d
 ```
 
-之后界面在 <http://localhost:8080>(改 `.env` 里的 `MD_BUILDER_PORT`
-即可换端口,映射到宿主机的端口会一起变)。数据库是 `md-builder-data`
-卷,MinIO 的数据是 `minio-data` 卷,其控制台在
+整个过程不需要任何配置文件:compose 文件里除了 MinIO 密码之外每一项
+都有默认值,密码从环境变量读取(没设置就拒绝启动)。其它默认值同样
+可以用环境变量覆盖 —— 例如 `MD_BUILDER_PORT=9000 docker compose up -d`
+会同时改掉监听端口和映射到宿主机的端口。
+
+之后界面在 <http://localhost:8080>,MinIO 控制台在
 <http://127.0.0.1:9001>。
+
+部署写入的所有数据都留在这两个目录里 —— 数据库在 `data/md-builder`,
+桶数据在 `data/minio` —— 因此备份就是把 `data/` 拷走。这两个目录需要
+自己先建好:Docker 会自动创建不存在的挂载源目录,但所有者是 root,
+而 root 属主的目录容器里的用户写不进去。
+
+服务端以 uid 10001 运行。macOS 上这一点看不出来(文件共享会映射属主),
+但在 Linux 上文件会属于一个宿主上并不存在的 uid —— 用 `id -u`/`id -g`
+查出来,设成 `MD_BUILDER_UID`/`MD_BUILDER_GID`,文件就仍然归你所有。
 
 因为没有注册界面,第一个账号仍然要用命令行创建。`cli` 服务与
 服务端共用同一个数据库和对象存储:
@@ -89,8 +102,10 @@ shell 历史里)。需要演示数据时,`seed` 走同一条路。
 
 ```sh
 docker build -t md-builder:local .
+mkdir -p data/md-builder
 docker run -d --name md-builder -p 8080:8080 \
-  -v md-builder-data:/data \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/data/md-builder:/data" \
   -e MD_BUILDER_S3_ENDPOINT=minio.example.com:9000 \
   -e MD_BUILDER_S3_ACCESS_KEY=... -e MD_BUILDER_S3_SECRET_KEY=... \
   -e MD_BUILDER_S3_BUCKET=md-builder \

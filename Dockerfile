@@ -70,7 +70,8 @@ COPY --from=frontend /src/frontend/dist /app/frontend/dist
 ENV MD_BUILDER_DSN=/data/md-builder.db
 # A named volume inherits this directory's ownership when it is created, so
 # the server (uid 10001) can write it. A bind mount does not: point one at a
-# host directory owned by 10001, or run the container as that uid.
+# host directory owned by the uid the container runs as — docker-compose.yml
+# sets that from MD_BUILDER_UID, defaulting to 10001.
 VOLUME /data
 
 EXPOSE 8080

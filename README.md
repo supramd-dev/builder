@@ -72,11 +72,12 @@ without it.
 ### Containers
 
 [Dockerfile](Dockerfile) builds the frontend and the server into one image;
-[docker-compose.yml](docker-compose.yml) runs it next to a MinIO instance
-with the credentials coming from a `.env` file:
+[docker-compose.yml](docker-compose.yml) runs it next to a MinIO instance.
+No configuration file is needed — the MinIO password is the one value with
+no default, and it comes from the environment:
 
 ```sh
-cp .env.example .env                  # then set MINIO_ROOT_PASSWORD
+export MINIO_ROOT_PASSWORD='pick-something-long'
 mkdir -p data/md-builder data/minio   # the database and the buckets
 docker compose up -d                  # or: podman compose up -d
 docker compose --profile tools run --rm cli adduser -username alice -email alice@example.com

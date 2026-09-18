@@ -1,20 +1,26 @@
-# md-builder with its object storage, for Docker or Podman:
+# md-builder with its object storage, for Docker or Podman. One value has to
+# be supplied — the MinIO password — everything else has a default here:
 #
-#   cp .env.example .env          # then edit the passwords
+#   export MINIO_ROOT_PASSWORD='pick-something-long'
 #   mkdir -p data/md-builder data/minio
-#   docker compose up -d          # or: podman compose up -d
+#   docker compose up -d                     # or: podman compose up -d
 #   docker compose --profile tools run --rm cli adduser -username alice -email alice@example.com
+#
+# No .env file is needed: compose reads one if you happen to create it, and
+# every variable below that carries a default can also be set from the
+# environment. What you must not do is leave the password unset — MinIO would
+# fall back to its published default credentials.
 #
 # The first account has to come from the CLI, so the tools profile below
 # carries a one-off `cli` service that shares this deployment's database and
 # object storage.
 #
 # Both stores are bind mounts under ./data, so everything this deployment
-# writes stays next to this file — back it up by copying the directory.
+# writes stays next to this file and backing it up is copying the directory.
 # Create those two directories before the first `up`: Docker creates a missing
-# bind-mount source itself, as root, and a root-owned directory is one the
-# container's user cannot write. On Linux, set MD_BUILDER_UID/MD_BUILDER_GID
-# in .env to your own `id -u`/`id -g` so the files stay yours (see below).
+# bind-mount source itself, as root, and the container's user cannot write a
+# root-owned directory. On Linux, run `id -u`/`id -g` and set
+# MD_BUILDER_UID/MD_BUILDER_GID to those numbers so the files stay yours.
 #
 # Compose file format: works with Compose v2 (docker compose), podman-compose
 # and podman compose with the docker-compose provider. Nothing here depends on
@@ -34,8 +40,11 @@ x-app-env: &app-env
   # reachable backend — so these point at the minio service below. Replace
   # them to use an external S3-compatible store.
   MD_BUILDER_S3_ENDPOINT: "minio:9000"
-  MD_BUILDER_S3_ACCESS_KEY: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}"
-  MD_BUILDER_S3_SECRET_KEY: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}"
+  MD_BUILDER_S3_ACCESS_KEY: "${MINIO_ROOT_USER:-md-builder}"
+  # The one value with no default: the server and MinIO must agree on it, and
+  # a published one is a published deployment. `:?` stops compose with this
+  # message when it is unset.
+  MD_BUILDER_S3_SECRET_KEY: "${MINIO_ROOT_PASSWORD:?export MINIO_ROOT_PASSWORD before running compose}"
   MD_BUILDER_S3_BUCKET: "${MD_BUILDER_S3_BUCKET:-md-builder}"
   # Plain HTTP inside the compose network; set "true" (or drop the variable
   # and use a config file) for a TLS endpoint.
@@ -54,16 +63,16 @@ x-app-image: &app-image
     context: .
     args:
       # Stamp the source revision into the binary, as `make build-server`
-      # does: MD_BUILDER_VERSION="$(git describe --always --dirty)" in .env.
+      # does — build with MD_BUILDER_VERSION="$(git describe --always --dirty)".
       VERSION: "${MD_BUILDER_VERSION:-dev}"
 
 services:
   md-builder:
     <<: *app-image
-    # The image's own account. Overridden from .env on a Linux host, where
-    # uid 10001 owns nothing: MD_BUILDER_UID=$(id -u) keeps the files in
-    # ./data/md-builder owned by you. Only /app is read-only to this user, so
-    # any uid works.
+    # The image's own account. On a Linux host uid 10001 owns nothing, so set
+    # MD_BUILDER_UID/MD_BUILDER_GID to your own ids to keep the files in
+    # ./data/md-builder yours. Only /app is read-only to this user, so any uid
+    # works.
     user: "${MD_BUILDER_UID:-10001}:${MD_BUILDER_GID:-10001}"
     restart: unless-stopped
     depends_on:
@@ -90,11 +99,13 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}"
-      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}"
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-md-builder}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?export MINIO_ROOT_PASSWORD before running compose}"
     volumes:
-      # Buckets live in ./data/minio. On a host with SELinux enforcing
-      # (RHEL, Fedora) append :z to both bind mounts here and in md-builder.
+      # Buckets live in ./data/minio, owned by whatever user the MinIO image
+      # runs as (usually root), so expect to remove it with sudo. On a host
+      # with SELinux enforcing (RHEL, Fedora) append :z to both bind mounts
+      # here and in md-builder.
       - ./data/minio:/data
     ports:
       # Bound to the loopback interface: the server reaches MinIO over the

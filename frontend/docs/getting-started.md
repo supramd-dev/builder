@@ -68,14 +68,30 @@ The repository ships a `Dockerfile` and a `docker-compose.yml` that run the
 server together with a MinIO instance:
 
 ```sh
-cp .env.example .env    # then set MINIO_ROOT_PASSWORD
-docker compose up -d    # or: podman compose up -d
+export MINIO_ROOT_PASSWORD='pick-something-long'
+mkdir -p data/md-builder data/minio      # before the first `up`
+docker compose up -d                     # or: podman compose up -d
 ```
 
-The UI is then on <http://localhost:8080> (`MD_BUILDER_PORT` in `.env`
-moves it, including the published port). The database is the
-`md-builder-data` volume; MinIO's is `minio-data`, and its console is on
+No configuration file is involved: the compose file carries a default for
+everything except the MinIO password, which it reads from the environment
+(and refuses to start without). Any of those defaults can be overridden the
+same way — `MD_BUILDER_PORT=9000 docker compose up -d` moves both the
+listening port and the published one.
+
+The UI is then on <http://localhost:8080> and MinIO's console on
 <http://127.0.0.1:9001>.
+
+Everything the deployment writes stays in two directories next to the
+compose file — the database in `data/md-builder`, the buckets in
+`data/minio` — so backing it up is copying `data/`. Create them yourself
+first: Docker happily creates a missing bind-mount source, but it does so as
+root, and a root-owned directory is one the container's user cannot write.
+
+The server runs as uid 10001. On macOS that is invisible (file sharing maps
+ownership), but on Linux the files would be owned by a uid that does not
+exist on the host — run `id -u`/`id -g` and set
+`MD_BUILDER_UID`/`MD_BUILDER_GID` to those numbers to keep them yours.
 
 There is no registration UI, so the first account comes from the CLI — the
 `cli` service runs against the same database and object store as the
@@ -95,8 +111,10 @@ environment:
 
 ```sh
 docker build -t md-builder:local .
+mkdir -p data/md-builder
 docker run -d --name md-builder -p 8080:8080 \
-  -v md-builder-data:/data \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/data/md-builder:/data" \
   -e MD_BUILDER_S3_ENDPOINT=minio.example.com:9000 \
   -e MD_BUILDER_S3_ACCESS_KEY=... -e MD_BUILDER_S3_SECRET_KEY=... \
   -e MD_BUILDER_S3_BUCKET=md-builder \
