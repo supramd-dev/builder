@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
+import { Check, Copy, ExternalLink } from 'lucide-react'
 import {
+  cachedSiteConfig,
   getSiteConfig,
   updateSiteConfig,
   type SiteConfig,
@@ -446,16 +448,103 @@ function DisplayTab({ onError }: { onError: (message: string) => void }) {
 
 // --- Webhook tab --------------------------------------------------------------
 
+// gitlabWebhooksURL turns a repository location (the site config's codeRepo)
+// into the GitLab project's webhook integration page URL — the page the user
+// would otherwise navigate to by hand (project → Settings → Webhooks).
+// Returns "" when the repository is not an http(s) GitLab URL (a bare
+// "group/project" path or an SSH remote gives no host to link to).
+function gitlabWebhooksURL(codeRepo: string): string {
+  let url = codeRepo.trim()
+  if (!url.startsWith('http://') && !url.startsWith('https://')) return ''
+  url = url.replace(/\/+$/, '').replace(/\.git$/, '')
+  return `${url}/-/hooks`
+}
+
+// WebhookTab shows the webhook endpoint as a copy-ready absolute URL and a
+// link straight into the GitLab project's webhook settings (the configured
+// code repository, when it is an http(s) GitLab URL). The endpoint itself is
+// unauthenticated; GitLab should be pointed at it with the Push events, Tag
+// push events and Merge request events triggers.
 function WebhookTab() {
+  const [codeRepo, setCodeRepo] = useState('')
+  const [origin, setOrigin] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    // The origin is stable for a page load; capture it once the tab mounts
+    // (window is not available during module init on SSR-style tests).
+    setOrigin(window.location.origin)
+    let cancelled = false
+    cachedSiteConfig()
+      .then((cfg) => {
+        if (!cancelled && cfg) setCodeRepo(cfg.codeRepo)
+      })
+      .catch(() => {
+        // The tab degrades to the path-only URL without the repo link.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const webhookURL = origin ? `${origin}/api/webhooks/gitlab` : '/api/webhooks/gitlab'
+  const gitlabURL = gitlabWebhooksURL(codeRepo)
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(webhookURL)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard API unavailable (insecure context): select-then-copy is
+      // the fallback users can do by hand; keep the field read-selectable.
+    }
+  }
+
   return (
     <div>
       <h3>GitLab webhook</h3>
       <p className="text-muted">
-        Configure a GitLab webhook (Settings → Webhooks) pointing at{' '}
-        <code>/api/webhooks/gitlab</code> with the <em>Push events</em>{' '}
-        trigger. Pushes to the configured code repository dispatch test jobs
-        automatically.
+        Configure a GitLab webhook pointing at the URL below with the{' '}
+        <em>Push events</em>, <em>Tag push events</em> and{' '}
+        <em>Merge request events</em> triggers. Events targeting the
+        configured code repository dispatch test jobs automatically.
       </p>
+
+      <div className="form-group">
+        <label>Webhook URL</label>
+        <div className="webhook-copy-row">
+          <input
+            type="text"
+            readOnly
+            value={webhookURL}
+            onFocus={(e) => e.target.select()}
+          />
+          <button type="button" className="btn" onClick={copy} title="Copy to clipboard">
+            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+        <small className="text-muted">
+          The endpoint is unauthenticated (called by the GitLab server, which
+          cannot hold a session); verify the <code>X-Gitlab-Token</code>{' '}
+          header once a secret token is configured.
+        </small>
+      </div>
+
+      {gitlabURL ? (
+        <p>
+          <a href={gitlabURL} target="_blank" rel="noreferrer">
+            <ExternalLink size={14} style={{ verticalAlign: '-2px' }} />{' '}
+            Open the GitLab webhook settings of the configured repository
+          </a>
+        </p>
+      ) : (
+        <p className="text-muted">
+          Set the code repository (Repository tab) to link directly to its
+          GitLab webhook settings.
+        </p>
+      )}
     </div>
   )
 }

@@ -325,6 +325,28 @@ textarea.form-control:focus {
   font-weight: normal;
 }
 
+/* The copy-ready URL row of the settings webhook tab: a read-only input
+   (selects fully on focus for manual copy) beside the copy button. */
+.webhook-copy-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.webhook-copy-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+.webhook-copy-row .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+}
+
 /* --- Buttons --- */
 
 .btn {
