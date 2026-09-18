@@ -30,10 +30,17 @@ objectStorage:
 
 The file is looked up in this order:
 
-1. `$MD_BUILDER_CONFIG`, if set (the file must exist);
-2. `./md-builder-server.yaml`;
-3. `./server/md-builder-server.yaml` — so the binary also runs from the
+1. the `-config` flag:
+   `md-builder -config /etc/md-builder/server.yaml`;
+2. `$MD_BUILDER_CONFIG`, if set (the file must exist);
+3. `./md-builder-server.yaml`;
+4. `./server/md-builder-server.yaml` — so the binary also runs from the
    project root.
+
+A pinned path — the flag or the variable — must exist; it is never silently
+replaced by another file, so a typo cannot start a differently configured
+deployment. `md-builder -h` lists the flag, and `seed` takes it too
+(`md-builder seed -config …`).
 
 An unknown key is a startup error, so a typo like `endpont` is reported
 instead of silently leaving the endpoint empty.
@@ -46,7 +53,7 @@ values win over the file:
 
 | Variable | Setting |
 | --- | --- |
-| `MD_BUILDER_CONFIG` | path to the config file |
+| `MD_BUILDER_CONFIG` | path to the config file (the `-config` flag wins over it) |
 | `MD_BUILDER_S3_ENDPOINT` | `endpoint` |
 | `MD_BUILDER_S3_ACCESS_KEY` | `accessKey` |
 | `MD_BUILDER_S3_SECRET_KEY` | `secretKey` |

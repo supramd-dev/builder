@@ -28,9 +28,15 @@ objectStorage:
 
 文件按以下顺序查找:
 
-1. `$MD_BUILDER_CONFIG`(若已设置,该文件必须存在);
-2. `./md-builder-server.yaml`;
-3. `./server/md-builder-server.yaml` —— 这样在项目根目录也能直接运行。
+1. `-config` 命令行参数:
+   `md-builder -config /etc/md-builder/server.yaml`;
+2. `$MD_BUILDER_CONFIG`(若已设置,该文件必须存在);
+3. `./md-builder-server.yaml`;
+4. `./server/md-builder-server.yaml` —— 这样在项目根目录也能直接运行。
+
+被显式指定的路径(命令行参数或环境变量)必须存在,绝不会静默地改用
+另一个文件,因此拼写错误不会启动一个配置不同的部署。`md-builder -h`
+会列出该参数;`seed` 子命令同样支持它(`md-builder seed -config …`)。
 
 未知的键会导致启动失败,因此像 `endpont` 这样的拼写错误会被报出来,
 而不会静默地留下空 endpoint。
@@ -42,7 +48,7 @@ objectStorage:
 
 | 环境变量 | 配置项 |
 | --- | --- |
-| `MD_BUILDER_CONFIG` | 配置文件路径 |
+| `MD_BUILDER_CONFIG` | 配置文件路径(命令行 `-config` 优先于它) |
 | `MD_BUILDER_S3_ENDPOINT` | `endpoint` |
 | `MD_BUILDER_S3_ACCESS_KEY` | `accessKey` |
 | `MD_BUILDER_S3_SECRET_KEY` | `secretKey` |

@@ -10,6 +10,9 @@
 // in the object store, so a server without it cannot run. Every setting can
 // also be supplied through the environment (MD_BUILDER_S3_*), which is how
 // containers and CI deployments usually inject the credentials.
+//
+// The file is found in this order: the -config flag, $MD_BUILDER_CONFIG, then
+// md-builder-server.yaml in the working directory or under ./server.
 package config
 
 import (
@@ -32,6 +35,14 @@ const DefaultFileName = "md-builder-server.yaml"
 // EnvConfigPath overrides the config file location.
 const EnvConfigPath = "MD_BUILDER_CONFIG"
 
+// FlagName is the command-line flag that pins the config file; FlagUsage is
+// its help text, shared by the server and the subcommands that read the
+// config so the lookup order is documented in one place.
+const FlagName = "config"
+
+const FlagUsage = "server config file (default: $" + EnvConfigPath +
+	", ./" + DefaultFileName + ", ./server/" + DefaultFileName + ")"
+
 // File is the parsed config file.
 type File struct {
 	// ObjectStorage configures the artifact store (MinIO / S3).
@@ -40,14 +51,18 @@ type File struct {
 
 // Load reads the server config file and applies the environment overrides.
 //
-// The returned path is where the configuration came from (the file, or
-// "(environment)" when only MD_BUILDER_S3_* variables were set) and is meant
-// for startup logging and error messages.
-func Load() (storage.Config, string, error) {
-	path, explicit := resolvePath()
-	cfg := storage.Config{}
-	source := "(environment)"
+// pinned is the path given on the command line (the -config flag, "" when it
+// was not used); it wins over $MD_BUILDER_CONFIG and over the default
+// locations. The returned source is where the configuration came from — the
+// file's path, or "(environment)" when only MD_BUILDER_S3_* variables were
+// set — and is meant for startup logging and error messages.
+func Load(pinned string) (storage.Config, string, error) {
+	path, source, err := locate(pinned)
+	if err != nil {
+		return storage.Config{}, "", err
+	}
 
+	cfg := storage.Config{}
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -63,12 +78,6 @@ func Load() (storage.Config, string, error) {
 		}
 		cfg = f.ObjectStorage
 		cfg.ConfigPath = path
-		source = path
-	} else if explicit {
-		return storage.Config{}, "", fmt.Errorf("%s points at %s, which does not exist", EnvConfigPath, os.Getenv(EnvConfigPath))
-	} else if !envComplete() {
-		return storage.Config{}, "", fmt.Errorf("no %s found (looked in the working directory and ./server) and no %s/%s environment settings",
-			DefaultFileName, "MD_BUILDER_S3_ENDPOINT", "MD_BUILDER_S3_BUCKET")
 	}
 
 	applyEnv(&cfg)
@@ -83,22 +92,34 @@ func Load() (storage.Config, string, error) {
 	return cfg, source, nil
 }
 
-// resolvePath finds the config file: $MD_BUILDER_CONFIG first, then
-// md-builder-server.yaml next to the working directory or under ./server.
-// explicit reports whether the location was pinned by the environment.
-func resolvePath() (path string, explicit bool) {
-	if p := strings.TrimSpace(os.Getenv(EnvConfigPath)); p != "" {
-		if _, err := os.Stat(p); err != nil {
-			return "", true
+// locate resolves which config file to read: -config, then
+// $MD_BUILDER_CONFIG, then md-builder-server.yaml in the working directory or
+// under ./server. An empty path without an error means "no file at all" —
+// the environment alone must configure the store, which the caller's
+// Validate rejects when it does not.
+func locate(pinned string) (path, source string, err error) {
+	if p := strings.TrimSpace(pinned); p != "" {
+		if _, statErr := os.Stat(p); statErr != nil {
+			return "", "", fmt.Errorf("config file %s (-config): %w", p, statErr)
 		}
-		return p, true
+		return p, p, nil
+	}
+	if p := strings.TrimSpace(os.Getenv(EnvConfigPath)); p != "" {
+		if _, statErr := os.Stat(p); statErr != nil {
+			return "", "", fmt.Errorf("%s points at %s, which does not exist", EnvConfigPath, p)
+		}
+		return p, p, nil
 	}
 	for _, candidate := range []string{DefaultFileName, filepath.Join("server", DefaultFileName)} {
-		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
-			return candidate, false
+		if st, statErr := os.Stat(candidate); statErr == nil && !st.IsDir() {
+			return candidate, candidate, nil
 		}
 	}
-	return "", false
+	if !envComplete() {
+		return "", "", fmt.Errorf("no %s found (looked in the working directory and ./server) and no %s/%s environment settings; pass -config to name one",
+			DefaultFileName, "MD_BUILDER_S3_ENDPOINT", "MD_BUILDER_S3_BUCKET")
+	}
+	return "", "(environment)", nil
 }
 
 // envComplete reports whether the environment alone configures the store, so

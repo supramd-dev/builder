@@ -47,7 +47,7 @@ objectStorage:
   gc: true
   gcIntervalHours: 3
 `)
-	cfg, source, err := Load()
+	cfg, source, err := Load("")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -76,7 +76,7 @@ objectStorage:
   secretKey: changeme
   bucket: artifacts
 `)
-	if _, _, err := Load(); err == nil || !strings.Contains(err.Error(), "endpont") {
+	if _, _, err := Load(""); err == nil || !strings.Contains(err.Error(), "endpont") {
 		t.Fatalf("err = %v, want an unknown-field error", err)
 	}
 }
@@ -84,7 +84,7 @@ objectStorage:
 func TestLoadMissingFile(t *testing.T) {
 	clearEnv(t)
 	t.Chdir(t.TempDir())
-	if _, _, err := Load(); err == nil || !strings.Contains(err.Error(), DefaultFileName) {
+	if _, _, err := Load(""); err == nil || !strings.Contains(err.Error(), DefaultFileName) {
 		t.Fatalf("err = %v, want a message naming the config file", err)
 	}
 }
@@ -95,7 +95,7 @@ func TestLoadRejectsIncompleteFile(t *testing.T) {
 objectStorage:
   endpoint: minio.example.com:9000
 `)
-	_, _, err := Load()
+	_, _, err := Load("")
 	if err == nil || !strings.Contains(err.Error(), "objectStorage.accessKey") {
 		t.Fatalf("err = %v", err)
 	}
@@ -120,7 +120,7 @@ objectStorage:
 	t.Setenv("MD_BUILDER_S3_SECRET_KEY", "from-env")
 	t.Setenv("MD_BUILDER_S3_USE_SSL", "true")
 
-	cfg, _, err := Load()
+	cfg, _, err := Load("")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestLoadFromEnvOnly(t *testing.T) {
 	t.Setenv("MD_BUILDER_S3_SECRET_KEY", "sk")
 	t.Setenv("MD_BUILDER_S3_BUCKET", "artifacts")
 
-	cfg, source, err := Load()
+	cfg, source, err := Load("")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestLoadPartialEnvWithoutFile(t *testing.T) {
 	clearEnv(t)
 	t.Chdir(t.TempDir())
 	t.Setenv("MD_BUILDER_S3_ENDPOINT", "minio:9000")
-	if _, _, err := Load(); err == nil {
+	if _, _, err := Load(""); err == nil {
 		t.Fatal("expected an error for a half-configured store")
 	}
 }
@@ -172,7 +172,7 @@ func TestLoadExplicitPathMustExist(t *testing.T) {
 	clearEnv(t)
 	t.Chdir(t.TempDir())
 	t.Setenv(EnvConfigPath, filepath.Join(t.TempDir(), "nope.yaml"))
-	if _, _, err := Load(); err == nil || !strings.Contains(err.Error(), "does not exist") {
+	if _, _, err := Load(""); err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -191,7 +191,7 @@ func TestLoadFindsServerSubdirectory(t *testing.T) {
 	}
 	t.Chdir(dir)
 
-	cfg, source, err := Load()
+	cfg, source, err := Load("")
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -200,5 +200,93 @@ func TestLoadFindsServerSubdirectory(t *testing.T) {
 	}
 	if !strings.Contains(source, "server") {
 		t.Fatalf("source = %q", source)
+	}
+}
+
+// A path given on the command line (-config) is read even when the working
+// directory holds a different, valid config file.
+func TestLoadFromPinnedPath(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, "objectStorage:\n  endpoint: from-cwd\n  accessKey: ak\n  secretKey: sk\n  bucket: cwd\n")
+
+	dir := t.TempDir()
+	pinned := filepath.Join(dir, "elsewhere.yaml")
+	if err := os.WriteFile(pinned, []byte("objectStorage:\n  endpoint: pinned\n  accessKey: ak\n  secretKey: sk\n  bucket: pinned\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, source, err := Load(pinned)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Endpoint != "pinned" || cfg.Bucket != "pinned" {
+		t.Fatalf("the pinned file should win: %+v", cfg)
+	}
+	if source != pinned || cfg.ConfigPath != pinned {
+		t.Fatalf("source = %q, config path = %q", source, cfg.ConfigPath)
+	}
+}
+
+// -config beats $MD_BUILDER_CONFIG, which beats the default lookup.
+func TestLoadPinnedPathBeatsEnv(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, "objectStorage:\n  endpoint: from-cwd\n  accessKey: ak\n  secretKey: sk\n  bucket: cwd\n")
+
+	dir := t.TempDir()
+	fromEnv := filepath.Join(dir, "env.yaml")
+	if err := os.WriteFile(fromEnv, []byte("objectStorage:\n  endpoint: env\n  accessKey: ak\n  secretKey: sk\n  bucket: env\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	pinned := filepath.Join(dir, "pinned.yaml")
+	if err := os.WriteFile(pinned, []byte("objectStorage:\n  endpoint: pinned\n  accessKey: ak\n  secretKey: sk\n  bucket: pinned\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	t.Setenv(EnvConfigPath, fromEnv)
+
+	cfg, _, err := Load(pinned)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Endpoint != "pinned" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+
+	cfg, _, err = Load("")
+	if err != nil {
+		t.Fatalf("load env: %v", err)
+	}
+	if cfg.Endpoint != "env" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+}
+
+// A pinned path that does not exist names the flag rather than falling back
+// to another file: a typo must not silently serve a different deployment.
+func TestLoadPinnedPathMustExist(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, "objectStorage:\n  endpoint: from-cwd\n  accessKey: ak\n  secretKey: sk\n  bucket: cwd\n")
+
+	missing := filepath.Join(t.TempDir(), "nope.yaml")
+	_, _, err := Load(missing)
+	if err == nil || !strings.Contains(err.Error(), "-config") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// The environment can still configure the store when no file is pinned.
+func TestLoadPinnedEmptyKeepsEnvOnlyPath(t *testing.T) {
+	clearEnv(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("MD_BUILDER_S3_ENDPOINT", "minio:9000")
+	t.Setenv("MD_BUILDER_S3_ACCESS_KEY", "ak")
+	t.Setenv("MD_BUILDER_S3_SECRET_KEY", "sk")
+	t.Setenv("MD_BUILDER_S3_BUCKET", "b")
+
+	cfg, source, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Endpoint != "minio:9000" || source != "(environment)" {
+		t.Fatalf("cfg = %+v, source = %q", cfg, source)
 	}
 }

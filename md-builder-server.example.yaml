@@ -4,6 +4,9 @@
 # storage. The server reads this file at startup and refuses to run without
 # a working object store — artifacts live there, not in the database.
 #
+# Where it is read from: -config <path>, then $MD_BUILDER_CONFIG, then
+# ./md-builder-server.yaml, then ./server/md-builder-server.yaml.
+#
 # Every setting can also be supplied through the environment, which wins
 # over this file: MD_BUILDER_S3_ENDPOINT, _ACCESS_KEY, _SECRET_KEY,
 # _BUCKET, _REGION, _PREFIX, _USE_SSL. Setting the first four is enough to

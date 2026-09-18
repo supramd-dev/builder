@@ -1,11 +1,13 @@
 // md-builder is the backend server for the md-builder scientific computing
 // test platform. It hosts the frontend assets, serves the JSON API, and
 // provides CLI subcommands (adduser, seed) for user management and demo
-// data.
+// data. Serving is the default action; -config names the server config file
+// the API and the seed subcommand read (see the config package).
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -40,11 +42,13 @@ func defaultDSN() string {
 	return "md-builder.db" // SQLite file in the working directory
 }
 
-// openObjectStorage loads the server config file (md-builder-server.yaml) and
-// connects to the artifact store, verifying that the bucket exists. It is the
-// startup gate for every subcommand that records artifacts.
-func openObjectStorage() (*storage.MinIO, storage.Config, error) {
-	cfg, source, err := config.Load()
+// openObjectStorage loads the server config file and connects to the artifact
+// store, verifying that the bucket exists. It is the startup gate for every
+// subcommand that records artifacts.
+//
+// configPath is the -config flag ("" to search the usual places).
+func openObjectStorage(configPath string) (*storage.MinIO, storage.Config, error) {
+	cfg, source, err := config.Load(configPath)
 	if err != nil {
 		return nil, storage.Config{}, err
 	}
@@ -94,10 +98,20 @@ func main() {
 		os.Exit(seedSubcommand())
 	}
 
+	// Serving the API is what the binary does when no subcommand is given;
+	// -config names the server config file to read.
+	flags := flag.NewFlagSet("md-builder", flag.ExitOnError)
+	configPath := flags.String(config.FlagName, "", config.FlagUsage)
+	_ = flags.Parse(os.Args[1:])
+	if flags.NArg() > 0 {
+		// A mistyped subcommand would otherwise start the server silently.
+		log.Fatalf("unexpected argument %q (subcommands: adduser, seed — their flags follow the name, e.g. md-builder seed -config FILE; see -h)", flags.Arg(0))
+	}
+
 	// Object storage is mandatory: artifacts live there, so a deployment
 	// without a reachable backend cannot record test output. Fail before
 	// serving anything rather than on the first artifact write.
-	objs, objCfg, err := openObjectStorage()
+	objs, objCfg, err := openObjectStorage(*configPath)
 	if err != nil {
 		log.Fatalf("object storage: %v", err)
 	}

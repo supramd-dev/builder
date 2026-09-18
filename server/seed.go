@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"md-builder/server/auth"
+	"md-builder/server/config"
 	"md-builder/server/runner"
 	"md-builder/server/store"
 )
@@ -31,13 +32,14 @@ func seedSubcommand() int {
 	fs := flag.NewFlagSet("seed", flag.ContinueOnError)
 	dsn := fs.String("dsn", defaultDSN(), "database DSN (sqlite path or postgres URL)")
 	force := fs.Bool("force", false, "delete leftover demo tasks before seeding")
+	configPath := fs.String(config.FlagName, "", config.FlagUsage)
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return 2
 	}
 
 	// The demo data includes artifacts, so seeding needs the same object
 	// storage the server uses.
-	objs, _, err := openObjectStorage()
+	objs, _, err := openObjectStorage(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: object storage: %v\n", err)
 		return 1
