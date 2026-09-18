@@ -35,7 +35,15 @@ func seedSubcommand() int {
 		return 2
 	}
 
-	s, err := store.Open(*dsn)
+	// The demo data includes artifacts, so seeding needs the same object
+	// storage the server uses.
+	objs, _, err := openObjectStorage()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: object storage: %v\n", err)
+		return 1
+	}
+
+	s, err := store.Open(*dsn, store.WithObjects(objs))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: open db: %v\n", err)
 		return 1

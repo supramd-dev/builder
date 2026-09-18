@@ -480,7 +480,7 @@ func TestUpsertTestRunAggregateWithArtifact(t *testing.T) {
 		t.Fatalf("list artifacts: %v", err)
 	}
 	if len(artifacts) != 1 || artifacts[0].Kind != ArtifactKindResults ||
-		artifacts[0].Name != "build/test_detail.xml" || artifacts[0].Content != "<testsuites/>" {
+		artifacts[0].Name != "build/test_detail.xml" || artifactText(t, s, &artifacts[0]) != "<testsuites/>" {
 		t.Fatalf("artifact wrong: %+v", artifacts)
 	}
 
@@ -575,7 +575,7 @@ func TestGetArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if a.Content != "{}" || a.RunID != run.ID {
+	if artifactText(t, s, a) != "{}" || a.RunID != run.ID {
 		t.Fatalf("artifact wrong: %+v", a)
 	}
 }
@@ -727,7 +727,7 @@ func TestUpsertCaseRunChildArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list child artifacts: %v", err)
 	}
-	if len(artifacts) != 1 || artifacts[0].Name != "out.xml" || artifacts[0].Content != "<x/>" {
+	if len(artifacts) != 1 || artifacts[0].Name != "out.xml" || artifactText(t, s, &artifacts[0]) != "<x/>" {
 		t.Fatalf("child artifacts wrong: %+v", artifacts)
 	}
 	oldChildID := child.ID

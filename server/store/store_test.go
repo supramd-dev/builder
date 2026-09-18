@@ -7,17 +7,30 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"md-builder/server/storage"
 )
 
-// newTestStore opens an in-memory SQLite store for each test.
+// newTestStore opens an in-memory SQLite store for each test, backed by an
+// in-memory object store (the artifact backend is mandatory, so every store
+// that records artifacts needs one).
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open("file::memory:?cache=shared")
+	s, _ := newTestStoreWithObjects(t)
+	return s
+}
+
+// newTestStoreWithObjects also returns the object store, for tests that
+// inspect what was uploaded.
+func newTestStoreWithObjects(t *testing.T) (*Store, *storage.Memory) {
+	t.Helper()
+	objs := storage.NewMemory()
+	s, err := Open("file::memory:?cache=shared", WithObjects(objs))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return s
+	return s, objs
 }
 
 func TestCreateAndGetUser(t *testing.T) {

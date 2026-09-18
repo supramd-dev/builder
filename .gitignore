@@ -6,6 +6,10 @@
 # Local SQLite databases (created at runtime by the server or adduser).
 *.db
 
+# Server configuration holding object-storage credentials. Commit
+# md-builder-server.example.yaml instead.
+md-builder-server.yaml
+
 # Frontend
 frontend/node_modules/
 frontend/dist/

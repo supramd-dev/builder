@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"md-builder/server/storage"
 	"md-builder/server/store"
 )
 
@@ -79,11 +80,22 @@ func (f *fakeCloner) CloneAndUpload(ctx context.Context, h SSHHost, codeRepoURL,
 	return 5 * 1024 * 1024, nil
 }
 
+// artifactText reads an artifact's bytes through the store: the row itself
+// only references the object, so this is what the API would serve.
+func artifactText(t *testing.T, s *store.Store, a *store.TestArtifact) string {
+	t.Helper()
+	data, err := s.ArtifactContent(context.Background(), a)
+	if err != nil {
+		t.Fatalf("read artifact %d: %v", a.ID, err)
+	}
+	return string(data)
+}
+
 // newExecuteFixture seeds a user/environment/commit and a full task graph,
 // returning the service with fakes and the claimed clone task.
 func newExecuteFixture(t *testing.T, yaml string) (*Service, *store.Store, *fakeExecer, *fakeCloner, *store.Task) {
 	t.Helper()
-	s, err := store.Open("file::memory:?cache=shared")
+	s, err := store.Open("file::memory:?cache=shared", store.WithObjects(storage.NewMemory()))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -298,7 +310,10 @@ func TestExecuteStageFetchesArtifactFile(t *testing.T) {
 	if artifacts[0].Kind != store.ArtifactKindResults || artifacts[0].Name != "build/test_detail.xml" {
 		t.Errorf("artifact wrong: %+v", artifacts[0])
 	}
-	if artifacts[0].Content != sampleGTestXML {
+	if artifacts[0].ObjectKey == "" {
+		t.Error("the fetched file should have been uploaded to object storage")
+	}
+	if artifactText(t, s, &artifacts[0]) != sampleGTestXML {
 		t.Errorf("artifact content should be verbatim")
 	}
 }
@@ -339,7 +354,7 @@ func TestExecuteStageMultipleArtifactFiles(t *testing.T) {
 		if a.Kind != store.ArtifactKindResults {
 			t.Errorf("artifact wrong: %+v", a)
 		}
-		byName[a.Name] = a.Content
+		byName[a.Name] = artifactText(t, s, &a)
 	}
 	if byName["build/test_detail.xml"] != sampleGTestXML {
 		t.Errorf("xml artifact content should be verbatim: %q", byName["build/test_detail.xml"])
@@ -725,8 +740,8 @@ func TestExecuteBuildFetchesArtifacts(t *testing.T) {
 	if artifacts[0].Kind != store.ArtifactKindFile || artifacts[0].Name != "build/.ninja_log" {
 		t.Errorf("artifact[0] wrong: %+v", artifacts[0])
 	}
-	if artifacts[0].Content != "# ninja log\n5\t10\t0\tcmake\n" {
-		t.Errorf("artifact[0] content not verbatim: %q", artifacts[0].Content)
+	if got := artifactText(t, s, &artifacts[0]); got != "# ninja log\n5\t10\t0\tcmake\n" {
+		t.Errorf("artifact[0] content not verbatim: %q", got)
 	}
 	if artifacts[1].Kind != store.ArtifactKindFile || artifacts[1].Name != "build/compile_commands.json" {
 		t.Errorf("artifact[1] wrong: %+v", artifacts[1])

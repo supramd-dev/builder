@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"md-builder/server/storage"
 	"md-builder/server/store"
 )
 
@@ -103,7 +104,7 @@ func TestLogWriterAfterCloseDrops(t *testing.T) {
 // needed: task_logs is keyed by task ID only).
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open("file::memory:?cache=shared")
+	s, err := store.Open("file::memory:?cache=shared", store.WithObjects(storage.NewMemory()))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

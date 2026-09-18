@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"md-builder/server/storage"
 	"md-builder/server/store"
 )
 
@@ -13,7 +14,7 @@ import (
 // command snapshots (an empty build command means no build node)
 // cmake recipe; empty stages are omitted).
 func TestDispatchManual(t *testing.T) {
-	s, err := store.Open("file::memory:?cache=shared")
+	s, err := store.Open("file::memory:?cache=shared", store.WithObjects(storage.NewMemory()))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

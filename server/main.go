@@ -6,17 +6,21 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 	// Embed the IANA time zone database so the site-config timezone setting
 	// (and time.LoadLocation) works on hosts without system zoneinfo (e.g.
 	// scratch containers).
 	_ "time/tzdata"
 
 	"md-builder/server/api"
+	"md-builder/server/config"
 	"md-builder/server/runner"
+	"md-builder/server/storage"
 	"md-builder/server/store"
 )
 
@@ -35,6 +39,30 @@ func defaultDSN() string {
 	}
 	return "md-builder.db" // SQLite file in the working directory
 }
+
+// openObjectStorage loads the server config file (md-builder-server.yaml) and
+// connects to the artifact store, verifying that the bucket exists. It is the
+// startup gate for every subcommand that records artifacts.
+func openObjectStorage() (*storage.MinIO, storage.Config, error) {
+	cfg, source, err := config.Load()
+	if err != nil {
+		return nil, storage.Config{}, err
+	}
+	objs, err := storage.NewMinIO(cfg)
+	if err != nil {
+		return nil, storage.Config{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), objectStorageTimeout)
+	defer cancel()
+	if err := objs.EnsureBucket(ctx); err != nil {
+		return nil, storage.Config{}, fmt.Errorf("config %s: %w", source, err)
+	}
+	log.Printf("object storage ready: %s (config: %s)", objs.Describe(), source)
+	return objs, cfg, nil
+}
+
+// objectStorageTimeout bounds the startup connectivity check.
+const objectStorageTimeout = 15 * time.Second
 
 // distDir is resolved from the working directory so the binary can run from
 // either the project root or the server/ directory.
@@ -66,11 +94,35 @@ func main() {
 		os.Exit(seedSubcommand())
 	}
 
-	s, err := store.Open(defaultDSN())
+	// Object storage is mandatory: artifacts live there, so a deployment
+	// without a reachable backend cannot record test output. Fail before
+	// serving anything rather than on the first artifact write.
+	objs, objCfg, err := openObjectStorage()
+	if err != nil {
+		log.Fatalf("object storage: %v", err)
+	}
+
+	s, err := store.Open(defaultDSN(), store.WithObjects(objs))
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
 	defer s.Close()
+
+	// Artifacts recorded before object storage existed are moved out of the
+	// database once, at startup.
+	migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), 10*time.Minute)
+	if n, err := s.MigrateInlineArtifacts(migrateCtx); err != nil {
+		log.Printf("artifact migration: %d artifact(s) moved, some failed: %v", n, err)
+	}
+	cancelMigrate()
+
+	// Reclaim objects that no artifact row references any more (runs deleted
+	// or replaced after they were written).
+	if objCfg.GC {
+		gcCtx, cancelGC := context.WithCancel(context.Background())
+		defer cancelGC()
+		s.StartArtifactGC(gcCtx, objCfg.GCInterval())
+	}
 
 	mux := http.NewServeMux()
 

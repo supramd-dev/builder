@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"md-builder/server/auth"
+	"md-builder/server/storage"
 	"md-builder/server/store"
 )
 
@@ -126,6 +127,7 @@ func seedDashboardData(t *testing.T, apiServer *Server) {
 
 // dashboardTestEnv bundles a test server, mux and an authenticated cookie.
 type dashboardTestEnv struct {
+	server *Server
 	mux    *http.ServeMux
 	cookie string
 }
@@ -149,7 +151,14 @@ func (e dashboardTestEnv) authed(method, target, body string) *httptest.Response
 // password, since loginAndGetCookie performs the full login flow).
 func newDashboardEnv(t *testing.T) (*Server, dashboardTestEnv) {
 	t.Helper()
-	apiServer, s := newTestServer(t)
+	return newDashboardEnvWithObjects(t, storage.NewMemory())
+}
+
+// newDashboardEnvWithObjects uses a specific artifact backend, for tests that
+// inspect or break the object store.
+func newDashboardEnvWithObjects(t *testing.T, objs storage.Store) (*Server, dashboardTestEnv) {
+	t.Helper()
+	apiServer, s := newTestServerWithObjects(t, objs)
 
 	// Re-seed alice with a usable password for login: seedDashboardData
 	// creates users with a dummy hash.
@@ -163,7 +172,7 @@ func newDashboardEnv(t *testing.T) (*Server, dashboardTestEnv) {
 	mux := http.NewServeMux()
 	apiServer.Register(mux)
 	cookie := loginAndGetCookie(t, mux, "alice", "s3cret")
-	return apiServer, dashboardTestEnv{mux: mux, cookie: cookie}
+	return apiServer, dashboardTestEnv{server: apiServer, mux: mux, cookie: cookie}
 }
 
 // authHash is indirection over auth.HashPassword to keep the import list tidy.

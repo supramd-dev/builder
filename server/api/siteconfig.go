@@ -13,11 +13,11 @@ import (
 // access token and the secret token are write-only secrets: only whether
 // they are set is reported, never the values themselves.
 type siteConfigJSON struct {
-	CodeRepo        string `json:"codeRepo"`
-	AccessTokenSet  bool   `json:"accessTokenSet"`
-	Timezone        string `json:"timezone"` // IANA name, "" = browser local
-	SecretTokenSet  bool   `json:"secretTokenSet"`
-	UpdatedAt       string `json:"updatedAt"`
+	CodeRepo       string `json:"codeRepo"`
+	AccessTokenSet bool   `json:"accessTokenSet"`
+	Timezone       string `json:"timezone"` // IANA name, "" = browser local
+	SecretTokenSet bool   `json:"secretTokenSet"`
+	UpdatedAt      string `json:"updatedAt"`
 }
 
 // siteConfigInput is the request body for updating the configuration. The
@@ -25,9 +25,9 @@ type siteConfigJSON struct {
 // keeps the stored one; the explicit Clear flag removes it.
 type siteConfigInput struct {
 	CodeRepo         string `json:"codeRepo"`
-	AccessToken      string `json:"accessToken"`      // empty = keep current
-	Timezone         string `json:"timezone"`         // IANA name, "" = browser local
-	SecretToken      string `json:"secretToken"`      // empty = keep current
+	AccessToken      string `json:"accessToken"` // empty = keep current
+	Timezone         string `json:"timezone"`    // IANA name, "" = browser local
+	SecretToken      string `json:"secretToken"` // empty = keep current
 	ClearAccessToken bool   `json:"clearAccessToken"`
 	ClearSecretToken bool   `json:"clearSecretToken"`
 }

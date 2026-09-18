@@ -233,7 +233,7 @@ func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
 				return err
 			}
 		}
-		return replaceRunArtifacts(tx, run.ID, in.Artifacts)
+		return s.replaceRunArtifacts(tx, run.ID, in.Artifacts)
 	})
 	if err != nil {
 		return nil, err
@@ -335,7 +335,7 @@ func (s *Store) UpsertCaseRun(in *CaseRunInput) (*TestRun, *TestRun, error) {
 		if err == nil {
 			position = previous.Position
 			prevDescription = previous.Description
-			if err := tx.Where("run_id = ?", previous.ID).Delete(&TestArtifact{}).Error; err != nil {
+			if err := deleteArtifactsByRunIDs(tx, []int64{previous.ID}); err != nil {
 				return err
 			}
 			if err := tx.Delete(&previous).Error; err != nil {
@@ -385,7 +385,7 @@ func (s *Store) UpsertCaseRun(in *CaseRunInput) (*TestRun, *TestRun, error) {
 		if err := tx.Create(&child).Error; err != nil {
 			return err
 		}
-		if err := replaceRunArtifacts(tx, child.ID, in.Artifacts); err != nil {
+		if err := s.replaceRunArtifacts(tx, child.ID, in.Artifacts); err != nil {
 			return err
 		}
 
@@ -468,22 +468,12 @@ func (s *Store) AppendRunArtifactsByRun(runID int64, artifacts []ArtifactInput) 
 	if len(artifacts) == 0 {
 		return nil
 	}
+	rows, err := s.putArtifacts(runID, artifacts)
+	if err != nil {
+		return err
+	}
 	return s.DB.Transaction(func(tx *gorm.DB) error {
-		for i := range artifacts {
-			if !ArtifactKindValid(artifacts[i].Kind) {
-				return fmt.Errorf("store: invalid artifact kind %q", artifacts[i].Kind)
-			}
-			a := TestArtifact{
-				RunID:   runID,
-				Kind:    artifacts[i].Kind,
-				Name:    artifacts[i].Name,
-				Content: artifacts[i].Content,
-			}
-			if err := tx.Create(&a).Error; err != nil {
-				return err
-			}
-		}
-		return nil
+		return tx.Create(&rows).Error
 	})
 }
 
@@ -504,7 +494,7 @@ func (s *Store) ResetRegressionRun(envID, commitID int64) error {
 		if err := deleteRunChildren(tx, run.ID); err != nil {
 			return err
 		}
-		if err := tx.Where("run_id = ?", run.ID).Delete(&TestArtifact{}).Error; err != nil {
+		if err := deleteArtifactsByRunIDs(tx, []int64{run.ID}); err != nil {
 			return err
 		}
 		updates := map[string]any{
@@ -638,7 +628,7 @@ func (s *Store) DeleteTestRun(envID, commitID int64, kind string) error {
 		if err := deleteRunChildren(tx, run.ID); err != nil {
 			return err
 		}
-		if err := tx.Where("run_id = ?", run.ID).Delete(&TestArtifact{}).Error; err != nil {
+		if err := deleteArtifactsByRunIDs(tx, []int64{run.ID}); err != nil {
 			return err
 		}
 		return tx.Delete(&TestRun{}, run.ID).Error
@@ -656,7 +646,7 @@ func (s *Store) DeleteRunsForEnvironment(envID int64) error {
 			return err
 		}
 		if len(runIDs) > 0 {
-			if err := tx.Where("run_id IN ?", runIDs).Delete(&TestArtifact{}).Error; err != nil {
+			if err := deleteArtifactsByRunIDs(tx, runIDs); err != nil {
 				return err
 			}
 		}
@@ -673,7 +663,7 @@ func deleteRunChildren(tx *gorm.DB, parentID int64) error {
 		return err
 	}
 	if len(childIDs) > 0 {
-		if err := tx.Where("run_id IN ?", childIDs).Delete(&TestArtifact{}).Error; err != nil {
+		if err := deleteArtifactsByRunIDs(tx, childIDs); err != nil {
 			return err
 		}
 	}

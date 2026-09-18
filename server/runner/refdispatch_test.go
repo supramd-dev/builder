@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"md-builder/server/storage"
 	"md-builder/server/store"
 )
 
@@ -14,7 +15,7 @@ import (
 // trigger flag, and re-triggering the same ref deduplicates the commit row
 // and requeues the same graphs.
 func TestDispatchForRef(t *testing.T) {
-	s, err := store.Open("file::memory:?cache=shared")
+	s, err := store.Open("file::memory:?cache=shared", store.WithObjects(storage.NewMemory()))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -130,7 +131,7 @@ matrix:
 // runs carry the yaml stage descriptions into the database: the build /
 // unit / regression parent runs and every regression case child row.
 func TestDispatchStoresDescriptions(t *testing.T) {
-	s, err := store.Open("file::memory:?cache=shared")
+	s, err := store.Open("file::memory:?cache=shared", store.WithObjects(storage.NewMemory()))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -232,7 +233,7 @@ matrix:
 
 // TestDispatchForRefBadRef surfaces resolver failures to the API caller.
 func TestDispatchForRefBadRef(t *testing.T) {
-	s, err := store.Open("file::memory:?cache=shared")
+	s, err := store.Open("file::memory:?cache=shared", store.WithObjects(storage.NewMemory()))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestDispatchForRefBadRef(t *testing.T) {
 
 // TestDispatchForRefNoRepo reports the site-config gap like the webhook path.
 func TestDispatchForRefNoRepo(t *testing.T) {
-	s, err := store.Open("file::memory:?cache=shared")
+	s, err := store.Open("file::memory:?cache=shared", store.WithObjects(storage.NewMemory()))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

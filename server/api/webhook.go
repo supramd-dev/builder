@@ -34,12 +34,12 @@ type gitlabEventPayload struct {
 	// Merge request events: the MR payload nests its state under
 	// object_attributes.
 	ObjectAttributes struct {
-		Action        string `json:"action"`         // open | update | close | merge | reopen | approved | ...
-		Title         string `json:"title"`
-		SourceBranch  string `json:"source_branch"`
-		TargetBranch  string `json:"target_branch"`
-		State         string `json:"state"`
-		LastCommit    struct {
+		Action       string `json:"action"` // open | update | close | merge | reopen | approved | ...
+		Title        string `json:"title"`
+		SourceBranch string `json:"source_branch"`
+		TargetBranch string `json:"target_branch"`
+		State        string `json:"state"`
+		LastCommit   struct {
 			ID      string `json:"id"`
 			Message string `json:"message"`
 		} `json:"last_commit"`

@@ -19,6 +19,8 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
+
+	"md-builder/server/storage"
 )
 
 // User is an application user. PasswordHash holds a bcrypt hash, never a
@@ -42,18 +44,27 @@ type Session struct {
 // ErrNotFound is returned when no row matches the query.
 var ErrNotFound = gorm.ErrRecordNotFound
 
-// Store wraps a *gorm.DB.
+// Store wraps a *gorm.DB plus the object storage that holds artifact bytes
+// (see objectstore.go).
 type Store struct {
 	DB *gorm.DB
+
+	// objects is the artifact backend, set by WithObjects. nil means no
+	// backend was configured; recording an artifact then fails rather than
+	// falling back to inline storage.
+	objects storage.Store
 }
 
 // Open opens the database described by dsn and runs AutoMigrate.
-func Open(dsn string) (*Store, error) {
+func Open(dsn string, opts ...Option) (*Store, error) {
 	db, err := openDB(dsn)
 	if err != nil {
 		return nil, err
 	}
 	s := &Store{DB: db}
+	for _, opt := range opts {
+		opt(s)
+	}
 	if err := s.migrate(); err != nil {
 		sqlDB, _ := db.DB()
 		if sqlDB != nil {

@@ -15,7 +15,7 @@ import (
 )
 
 // healthTimeout bounds each individual probe (the git ls-remote and the
-// future object-storage ping). The endpoint's total latency is the slowest
+// object-storage ping). The endpoint's total latency is the slowest
 // probe, not their sum — the probes run concurrently.
 const healthTimeout = 10 * time.Second
 
@@ -25,7 +25,7 @@ type healthCheckJSON struct {
 	// storage", ...).
 	Name string `json:"name"`
 	// Status: "ok", "fail" or "skipped" (a dependency not configured —
-	// e.g. no code repo set, no object storage backend yet).
+	// e.g. no code repository set).
 	Status string `json:"status"`
 	// Target is what was probed (the repo URL, endpoint, ...); empty for
 	// skipped checks.
@@ -39,7 +39,7 @@ type healthCheckJSON struct {
 // healthDeepJSON is the response of GET /api/health/deep.
 type healthDeepJSON struct {
 	// Version is the served build's source revision, as in /api/health.
-	Version string           `json:"version,omitempty"`
+	Version string            `json:"version,omitempty"`
 	Checks  []healthCheckJSON `json:"checks"`
 	// CheckedAt is when the probes ran (RFC 3339, UTC).
 	CheckedAt string `json:"checkedAt"`
@@ -47,10 +47,10 @@ type healthDeepJSON struct {
 
 // handleHealthDeep routes GET /api/health/deep — the site health board:
 // probes the site-configured git repository (go-git ls-remote with the
-// site's access token, the same path a dispatch takes) and, in the future,
-// the object storage backend. Requires an authenticated user (the repo URL
-// and token are site configuration); the liveness probe /api/health stays
-// unauthenticated.
+// site's access token, the same path a dispatch takes) and the object
+// storage backend the artifacts live in. Requires an authenticated user (the
+// repo URL and token are site configuration); the liveness probe /api/health
+// stays unauthenticated.
 func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	if r.Method != http.MethodGet {
@@ -93,16 +93,26 @@ func (s *Server) handleHealthDeep(w http.ResponseWriter, r *http.Request, user *
 		out <- result{json: check}
 	}()
 
-	// Probe 2: the object storage backend. Not configurable yet — reserved
-	// for the Garage/S3 artifact store so the board gains a row without an
-	// API or schema change when it lands.
+	// Probe 2: the object storage backend that holds the artifacts. The
+	// bucket is what artifact reads and writes go through, so a probe that
+	// only reached the endpoint would not prove much.
 	go func() {
-		check := healthCheckJSON{
-			Name:           "object storage",
-			Status:         "skipped",
-			Detail:         "no object storage backend configured (planned)",
-			DurationMillis: 0,
+		check := healthCheckJSON{Name: "object storage", Status: "ok"}
+		start := time.Now()
+		objs := s.Store.Objects()
+		if objs == nil {
+			check.Status = "skipped"
+			check.Detail = "no object storage backend configured"
+		} else {
+			check.Target = objs.Describe()
+			if err := objs.Ping(ctx); err != nil {
+				check.Status = "fail"
+				// The backend's own message (endpoint, bucket, HTTP
+				// status) — the credentials are never part of it.
+				check.Detail = err.Error()
+			}
 		}
+		check.DurationMillis = time.Since(start).Milliseconds()
 		out <- result{json: check}
 	}()
 

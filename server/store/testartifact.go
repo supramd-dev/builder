@@ -29,12 +29,20 @@ func ArtifactKindValid(kind string) bool {
 
 // TestArtifact is one stored file of one run (top-level or child — a child
 // run's artifacts are fetched by that run's id).
+//
+// The bytes live in object storage; the row holds the reference. ObjectKey is
+// the object's key in the configured bucket and Size its length, so listing
+// artifacts never has to talk to the backend. Content is the pre-object-store
+// storage: empty for everything written since, and kept only so rows created
+// before the migration stay readable.
 type TestArtifact struct {
 	ID        int64     `gorm:"primaryKey"`
 	RunID     int64     `gorm:"index:idx_test_artifacts_run_kind;not null"`
 	Kind      string    `gorm:"index:idx_test_artifacts_run_kind;not null"`
 	Name      string    `gorm:"not null;default:''"` // source path / label
-	Content   string    `gorm:"not null"`            // raw file content
+	ObjectKey string    `gorm:"not null;default:''"` // object storage key
+	Size      int64     `gorm:"not null;default:0"`  // object size in bytes
+	Content   string    `gorm:"not null;default:''"` // legacy inline content
 	CreatedAt time.Time `gorm:"not null;default:CURRENT_TIMESTAMP"`
 }
 
@@ -91,20 +99,19 @@ func (s *Store) ListRunArtifactsDeep(runID int64) (map[int64][]TestArtifact, err
 
 // replaceRunArtifacts swaps a run's artifacts for the submitted list (the
 // upsert-replace path: old artifacts die with the report they belonged to).
-func replaceRunArtifacts(tx *gorm.DB, runID int64, artifacts []ArtifactInput) error {
+// The submitted bytes are uploaded first, so the transaction can only fail
+// before the rows exist. Objects the replaced rows referenced are reclaimed
+// by the orphan sweep.
+func (s *Store) replaceRunArtifacts(tx *gorm.DB, runID int64, artifacts []ArtifactInput) error {
+	rows, err := s.putArtifacts(runID, artifacts)
+	if err != nil {
+		return err
+	}
 	if err := tx.Where("run_id = ?", runID).Delete(&TestArtifact{}).Error; err != nil {
 		return err
 	}
-	for i := range artifacts {
-		a := TestArtifact{
-			RunID:   runID,
-			Kind:    artifacts[i].Kind,
-			Name:    artifacts[i].Name,
-			Content: artifacts[i].Content,
-		}
-		if err := tx.Create(&a).Error; err != nil {
-			return err
-		}
+	if len(rows) == 0 {
+		return nil
 	}
-	return nil
+	return tx.Create(&rows).Error
 }

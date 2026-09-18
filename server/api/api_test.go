@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"md-builder/server/auth"
+	"md-builder/server/storage"
 	"md-builder/server/store"
 )
 
@@ -16,7 +17,14 @@ import (
 // mux.
 func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
-	s, err := store.Open("file::memory:?cache=shared")
+	return newTestServerWithObjects(t, storage.NewMemory())
+}
+
+// newTestServerWithObjects uses a specific artifact backend, for tests that
+// inspect or break the object store.
+func newTestServerWithObjects(t *testing.T, objs storage.Store) (*Server, *store.Store) {
+	t.Helper()
+	s, err := store.Open("file::memory:?cache=shared", store.WithObjects(objs))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}

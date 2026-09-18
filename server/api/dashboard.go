@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"path"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"md-builder/server/storage"
 	"md-builder/server/store"
 
 	"gorm.io/gorm"
@@ -741,7 +743,7 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 			ID:   artifacts[i].ID,
 			Kind: artifacts[i].Kind,
 			Name: artifacts[i].Name,
-			Size: len(artifacts[i].Content),
+			Size: int(artifacts[i].Size),
 		})
 	}
 	writeJSON(w, http.StatusOK, detail)
@@ -830,13 +832,33 @@ func (s *Server) handleTestArtifact(w http.ResponseWriter, r *http.Request, user
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	content, err := s.Store.ArtifactContent(r.Context(), a)
+	if err != nil {
+		s.artifactReadError(w, "artifact get", a, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":      a.ID,
 		"runId":   a.RunID,
 		"kind":    a.Kind,
 		"name":    a.Name,
-		"content": a.Content,
+		"content": string(content),
 	})
+}
+
+// artifactReadError answers a failed artifact read: 404 when the object is
+// missing from the backend, 502 when the backend itself failed (the artifact
+// exists in the database, so the caller's request was fine). The detail is
+// logged, never returned — it names the endpoint and the key, not the
+// credentials.
+func (s *Server) artifactReadError(w http.ResponseWriter, what string, a *store.TestArtifact, err error) {
+	if errors.Is(err, storage.ErrNotFound) {
+		log.Printf("%s: artifact %d: %v", what, a.ID, err)
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "artifact content is missing from object storage"})
+		return
+	}
+	log.Printf("%s: artifact %d: %v", what, a.ID, err)
+	writeJSON(w, http.StatusBadGateway, map[string]string{"error": "object storage unavailable"})
 }
 
 // downloadArtifact streams one artifact as a file download. The name is the
@@ -854,12 +876,25 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request, id int
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	rc, size, err := s.Store.OpenArtifact(r.Context(), a)
+	if err != nil {
+		s.artifactReadError(w, "artifact download", a, err)
+		return
+	}
+	defer rc.Close()
+
 	name := artifactDownloadName(a, id)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
-	w.Header().Set("Content-Length", strconv.Itoa(len(a.Content)))
+	if size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
 	if r.Method == http.MethodGet {
-		_, _ = w.Write([]byte(a.Content))
+		if _, err := io.Copy(w, rc); err != nil {
+			// The client is usually gone by now; nothing can be
+			// reported in the response, so log and stop.
+			log.Printf("artifact download: artifact %d: stream: %v", id, err)
+		}
 	}
 }
 
@@ -926,11 +961,41 @@ func (s *Server) downloadRunArtifactsZip(w http.ResponseWriter, r *http.Request,
 		nameOf[children[i].ID] = children[i].Name
 	}
 
+	// started records whether the archive header has been written. Until it
+	// has, a failing read is still reportable as a status code instead of a
+	// download that quietly contains nothing.
+	started := false
+	var failErr error
+	var failArt *store.TestArtifact
+	// dropped records an artifact that could not be read once the stream had
+	// begun: the archive is left unfinished, see below.
+	dropped := false
+
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("run-%d-artifacts.zip", runID)))
 	zw := zip.NewWriter(w)
 	used := map[string]int{}
-	add := func(name string, content string) {
+	add := func(name string, a *store.TestArtifact) {
+		if failErr != nil {
+			return
+		}
+		// Read the object before writing the entry header: a header with no
+		// bytes behind it would look like an empty file, not a failure.
+		// One artifact at a time, so a large run is never buffered whole.
+		rc, _, err := s.Store.OpenArtifact(r.Context(), a)
+		if err != nil {
+			if !started {
+				failErr, failArt = err, a
+				return
+			}
+			// The archive is already streaming: the only honest outcome is
+			// to drop the entry and leave the zip truncated (an incomplete
+			// archive is detectable; a zero-byte entry is not).
+			log.Printf("run artifacts zip: artifact %d: %v", a.ID, err)
+			dropped = true
+			return
+		}
+		defer rc.Close()
 		// Two artifacts with the same basename (the path prefix was the only
 		// difference) must not overwrite each other: suffix " (2)", " (3)".
 		key := strings.ToLower(name)
@@ -941,22 +1006,41 @@ func (s *Server) downloadRunArtifactsZip(w http.ResponseWriter, r *http.Request,
 			stem := strings.TrimSuffix(name, ext)
 			name = fmt.Sprintf("%s (%d)%s", stem, n+1, ext)
 		}
+		started = true // zw.Create writes the local header from here on
 		fw, err := zw.Create(name)
 		if err != nil {
-			return // a single bad entry must not abort the stream mid-way
+			log.Printf("run artifacts zip: artifact %d: entry: %v", a.ID, err)
+			return
 		}
-		_, _ = fw.Write([]byte(content))
+		if _, err := io.Copy(fw, rc); err != nil {
+			log.Printf("run artifacts zip: artifact %d: stream: %v", a.ID, err)
+		}
 	}
 	for i := range byRun[runID] {
-		a := byRun[runID][i]
-		add(artifactDownloadName(&a, a.ID), a.Content)
+		add(artifactDownloadName(&byRun[runID][i], byRun[runID][i].ID), &byRun[runID][i])
 	}
 	for i := range children {
 		c := children[i]
 		for j := range byRun[c.ID] {
-			a := byRun[c.ID][j]
-			add(path.Join("cases", sanitizeZipSegment(c.Name), artifactDownloadName(&a, a.ID)), a.Content)
+			a := &byRun[c.ID][j]
+			add(path.Join("cases", sanitizeZipSegment(c.Name), artifactDownloadName(a, a.ID)), a)
 		}
+	}
+	if failErr != nil {
+		// Nothing was written yet, so the caller still gets a proper status.
+		s.artifactReadError(w, "run artifacts zip", failArt, failErr)
+		return
+	}
+	if dropped {
+		// Deliberately leave the archive unclosed. Flushing hands over what
+		// the writers have (the entries so far), and the missing central
+		// directory leaves the download visibly broken — which beats a valid
+		// zip quietly missing a file, the failure a partial backend outage
+		// would otherwise hide behind.
+		if err := zw.Flush(); err != nil {
+			log.Printf("run artifacts zip: flush: %v", err)
+		}
+		return
 	}
 	if err := zw.Close(); err != nil {
 		log.Printf("run artifacts zip: close: %v", err) // headers already sent; the client sees a truncated zip

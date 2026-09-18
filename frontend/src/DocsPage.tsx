@@ -11,6 +11,8 @@ import gettingStarted from '../docs/getting-started.md?raw'
 import gettingStartedZh from '../docs/getting-started.zh.md?raw'
 import siteConfiguration from '../docs/site-configuration.md?raw'
 import siteConfigurationZh from '../docs/site-configuration.zh.md?raw'
+import objectStorage from '../docs/object-storage.md?raw'
+import objectStorageZh from '../docs/object-storage.zh.md?raw'
 import environments from '../docs/environments.md?raw'
 import environmentsZh from '../docs/environments.zh.md?raw'
 import testMatrix from '../docs/test-matrix.md?raw'
@@ -30,6 +32,7 @@ const STRINGS = {
       overview: 'Overview',
       'getting-started': 'Getting started',
       'site-configuration': 'Site configuration',
+      'object-storage': 'Object storage (MinIO)',
       environments: 'Test environments',
       'test-matrix': 'Test matrix (YAML)',
       'runner-strategy': 'Runner and tasks',
@@ -43,6 +46,7 @@ const STRINGS = {
       overview: '概述',
       'getting-started': '快速上手',
       'site-configuration': '站点配置',
+      'object-storage': '对象存储(MinIO)',
       environments: '测试环境',
       'test-matrix': '测试矩阵(YAML)',
       'runner-strategy': 'Runner 与任务',
@@ -59,6 +63,7 @@ const DOCS: { id: string; source: Record<Lang, string> }[] = [
   { id: 'overview', source: { en: overview, zh: overviewZh } },
   { id: 'getting-started', source: { en: gettingStarted, zh: gettingStartedZh } },
   { id: 'site-configuration', source: { en: siteConfiguration, zh: siteConfigurationZh } },
+  { id: 'object-storage', source: { en: objectStorage, zh: objectStorageZh } },
   { id: 'environments', source: { en: environments, zh: environmentsZh } },
   { id: 'test-matrix', source: { en: testMatrix, zh: testMatrixZh } },
   { id: 'runner-strategy', source: { en: runnerStrategy, zh: runnerStrategyZh } },

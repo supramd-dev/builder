@@ -60,3 +60,12 @@ displayed in (dashboards, task and run pages): pick an IANA zone such as
 in their own zone. The setting is display-only — stored data and logs keep
 their original timestamps, and the browser caches the choice locally so
 pages render immediately after a reload.
+
+## Object storage
+
+The settings above live in the database and are edited in the browser.
+One deployment setting does not: the **object storage** the test output
+files are kept in. It is configured on the server host, in
+`md-builder-server.yaml` or through `MD_BUILDER_S3_*` environment
+variables, and the server will not start without it. See
+[Object storage (MinIO)](#/docs/object-storage).

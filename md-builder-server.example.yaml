@@ -1,0 +1,41 @@
+# Server configuration for md-builder.
+#
+# Copy to md-builder-server.yaml (git-ignored) and fill in your object
+# storage. The server reads this file at startup and refuses to run without
+# a working object store — artifacts live there, not in the database.
+#
+# Every setting can also be supplied through the environment, which wins
+# over this file: MD_BUILDER_S3_ENDPOINT, _ACCESS_KEY, _SECRET_KEY,
+# _BUCKET, _REGION, _PREFIX, _USE_SSL. Setting the first four is enough to
+# run with no file at all.
+#
+# See frontend/docs/object-storage.md.
+
+objectStorage:
+  # MinIO / S3 endpoint, host and port, no scheme.
+  endpoint: minio.example.com:9000
+
+  # Credentials of a user scoped to this bucket. Never logged, never
+  # returned by the API — prefer a dedicated user over root.
+  accessKey: md-builder
+  secretKey: "change-me"
+
+  bucket: md-builder
+
+  # TLS. Use true for anything reachable from a network.
+  useSSL: true
+
+  # Optional namespace inside the bucket, so one bucket can host several
+  # deployments.
+  # prefix: md-builder
+
+  # Optional; only needed for AWS-style endpoints that require a region.
+  # region: us-east-1
+
+  # Create the bucket at startup when it does not exist.
+  autoCreateBucket: true
+
+  # Reclaim objects no run references any more (deleted or re-reported
+  # runs). Leave off if the bucket is shared and cleaned up elsewhere.
+  gc: true
+  # gcIntervalHours: 6
