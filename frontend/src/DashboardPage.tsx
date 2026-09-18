@@ -42,8 +42,10 @@ export default function DashboardPage({ onError }: Props) {
 
   // Both dashboard payloads carry repoFilter: the commit repo the matrix is
   // scoped to (empty = no site codeRepo configured → all repos). Shown in the
-  // header so a switched code repo explains "missing" seed rows.
+  // header so a switched code repo explains "missing" seed rows; repoUrl (the
+  // repo's web URL, when derivable) turns it into a link to the repo page.
   const repoFilter = (full ?? dash)?.repoFilter ?? ''
+  const repoUrl = (full ?? dash)?.repoUrl ?? ''
 
   const refresh = useCallback(
     async (k: DashboardKind) => {
@@ -98,11 +100,23 @@ export default function DashboardPage({ onError }: Props) {
       >
         <h2 style={{ marginBottom: 0 }}>
           Test dashboard
-          {repoFilter && (
-            <span className="text-muted" style={{ marginLeft: '0.5rem', fontSize: '0.875rem', fontWeight: 400 }}>
-              {repoFilter}
-            </span>
-          )}
+          {repoFilter &&
+            (repoUrl ? (
+              <a
+                href={repoUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-muted"
+                style={{ marginLeft: '0.5rem', fontSize: '0.875rem', fontWeight: 400 }}
+                title="Open the repository page"
+              >
+                {repoFilter}
+              </a>
+            ) : (
+              <span className="text-muted" style={{ marginLeft: '0.5rem', fontSize: '0.875rem', fontWeight: 400 }}>
+                {repoFilter}
+              </span>
+            ))}
         </h2>
         <div className="dash-tabs" role="tablist">
           {tab('full', 'All')}
@@ -354,12 +368,22 @@ function stageToRunCell(st: FullStage | undefined): RunCell | null {
   }
 }
 
+// commitEventLabel maps a commit row's event kind to a short badge. Rows
+// recorded before the event column existed (or plain pushes) show nothing.
+const commitEventLabels: Record<string, { label: string; title: string }> = {
+  tag_push: { label: 'tag', title: 'triggered by a tag push event' },
+  merge_request: { label: 'MR', title: 'triggered by a merge request event' },
+  manual: { label: 'M', title: 'manually dispatched test' },
+  manual_yaml: { label: 'M', title: 'manually dispatched yaml matrix' },
+}
+
 // CommitCell is the matrix row header: one line with the short sha (bold,
 // linked to the commit on the repository host), author, push date — in the
 // normal text color — and the gray commit message, with gaps between the
 // parts; the line truncates with an ellipsis when too wide.
 function CommitCell({ commit }: { commit: DashboardCommit }) {
   const url = commitUrl(commit.repoUrl, commit.sha)
+  const ev = commit.event ? commitEventLabels[commit.event] : undefined
   return (
     <div className="dash-commit-cell" title={`${commit.repo} ${commit.sha} — ${commit.message}`}>
       {url ? (
@@ -374,6 +398,11 @@ function CommitCell({ commit }: { commit: DashboardCommit }) {
       </span>
       <span className="dash-commit-date">{formatTimeShort(commit.pushedAt)}</span>
       {commit.message && <span className="dash-commit-msg">{commit.message}</span>}
+      {ev && (
+        <span className="dash-event" title={ev.title}>
+          {ev.label}
+        </span>
+      )}
       {commit.superseded && (
         <span className="dash-superseded" title="a newer attempt of this commit exists">
           superseded

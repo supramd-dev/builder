@@ -6,19 +6,35 @@
 POST https://your-server/api/webhooks/gitlab
 ```
 
-并勾选 **Push events** 触发器。该端点无需认证(由 GitLab 服务器调用);
-一旦配置了密钥,请通过 `X-Gitlab-Token` 请求头校验。
+并勾选 **Push events**、**Tag push events** 和 **Merge request events**
+触发器。该端点无需认证(由 GitLab 服务器调用);一旦配置了密钥,
+请通过 `X-Gitlab-Token` 请求头校验。
 
-## 一次推送会发生什么
+## 一个事件会发生什么
 
-每个 push 事件都会记录到 `commits` 表 —— 每个提交成为测试仪表板的一列
-(按 repo + sha 去重)。其他事件类型(pipeline、tag push 等)以
+Push、tag push 和 merge request 事件都会记录到 `commits` 表 ——
+每个提交成为测试仪表板的一列(按 repo + sha 去重;同一 SHA 再次被
+记录时会刷新该行的事件标记)。其他事件类型(pipeline、issue 等)以
 `status: ignored` 确认。
 
-当站点配置中的**代码仓库**已设置且推送指向该仓库(按路径匹配)时,
+| 事件 | 被测试的版本 | 矩阵行 |
+|---|---|---|
+| **push** | 推送列表的 head 提交 | 事件 `push`,ref = 分支名 |
+| **tag push** | 被打的 SHA(`after`) | 事件 `tag_push`,ref = 标签名(如 `v1.0`) |
+| **merge request** | MR 源分支上的 `last_commit` | 事件 `merge_request`,ref = 源分支 |
+
+Merge request 事件在 `open`、`reopen` 和 `merge` 动作时派发
+(新的源状态或合并结果)。其他动作(`update`、`close`、`approved`
+等)只记录不派发 —— 被测试的 SHA 并未变化。
+
+每个提交行都记录了创建它的事件(`event` 列:`push`、`tag_push`、
+`merge_request`、`manual`、`manual_yaml`);仪表板在提交旁显示一个小
+徽标(tag / MR / M),手动与 webhook 触发的行一眼可辨。
+
+当站点配置中的**代码仓库**已设置且事件指向该仓库(按路径匹配)时,
 派发自动启动:
 
-1. 服务器在**被推送的提交**上读取 `md-builder.yaml`。
+1. 服务器在**该事件的提交**上读取 `md-builder.yaml`。
 2. 矩阵条目按标签匹配到**已启用**的环境;每个条目创建一条任务图
    (root + clone/build/测试阶段)(见
    [Runner 与任务](#/docs/runner-strategy)和

@@ -53,6 +53,7 @@ type commitJSON struct {
 	Ref        string `json:"ref"`
 	Author     string `json:"author"`
 	Message    string `json:"message"`
+	Event      string `json:"event,omitempty"` // what created the row: push | tag_push | merge_request | manual | manual_yaml
 	PushedAt   string `json:"pushedAt"`
 	Superseded bool   `json:"superseded,omitempty"` // a newer attempt of the same SHA exists (manual re-dispatch)
 }
@@ -86,6 +87,7 @@ type dashboardRowJSON struct {
 type dashboardJSON struct {
 	Kind         string             `json:"kind"`
 	RepoFilter   string             `json:"repoFilter,omitempty"` // site-config codeRepo path, when set
+	RepoURL      string             `json:"repoUrl,omitempty"`    // web URL of that repo, when derivable
 	Environments []dashboardEnvJSON `json:"environments"`
 	Rows         []dashboardRowJSON `json:"rows"` // one row per commit, newest first
 }
@@ -126,9 +128,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 
 	// Column filter: when the site config names a code repository, only
 	// pushes to that repository are shown; otherwise all pushes.
-	repoFilter := ""
+	repoFilter, repoURL := "", ""
 	if cfg, err := s.Store.GetSiteConfig(); err == nil && cfg.CodeRepo != "" {
 		repoFilter = store.RepoPath(cfg.CodeRepo)
+		repoURL = s.repoWebURL(cfg.CodeRepo)
 	}
 
 	envs, err := s.Store.ListAllEnvironments()
@@ -168,6 +171,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 	out := dashboardJSON{
 		Kind:         kind,
 		RepoFilter:   repoFilter,
+		RepoURL:      repoURL,
 		Environments: make([]dashboardEnvJSON, 0, len(envs)),
 		Rows:         make([]dashboardRowJSON, 0, len(commits)),
 	}
@@ -243,6 +247,7 @@ type fullRowJSON struct {
 // fullDashboardJSON is the full matrix response.
 type fullDashboardJSON struct {
 	RepoFilter   string             `json:"repoFilter,omitempty"`
+	RepoURL      string             `json:"repoUrl,omitempty"` // web URL of the filtered repo, when derivable
 	Environments []dashboardEnvJSON `json:"environments"`
 	Rows         []fullRowJSON      `json:"rows"`
 }
@@ -268,9 +273,10 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 		nCommits = n
 	}
 
-	repoFilter := ""
+	repoFilter, repoURL := "", ""
 	if cfg, err := s.Store.GetSiteConfig(); err == nil && cfg.CodeRepo != "" {
 		repoFilter = store.RepoPath(cfg.CodeRepo)
+		repoURL = s.repoWebURL(cfg.CodeRepo)
 	}
 
 	envs, err := s.Store.ListAllEnvironments()
@@ -313,6 +319,7 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 
 	out := fullDashboardJSON{
 		RepoFilter:   repoFilter,
+		RepoURL:      repoURL,
 		Environments: make([]dashboardEnvJSON, 0, len(envs)),
 		Rows:         make([]fullRowJSON, 0, len(commits)),
 	}
@@ -997,6 +1004,7 @@ func (s *Server) toCommitJSON(c *store.Commit) commitJSON {
 		Ref:      c.Ref,
 		Author:   c.Author,
 		Message:  c.Message,
+		Event:    c.Event,
 		PushedAt: c.PushedAt.UTC().Format(time.RFC3339),
 	}
 }

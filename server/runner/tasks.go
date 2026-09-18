@@ -80,6 +80,7 @@ func (s *Service) DispatchForRef(ctx context.Context, ref string) (store.Commit,
 		Ref:      strings.TrimSpace(ref),
 		Author:   "manual",
 		Message:  "manual yaml dispatch " + time.Now().UTC().Format("2006-01-02 15:04"),
+		Event:    store.CommitEventManualYAML,
 		PushedAt: time.Now(),
 	}
 	created, err := s.Store.GetOrCreateCommit(&commit)
@@ -179,6 +180,7 @@ func (s *Service) DispatchManual(in ManualDispatch) ([]*store.Task, error) {
 		Ref:      strings.TrimSpace(in.Ref),
 		Author:   in.Username,
 		Message:  "manual test " + now.UTC().Format("2006-01-02 15:04"),
+		Event:    store.CommitEventManual,
 		PushedAt: now,
 	}
 	if err := s.Store.CreateCommit(commit); err != nil {

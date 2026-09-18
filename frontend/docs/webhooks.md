@@ -6,21 +6,37 @@ Point a GitLab project webhook (Settings → Webhooks) at:
 POST https://your-server/api/webhooks/gitlab
 ```
 
-with the **Push events** trigger. The endpoint is unauthenticated (it is
-called by the GitLab server); verify the `X-Gitlab-Token` header once a
-secret is configured.
+with the **Push events**, **Tag push events** and **Merge request events**
+triggers. The endpoint is unauthenticated (it is called by the GitLab
+server); verify the `X-Gitlab-Token` header once a secret is configured.
 
-## What a push does
+## What an event does
 
-Every push event is recorded in the `commits` table — each commit
-becomes a column of the test dashboard (deduplicated by repo + sha).
-Other event types (pipeline, tag push, …) are acknowledged with
-`status: ignored`.
+Push, tag push and merge request events are recorded in the `commits` table
+— each commit becomes a column of the test dashboard (deduplicated by
+repo + sha; a re-recorded SHA restamps its row's event). Other event types
+(pipeline, issue, …) are acknowledged with `status: ignored`.
 
-When the site config's **code repository** is set and the push targets
+| Event | Tested revision | Matrix row |
+|---|---|---|
+| **push** | head commit of the pushed list | event `push`, ref = branch |
+| **tag push** | the tagged SHA (`after`) | event `tag_push`, ref = tag name (e.g. `v1.0`) |
+| **merge request** | the MR's `last_commit` on the source branch | event `merge_request`, ref = source branch |
+
+Merge request events dispatch on the `open`, `reopen` and `merge` actions
+(a fresh source state or the merged result). Other actions (`update`,
+`close`, `approved`, …) are recorded but not dispatched — the tested SHA
+has not changed.
+
+Each commit row stores which event created it (`event` column: `push`,
+`tag_push`, `merge_request`, `manual`, `manual_yaml`); the dashboard shows
+a small badge (tag / MR / M) next to the commit so manually and
+webhook-triggered rows are distinguishable at a glance.
+
+When the site config's **code repository** is set and the event targets
 that repository (matched by path), dispatching kicks in automatically:
 
-1. The server reads `md-builder.yaml` **at the pushed commit**.
+1. The server reads `md-builder.yaml` **at the event's commit**.
 2. Matrix entries are matched to **enabled** environments by tags; one
    task graph (root + clone/build/test stages) is created per entry (see
    [Runner and tasks](#/docs/runner-strategy) and

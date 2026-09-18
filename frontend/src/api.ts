@@ -199,6 +199,9 @@ export interface DashboardCommit {
   ref: string
   author: string
   message: string
+  // what created the row: push | tag_push | merge_request | manual | manual_yaml
+  // (absent on rows recorded before the column existed).
+  event?: string
   pushedAt: string
   // true when a newer attempt of the same SHA exists (manual re-dispatch):
   // the row is kept for history but rendered dimmed.
@@ -310,6 +313,9 @@ export interface DashboardRow {
 export interface Dashboard {
   kind: DashboardKind
   repoFilter?: string
+  // Web URL of the filtered repository, when derivable — the header repo
+  // links there.
+  repoUrl?: string
   environments: DashboardEnvironment[]
   rows: DashboardRow[] // one row per commit, newest first
 }
@@ -349,6 +355,7 @@ export interface FullRow {
 
 export interface FullDashboard {
   repoFilter?: string
+  repoUrl?: string
   environments: DashboardEnvironment[]
   rows: FullRow[]
 }

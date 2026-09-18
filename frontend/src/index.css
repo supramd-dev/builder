@@ -729,6 +729,20 @@ div.dash-commit-cell {
   vertical-align: 1px;
 }
 
+/* The event-kind badge in a commit row header (tag / MR / M): same quiet
+   look as .dash-trigger, marking what created the row. */
+.dash-event {
+  display: inline-block;
+  margin-left: 0.35rem;
+  padding: 0 0.3rem;
+  font-size: 0.7rem;
+  line-height: 1.1;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  vertical-align: 1px;
+}
+
 .dash-no-run {
   display: inline-block;
   min-width: 1.5rem;
@@ -1316,6 +1330,26 @@ code {
   flex: 1;
   min-height: 0;
   height: 60vh;
+}
+
+/* The artifact preview dialog: wider than the message dialog so long
+   result-file lines and plot sources stay readable, with the download
+   shortcut sitting next to the close button. */
+.dialog-wide {
+  width: min(72rem, 100%);
+}
+
+.dialog-action {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.dialog-action:hover {
+  color: var(--fg, inherit);
 }
 
 /* The little expand icon in a case table's Note cell. */

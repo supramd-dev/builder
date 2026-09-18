@@ -8,6 +8,7 @@ import {
 } from './api'
 import { formatDuration, parseGTestResults, type GTestCase } from './gtest'
 import MessageDialog from './MessageDialog'
+import ArtifactPreviewDialog from './ArtifactPreviewDialog'
 import TaskLogView from './TaskLogView'
 import { formatTime } from './timezone'
 import { Breadcrumbs } from './Breadcrumbs'
@@ -176,7 +177,9 @@ export default function TestRunDetailPage({ onError }: Props) {
       {/* Every stored artifact of the run, whatever its kind: build files
           (never parsed), results files (parsed in the browser below) —
           each downloadable; the whole bundle as one zip. */}
-      {!inFlight && run.artifacts.length > 0 && <ArtifactsSection run={run} />}
+      {!inFlight && run.artifacts.length > 0 && (
+        <ArtifactsSection run={run} onError={onError} />
+      )}
 
       {/* Plot artifacts (*.plot.json): one interactive Plotly chart per
           file, fetched and rendered client-side like the results files. */}
@@ -227,10 +230,18 @@ export default function TestRunDetailPage({ onError }: Props) {
 }
 
 // ArtifactsSection lists every stored artifact of the run (build files,
-// results files, future logs/series) with a per-file download link and one
-// zip bundling them all — the run's own plus its regression children's
-// (the backend packs children under cases/<name>/).
-function ArtifactsSection({ run }: { run: TestRunDetail }) {
+// results files, future logs/series) with a per-file preview (Monaco
+// editor dialog), a per-file download link and one zip bundling them all —
+// the run's own plus its regression children's (the backend packs children
+// under cases/<name>/).
+function ArtifactsSection({
+  run,
+  onError,
+}: {
+  run: TestRunDetail
+  onError: (message: string) => void
+}) {
+  const [preview, setPreview] = useState<number | null>(null)
   if (run.artifacts.length === 0) return null
   return (
     <section>
@@ -258,6 +269,17 @@ function ArtifactsSection({ run }: { run: TestRunDetail }) {
               <td className="text-muted">{a.kind}</td>
               <td className="text-muted">{formatBytes(a.size)}</td>
               <td style={{ textAlign: 'right' }}>
+                <a
+                  href=""
+                  onClick={(e) => {
+                    e.preventDefault()
+                    setPreview(a.id)
+                  }}
+                  title="Preview the file content in the editor"
+                >
+                  View
+                </a>
+                {' · '}
                 <a href={`/api/test-artifacts/${a.id}/download`}>Download</a>
               </td>
             </tr>
@@ -271,6 +293,13 @@ function ArtifactsSection({ run }: { run: TestRunDetail }) {
             <span className="text-muted"> (includes every case's files)</span>
           )}
         </p>
+      )}
+      {preview !== null && (
+        <ArtifactPreviewDialog
+          artifactId={preview}
+          onClose={() => setPreview(null)}
+          onError={onError}
+        />
       )}
     </section>
   )
