@@ -55,6 +55,54 @@ go run ./server -config /etc/md-builder/server.yaml
 对象存储(见 [对象存储(MinIO)](#/docs/object-storage));`-config`
 用于指定该配置文件,`-h` 会列出全部参数。
 
+容器里改用环境变量配置:`MD_BUILDER_ADDR` 与 `MD_BUILDER_PORT` 提供和
+命令行参数相同的默认值,`MD_BUILDER_DSN` 指定数据库,`MD_BUILDER_S3_*`
+配置对象存储。参数仍然优先于对应的环境变量。
+
+## 用 Docker 或 Podman 部署
+
+仓库自带 `Dockerfile` 与 `docker-compose.yml`,会把服务端和一份 MinIO
+一起启动:
+
+```sh
+cp .env.example .env    # 然后修改 MINIO_ROOT_PASSWORD
+docker compose up -d    # 或者:podman compose up -d
+```
+
+之后界面在 <http://localhost:8080>(改 `.env` 里的 `MD_BUILDER_PORT`
+即可换端口,映射到宿主机的端口会一起变)。数据库是 `md-builder-data`
+卷,MinIO 的数据是 `minio-data` 卷,其控制台在
+<http://127.0.0.1:9001>。
+
+因为没有注册界面,第一个账号仍然要用命令行创建。`cli` 服务与
+服务端共用同一个数据库和对象存储:
+
+```sh
+docker compose --profile tools run --rm cli adduser -username alice -email alice@example.com
+```
+
+密码会以交互方式读取(也可以用 `-password` 传入,但那样密码会留在
+shell 历史里)。需要演示数据时,`seed` 走同一条路。
+
+不用 compose 也可以,直接构建镜像即可 —— 镜像里是一个静态二进制
+文件加上构建好的前端,运行在 Alpine 上,全部配置都来自环境变量:
+
+```sh
+docker build -t md-builder:local .
+docker run -d --name md-builder -p 8080:8080 \
+  -v md-builder-data:/data \
+  -e MD_BUILDER_S3_ENDPOINT=minio.example.com:9000 \
+  -e MD_BUILDER_S3_ACCESS_KEY=... -e MD_BUILDER_S3_SECRET_KEY=... \
+  -e MD_BUILDER_S3_BUCKET=md-builder \
+  md-builder:local
+```
+
+无论是容器还是直接跑在宿主机上,服务端都需要对象存储才能启动:启动
+时存储不可达就会**退出**(见
+[对象存储(MinIO)](#/docs/object-storage))。compose 里的重启策略正是
+用来等 MinIO 就绪的;如果它一直重启不停,说明地址或凭据配错了,
+`docker compose logs md-builder` 会说明是哪一种。
+
 ## 首次运行清单
 
 1. 用 `adduser` 创建用户并登录。

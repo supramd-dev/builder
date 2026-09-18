@@ -80,7 +80,9 @@ func Load(pinned string) (storage.Config, string, error) {
 		cfg.ConfigPath = path
 	}
 
-	applyEnv(&cfg)
+	if err := applyEnv(&cfg); err != nil {
+		return storage.Config{}, "", err
+	}
 	// The env may be the only source, so record where the values came from
 	// for the validation message.
 	if cfg.ConfigPath == "" {
@@ -134,12 +136,29 @@ func envComplete() bool {
 }
 
 // applyEnv overlays the environment onto the file's values. Only set
-// variables win, so the file stays the documented source of truth.
-func applyEnv(cfg *storage.Config) {
+// variables win, so the file stays the documented source of truth — which is
+// also how a container deployment runs without a file at all.
+//
+// A variable that is set but unparseable is an error rather than a silent
+// no-op: MD_BUILDER_S3_GC=ture would otherwise leave orphan reclamation
+// switched off without a word.
+func applyEnv(cfg *storage.Config) error {
 	setString := func(key string, dst *string) {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 			*dst = v
 		}
+	}
+	setBool := func(key string, dst *bool) error {
+		v := strings.TrimSpace(os.Getenv(key))
+		if v == "" {
+			return nil
+		}
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("%s: %q is not a boolean", key, v)
+		}
+		*dst = b
+		return nil
 	}
 	setString("MD_BUILDER_S3_ENDPOINT", &cfg.Endpoint)
 	setString("MD_BUILDER_S3_ACCESS_KEY", &cfg.AccessKey)
@@ -147,9 +166,24 @@ func applyEnv(cfg *storage.Config) {
 	setString("MD_BUILDER_S3_BUCKET", &cfg.Bucket)
 	setString("MD_BUILDER_S3_REGION", &cfg.Region)
 	setString("MD_BUILDER_S3_PREFIX", &cfg.Prefix)
-	if v := strings.TrimSpace(os.Getenv("MD_BUILDER_S3_USE_SSL")); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			cfg.UseSSL = b
+	for _, b := range []struct {
+		key string
+		dst *bool
+	}{
+		{"MD_BUILDER_S3_USE_SSL", &cfg.UseSSL},
+		{"MD_BUILDER_S3_AUTO_CREATE_BUCKET", &cfg.AutoCreateBucket},
+		{"MD_BUILDER_S3_GC", &cfg.GC},
+	} {
+		if err := setBool(b.key, b.dst); err != nil {
+			return err
 		}
 	}
+	if v := strings.TrimSpace(os.Getenv("MD_BUILDER_S3_GC_INTERVAL_HOURS")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("MD_BUILDER_S3_GC_INTERVAL_HOURS: %q is not a positive number of hours", v)
+		}
+		cfg.GCIntervalHours = n
+	}
+	return nil
 }

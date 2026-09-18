@@ -28,6 +28,8 @@ func clearEnv(t *testing.T) {
 		EnvConfigPath, "MD_BUILDER_S3_ENDPOINT", "MD_BUILDER_S3_ACCESS_KEY",
 		"MD_BUILDER_S3_SECRET_KEY", "MD_BUILDER_S3_BUCKET", "MD_BUILDER_S3_REGION",
 		"MD_BUILDER_S3_PREFIX", "MD_BUILDER_S3_USE_SSL",
+		"MD_BUILDER_S3_AUTO_CREATE_BUCKET", "MD_BUILDER_S3_GC",
+		"MD_BUILDER_S3_GC_INTERVAL_HOURS",
 	} {
 		t.Setenv(key, "")
 	}
@@ -154,6 +156,91 @@ func TestLoadFromEnvOnly(t *testing.T) {
 	}
 	if source != "(environment)" {
 		t.Fatalf("source = %q", source)
+	}
+}
+
+// The knobs that only a file could set before are reachable from the
+// environment too, which is what a container deployment has.
+func TestLoadEnvToggles(t *testing.T) {
+	clearEnv(t)
+	t.Chdir(t.TempDir())
+	t.Setenv("MD_BUILDER_S3_ENDPOINT", "minio:9000")
+	t.Setenv("MD_BUILDER_S3_ACCESS_KEY", "ak")
+	t.Setenv("MD_BUILDER_S3_SECRET_KEY", "sk")
+	t.Setenv("MD_BUILDER_S3_BUCKET", "artifacts")
+	t.Setenv("MD_BUILDER_S3_AUTO_CREATE_BUCKET", "true")
+	t.Setenv("MD_BUILDER_S3_GC", "1")
+	t.Setenv("MD_BUILDER_S3_GC_INTERVAL_HOURS", "12")
+
+	cfg, _, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.AutoCreateBucket || !cfg.GC {
+		t.Fatalf("toggles did not apply: %+v", cfg)
+	}
+	if got := cfg.GCInterval(); got.Hours() != 12 {
+		t.Fatalf("GCInterval = %v, want 12h", got)
+	}
+}
+
+// An environment toggle wins over the file, so a container can flip one
+// setting without rewriting the file.
+func TestLoadEnvTogglesBeatFile(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, `
+objectStorage:
+  endpoint: minio:9000
+  accessKey: ak
+  secretKey: sk
+  bucket: artifacts
+  autoCreateBucket: false
+  gc: false
+  gcIntervalHours: 3
+`)
+	t.Setenv("MD_BUILDER_S3_AUTO_CREATE_BUCKET", "true")
+	t.Setenv("MD_BUILDER_S3_GC", "true")
+	t.Setenv("MD_BUILDER_S3_GC_INTERVAL_HOURS", "24")
+
+	cfg, _, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !cfg.AutoCreateBucket || !cfg.GC || cfg.GCIntervalHours != 24 {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+}
+
+// A malformed toggle must fail the load: MD_BUILDER_S3_GC=ture would
+// otherwise leave reclamation quietly switched off.
+func TestLoadRejectsMalformedEnvToggle(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+	}{
+		{"MD_BUILDER_S3_USE_SSL", "yes please"},
+		{"MD_BUILDER_S3_AUTO_CREATE_BUCKET", "ture"},
+		{"MD_BUILDER_S3_GC", "on"},
+		{"MD_BUILDER_S3_GC_INTERVAL_HOURS", "often"},
+		{"MD_BUILDER_S3_GC_INTERVAL_HOURS", "0"},
+		{"MD_BUILDER_S3_GC_INTERVAL_HOURS", "-6"},
+	} {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			clearEnv(t)
+			t.Chdir(t.TempDir())
+			t.Setenv("MD_BUILDER_S3_ENDPOINT", "minio:9000")
+			t.Setenv("MD_BUILDER_S3_ACCESS_KEY", "ak")
+			t.Setenv("MD_BUILDER_S3_SECRET_KEY", "sk")
+			t.Setenv("MD_BUILDER_S3_BUCKET", "artifacts")
+			t.Setenv(tc.key, tc.value)
+
+			_, _, err := Load("")
+			if err == nil {
+				t.Fatalf("%s=%s should be rejected", tc.key, tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("err should name the variable: %v", err)
+			}
+		})
 	}
 }
 

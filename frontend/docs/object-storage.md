@@ -61,9 +61,15 @@ values win over the file:
 | `MD_BUILDER_S3_REGION` | `region` |
 | `MD_BUILDER_S3_PREFIX` | `prefix` |
 | `MD_BUILDER_S3_USE_SSL` | `useSSL` (`true`/`false`) |
+| `MD_BUILDER_S3_AUTO_CREATE_BUCKET` | `autoCreateBucket` (`true`/`false`) |
+| `MD_BUILDER_S3_GC` | `gc` (`true`/`false`) |
+| `MD_BUILDER_S3_GC_INTERVAL_HOURS` | `gcIntervalHours` (a positive integer) |
 
 Setting those four required variables (`ENDPOINT`, `ACCESS_KEY`,
-`SECRET_KEY`, `BUCKET`) is enough to run without a file at all.
+`SECRET_KEY`, `BUCKET`) is enough to run without a file at all; the rest
+have sensible defaults. A variable that is set but unreadable
+(`MD_BUILDER_S3_GC=ture`, `MD_BUILDER_S3_GC_INTERVAL_HOURS=often`) is a
+startup error rather than a silently ignored typo.
 
 ## Object storage is mandatory
 
@@ -158,6 +164,10 @@ objectStorage:
 
 `useSSL: false` is for this local, plain-HTTP setup only — use TLS
 (`useSSL: true`) for anything reachable from a network.
+
+For a deployment rather than a scratch store, `docker-compose.yml` starts
+MinIO and the server together and wires the environment up for you (see
+[Deployment with Docker or Podman](#/docs/getting-started)).
 
 ## Credentials
 

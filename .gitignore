@@ -1,6 +1,7 @@
 # Go
 /server/server
 /server/bin/
+/server/md-builder
 *.exe
 
 # Local SQLite databases (created at runtime by the server or adduser).
@@ -9,6 +10,14 @@
 # Server configuration holding object-storage credentials. Commit
 # md-builder-server.example.yaml instead.
 md-builder-server.yaml
+
+# Docker/Podman deployment settings, incl. the MinIO root password. Commit
+# .env.example instead.
+.env
+
+# Docker/Podman deployment state: the SQLite database and the MinIO buckets
+# bind-mounted by docker-compose.yml.
+/data/
 
 # Frontend
 frontend/node_modules/

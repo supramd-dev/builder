@@ -63,6 +63,25 @@ make serve   # builds the frontend, then serves via Go on :8080
 ```
 
 Visit http://localhost:8080
+
+The server needs object storage for the artifacts it records (see
+[md-builder-server.example.yaml](md-builder-server.example.yaml) and
+[Object storage](frontend/docs/object-storage.md)); it refuses to start
+without it.
+
+### Containers
+
+[Dockerfile](Dockerfile) builds the frontend and the server into one image;
+[docker-compose.yml](docker-compose.yml) runs it next to a MinIO instance
+with the credentials coming from a `.env` file:
+
+```sh
+cp .env.example .env                  # then set MINIO_ROOT_PASSWORD
+mkdir -p data/md-builder data/minio   # the database and the buckets
+docker compose up -d                  # or: podman compose up -d
+docker compose --profile tools run --rm cli adduser -username alice -email alice@example.com
+```
+
 ## User documentation
 
 End-user documentation — site configuration, environment tags, the

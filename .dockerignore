@@ -1,0 +1,32 @@
+# Keep the build context small and, more importantly, keep credentials and
+# local state out of the image layers.
+
+# Version control and editor state
+.git
+.gitignore
+.claude
+.idea
+.vscode
+.DS_Store
+
+# Object-storage credentials. The example file is committed, the real one is
+# not — and it must not reach a layer either.
+md-builder-server.yaml
+
+# Local databases (and their SQLite sidecar files)
+*.db
+*.db-shm
+*.db-wal
+
+# Rebuilt inside the image from source, so the local copies are dead weight
+frontend/node_modules
+frontend/dist
+frontend/.vite
+
+# Local build output
+server/md-builder
+server/bin
+
+# Host-only tooling
+scripts
+private

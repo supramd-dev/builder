@@ -66,3 +66,43 @@ func TestListenURL(t *testing.T) {
 		}
 	}
 }
+
+// The container image is configured through MD_BUILDER_ADDR/MD_BUILDER_PORT,
+// with the flags still overriding them.
+func TestDefaultListenFlags(t *testing.T) {
+	cases := []struct {
+		name     string
+		envAddr  string
+		envPort  string
+		wantAddr string
+		wantPort int
+		wantErr  bool
+	}{
+		{name: "unset", wantAddr: ":8080"},
+		{name: "env addr", envAddr: "127.0.0.1:9000", wantAddr: "127.0.0.1:9000"},
+		{name: "env port", envPort: "9000", wantAddr: ":8080", wantPort: 9000},
+		{name: "both", envAddr: "0.0.0.0", envPort: "9000", wantAddr: "0.0.0.0", wantPort: 9000},
+		{name: "port zero", envPort: "0", wantAddr: ":8080"},
+		{name: "not a number", envPort: "eighty", wantErr: true},
+		{name: "out of range", envPort: "70000", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envAddr, tc.envAddr)
+			t.Setenv(envPort, tc.envPort)
+			addr, port, err := defaultListenFlags()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error for %s=%s", envPort, tc.envPort)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("defaultListenFlags: %v", err)
+			}
+			if addr != tc.wantAddr || port != tc.wantPort {
+				t.Fatalf("got (%q, %d), want (%q, %d)", addr, port, tc.wantAddr, tc.wantPort)
+			}
+		})
+	}
+}

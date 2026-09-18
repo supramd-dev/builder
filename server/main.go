@@ -36,6 +36,31 @@ const defaultPort = "8080"
 
 const defaultListenAddr = ":" + defaultPort
 
+// envAddr and envPort supply the defaults for -addr and -port, so a container
+// can be pointed at a different port from its environment alone (compose sets
+// them from .env). The flags still win when they are given.
+const envAddr = "MD_BUILDER_ADDR"
+
+const envPort = "MD_BUILDER_PORT"
+
+// defaultListenFlags reads those defaults, rejecting an unparseable port the
+// same way -port would.
+func defaultListenFlags() (addr string, port int, err error) {
+	addr = defaultListenAddr
+	if v := strings.TrimSpace(os.Getenv(envAddr)); v != "" {
+		addr = v
+	}
+	v := strings.TrimSpace(os.Getenv(envPort))
+	if v == "" {
+		return addr, 0, nil
+	}
+	n, convErr := strconv.Atoi(v)
+	if convErr != nil || n < 0 || n > 65535 {
+		return "", 0, fmt.Errorf("%s: %q is not a port number", envPort, v)
+	}
+	return addr, n, nil
+}
+
 // resolveListenAddr combines -addr and -port into the address the HTTP server
 // listens on. -port wins over the port inside -addr, and an address given
 // without one ("127.0.0.1", "::1", "localhost") takes it from -port or the
@@ -160,8 +185,12 @@ func main() {
 	// listen.
 	flags := flag.NewFlagSet("md-builder", flag.ExitOnError)
 	configPath := flags.String(config.FlagName, "", config.FlagUsage)
-	addr := flags.String("addr", defaultListenAddr, "listen address: host or host:port")
-	port := flags.Int("port", 0, "listen port, overriding the port in -addr (0: take it from -addr)")
+	addrDefault, portDefault, err := defaultListenFlags()
+	if err != nil {
+		log.Fatalf("listen address: %v", err)
+	}
+	addr := flags.String("addr", addrDefault, "listen address: host or host:port; $"+envAddr+" sets the default")
+	port := flags.Int("port", portDefault, "listen port, overriding the port in -addr; $"+envPort+" sets the default (0: take it from -addr)")
 	_ = flags.Parse(os.Args[1:])
 	if flags.NArg() > 0 {
 		// A mistyped subcommand would otherwise start the server silently.

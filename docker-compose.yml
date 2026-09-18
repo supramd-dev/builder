@@ -1,0 +1,137 @@
+# md-builder with its object storage, for Docker or Podman:
+#
+#   cp .env.example .env          # then edit the passwords
+#   mkdir -p data/md-builder data/minio
+#   docker compose up -d          # or: podman compose up -d
+#   docker compose --profile tools run --rm cli adduser -username alice -email alice@example.com
+#
+# The first account has to come from the CLI, so the tools profile below
+# carries a one-off `cli` service that shares this deployment's database and
+# object storage.
+#
+# Both stores are bind mounts under ./data, so everything this deployment
+# writes stays next to this file — back it up by copying the directory.
+# Create those two directories before the first `up`: Docker creates a missing
+# bind-mount source itself, as root, and a root-owned directory is one the
+# container's user cannot write. On Linux, set MD_BUILDER_UID/MD_BUILDER_GID
+# in .env to your own `id -u`/`id -g` so the files stay yours (see below).
+#
+# Compose file format: works with Compose v2 (docker compose), podman-compose
+# and podman compose with the docker-compose provider. Nothing here depends on
+# Docker-only features.
+
+# The server reads its configuration from the environment
+# (MD_BUILDER_S3_*), which is why both the server and the CLI share this
+# block: a subcommand must open the same database and reach the same bucket.
+x-app-env: &app-env
+  # State that must outlive the container. The image defaults to this path;
+  # it is repeated so the whole deployment reads from one file.
+  MD_BUILDER_DSN: /data/md-builder.db
+  # Listen port. Published on the host below with the same value, so the
+  # container port and the host port cannot drift apart.
+  MD_BUILDER_PORT: "${MD_BUILDER_PORT:-8080}"
+  # Object storage is mandatory — the server exits at startup without a
+  # reachable backend — so these point at the minio service below. Replace
+  # them to use an external S3-compatible store.
+  MD_BUILDER_S3_ENDPOINT: "minio:9000"
+  MD_BUILDER_S3_ACCESS_KEY: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}"
+  MD_BUILDER_S3_SECRET_KEY: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}"
+  MD_BUILDER_S3_BUCKET: "${MD_BUILDER_S3_BUCKET:-md-builder}"
+  # Plain HTTP inside the compose network; set "true" (or drop the variable
+  # and use a config file) for a TLS endpoint.
+  MD_BUILDER_S3_USE_SSL: "false"
+  # Create the bucket at startup instead of requiring it to exist already.
+  MD_BUILDER_S3_AUTO_CREATE_BUCKET: "true"
+  # Reclaim objects no run references any more. Interval defaults to 6h.
+  MD_BUILDER_S3_GC: "${MD_BUILDER_S3_GC:-true}"
+  # Optional, when the store needs them:
+  # MD_BUILDER_S3_REGION: ""
+  # MD_BUILDER_S3_PREFIX: artifacts
+
+x-app-image: &app-image
+  image: "${MD_BUILDER_IMAGE:-md-builder:local}"
+  build:
+    context: .
+    args:
+      # Stamp the source revision into the binary, as `make build-server`
+      # does: MD_BUILDER_VERSION="$(git describe --always --dirty)" in .env.
+      VERSION: "${MD_BUILDER_VERSION:-dev}"
+
+services:
+  md-builder:
+    <<: *app-image
+    # The image's own account. Overridden from .env on a Linux host, where
+    # uid 10001 owns nothing: MD_BUILDER_UID=$(id -u) keeps the files in
+    # ./data/md-builder owned by you. Only /app is read-only to this user, so
+    # any uid works.
+    user: "${MD_BUILDER_UID:-10001}:${MD_BUILDER_GID:-10001}"
+    restart: unless-stopped
+    depends_on:
+      # Start order only — the server probes the store at startup and exits
+      # if it is not there yet, which the restart policy turns into a retry
+      # until MinIO is listening. A failure that keeps repeating is a real
+      # configuration error: `docker compose logs md-builder` says which.
+      minio:
+        condition: service_started
+    ports:
+      - "${MD_BUILDER_PORT:-8080}:${MD_BUILDER_PORT:-8080}"
+    environment:
+      <<: *app-env
+    volumes:
+      # The SQLite database, the only state the server keeps locally.
+      - ./data/md-builder:/data
+    # Runtime clones and YAML fetches land in the container's /tmp. Give them
+    # real disk rather than memory — a code clone can be large:
+    # tmpfs:
+    #   - /tmp
+
+  minio:
+    image: "${MINIO_IMAGE:-minio/minio:latest}"
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}"
+    volumes:
+      # Buckets live in ./data/minio. On a host with SELinux enforcing
+      # (RHEL, Fedora) append :z to both bind mounts here and in md-builder.
+      - ./data/minio:/data
+    ports:
+      # Bound to the loopback interface: the server reaches MinIO over the
+      # compose network by service name, so only an operator on this host
+      # needs these. Widen the bind address deliberately.
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    # No healthcheck: the image is minimal (no curl) and a wrong guess there
+    # would block startup rather than report anything. The server's restart
+    # policy covers the startup race, and the object-storage check on its
+    # /api/health/deep board is the readiness signal that matters.
+
+  # One-off CLI runs against this deployment. The arguments are the
+  # subcommand and its flags, because `compose run` replaces the command:
+  #
+  #   docker compose --profile tools run --rm cli adduser -username alice -email a@example.com
+  #   docker compose --profile tools run --rm cli seed -force
+  #   docker compose --profile tools run --rm cli -h
+  #
+  # `--profile tools` because the service sits behind that profile: a plain
+  # `up` leaves it alone, which is what you want for a one-off command.
+  #
+  # Build the image first (`docker compose build`, or any `up`): this service
+  # reuses the image the server builds and never builds one of its own, so
+  # the two cannot drift into different binaries.
+  cli:
+    image: "${MD_BUILDER_IMAGE:-md-builder:local}"
+    profiles: ["tools"]
+    # A bare `run cli` prints the usage instead of starting a second server
+    # against the same database. Args given to `run` replace this.
+    command: ["-h"]
+    # Same account as the server: a subcommand writes the same database.
+    user: "${MD_BUILDER_UID:-10001}:${MD_BUILDER_GID:-10001}"
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      <<: *app-env
+    volumes:
+      - ./data/md-builder:/data
