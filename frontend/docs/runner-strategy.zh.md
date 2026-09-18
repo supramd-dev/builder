@@ -69,9 +69,10 @@ root (test <sha> on <environment>)
 ## 执行池
 
 - 默认 2 个 worker goroutine 原子地认领就绪的子任务并运行,每 2 秒轮询
-  一次。子任务在其全部依赖完成后即为就绪。可用 `MD_BUILDER_WORKERS`
-  环境变量调整;`MD_BUILDER_DISABLE_WORKER=1` 完全关闭执行池(派发仍会
-  记录任务)。
+  一次。子任务在其全部依赖完成后即为就绪。执行池大小由服务端配置文件的
+  `worker.count` 决定(也可用环境变量 `MD_BUILDER_WORKERS`);
+  `worker.enabled: false`(或 `MD_BUILDER_DISABLE_WORKER=1`)完全关闭执行池
+  (派发仍会记录任务)。
 - 服务器崩溃后遗留的 `running` 任务在启动时被重置为 pending 并重新
   执行。
 
@@ -222,7 +223,8 @@ pending  →  running    →   passed/failed(阶段上报)
 
 调度器对实时图一视同仁;区别完全取决于演示的启动方式:
 
-- 设置 `MD_BUILDER_DISABLE_WORKER=1` 时执行池关闭:快照永久冻结
+- 设置 `worker.enabled: false`(或 `MD_BUILDER_DISABLE_WORKER=1`)时执行池
+  关闭:快照永久冻结
   —— 没有任何任务被认领,占位运行保持 pending/running,日志不再增长。
   适合稳定的演示。
 - 开启 worker 时,实时图的 pending 阶段**会被认领并真实执行**

@@ -67,14 +67,18 @@ Visit http://localhost:8080
 The server needs object storage for the artifacts it records (see
 [md-builder-server.example.yaml](md-builder-server.example.yaml) and
 [Object storage](frontend/docs/object-storage.md)); it refuses to start
-without it.
+without it. `-config` names the config file, and everything else — the
+listen address, the database, the worker pool — is read from it or from the
+matching `MD_BUILDER_*` environment variable, which wins.
 
 ### Containers
 
 [Dockerfile](Dockerfile) builds the frontend and the server into one image;
 [docker-compose.yml](docker-compose.yml) runs it next to a MinIO instance.
 No configuration file is needed — the MinIO password is the one value with
-no default, and it comes from the environment:
+no default, and it comes from the environment. Mount one at
+`/app/md-builder-server.yaml` when the settings outgrow the compose
+variables:
 
 ```sh
 export MINIO_ROOT_PASSWORD='pick-something-long'
@@ -114,9 +118,10 @@ go run ./server adduser -username alice -email alice@example.com -password 's3cr
 go run ./server adduser -username alice -email alice@example.com -dsn 'postgres://...'
 ```
 
-The DSN is taken from the `MD_BUILDER_DSN` environment variable if set,
-otherwise it defaults to a local SQLite file `md-builder.db` (both
-SQLite — pure-Go driver, no CGO — and PostgreSQL are supported):
+The DSN is the `database.dsn` key of the server config file, defaulting to a
+local SQLite file `md-builder.db`; the `MD_BUILDER_DSN` environment variable
+overrides both (SQLite — pure-Go driver, no CGO — and PostgreSQL are
+supported):
 
 ```sh
 export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=disable'

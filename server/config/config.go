@@ -6,10 +6,15 @@
 // (md-builder.yaml), which is fetched from the code repository per dispatch
 // and parsed by the runner package. This file is read once at startup.
 //
-// Object storage is the only section so far. It is mandatory: artifacts live
-// in the object store, so a server without it cannot run. Every setting can
-// also be supplied through the environment (MD_BUILDER_S3_*), which is how
-// containers and CI deployments usually inject the credentials.
+// It holds where the API listens, which database to open, where the built
+// frontend lives, how many workers to run, and the object storage section
+// (MinIO / S3). The last one is mandatory: artifacts live in the object
+// store, so a server without it cannot run.
+//
+// Every setting can also be supplied through the environment (MD_BUILDER_*),
+// which wins over the file — that is how containers and CI deployments
+// usually inject the credentials. A value neither source provides falls back
+// to the built-in default, so a file may set only what it needs.
 //
 // The file is found in this order: the -config flag, $MD_BUILDER_CONFIG, then
 // md-builder-server.yaml in the working directory or under ./server.
@@ -43,63 +48,152 @@ const FlagName = "config"
 const FlagUsage = "server config file (default: $" + EnvConfigPath +
 	", ./" + DefaultFileName + ", ./server/" + DefaultFileName + ")"
 
-// File is the parsed config file.
-type File struct {
+// Environment variables. Each one is an override of a config file key, and
+// each wins over the file when it is set and non-empty.
+const (
+	// EnvAddr / EnvPort override server.addr / server.port. EnvAddr on its
+	// own replaces the file's address and the port inside it; set EnvPort
+	// too to override that port as well.
+	EnvAddr = "MD_BUILDER_ADDR"
+	EnvPort = "MD_BUILDER_PORT"
+	// EnvDSN overrides database.dsn.
+	EnvDSN = "MD_BUILDER_DSN"
+	// EnvDist overrides dist.
+	EnvDist = "MD_BUILDER_DIST"
+	// EnvWorkers overrides worker.count.
+	EnvWorkers = "MD_BUILDER_WORKERS"
+	// EnvDisableWorker overrides worker.enabled (it is named for what it
+	// turns off, so it inverts).
+	EnvDisableWorker = "MD_BUILDER_DISABLE_WORKER"
+)
+
+// DefaultDSN is the database opened when neither the file nor the environment
+// names one: a SQLite file in the working directory.
+const DefaultDSN = "md-builder.db"
+
+// Server is the `server` section: where the API listens.
+type Server struct {
+	// Addr is the listen address, either a host ("127.0.0.1", "::1") or a
+	// host and port ("127.0.0.1:9000"). Empty listens on every interface.
+	Addr string `yaml:"addr"`
+	// Port overrides the port inside Addr. 0 takes the port from Addr, and
+	// 0 with an Addr that has none means 8080.
+	Port int `yaml:"port"`
+}
+
+// Database is the `database` section.
+type Database struct {
+	// DSN is a SQLite file path or a PostgreSQL URL.
+	DSN string `yaml:"dsn"`
+}
+
+// Worker is the `worker` section: the scheduling pool that executes
+// dispatched tasks.
+type Worker struct {
+	// Enabled is false to record dispatches without executing them, which
+	// is how a demo deployment shows the task graphs without test nodes.
+	Enabled bool `yaml:"enabled"`
+	// Count is the pool size. 0 uses the runner's built-in default.
+	Count int `yaml:"count"`
+}
+
+// Config is the whole configuration file, and also the resolved configuration
+// Load returns: the file's values with the environment overlaid on top.
+type Config struct {
+	Server   Server   `yaml:"server"`
+	Database Database `yaml:"database"`
+	// Dist is the directory holding the built frontend. Empty searches the
+	// usual places (frontend/dist, ../frontend/dist, ./dist), which is what
+	// running from the project root or from server/ needs.
+	Dist string `yaml:"dist"`
+	// Worker is the scheduling pool.
+	Worker Worker `yaml:"worker"`
 	// ObjectStorage configures the artifact store (MinIO / S3).
 	ObjectStorage storage.Config `yaml:"objectStorage"`
 }
 
-// Load reads the server config file and applies the environment overrides.
+// defaults is the configuration used when neither the file nor the
+// environment supplies a value. The file is decoded onto it, so a key left
+// out keeps the value here rather than becoming a zero.
+func defaults() Config {
+	return Config{
+		// Addr "" and Port 0: every interface, port 8080 (see
+		// resolveListenAddr).
+		Server:   Server{},
+		Database: Database{DSN: DefaultDSN},
+		// Count 0 leaves the pool size to the runner's default.
+		Worker: Worker{Enabled: true},
+	}
+}
+
+// Load reads the server configuration: the file, the environment on top, and
+// the built-in defaults under both.
 //
 // pinned is the path given on the command line (the -config flag, "" when it
 // was not used); it wins over $MD_BUILDER_CONFIG and over the default
 // locations. The returned source is where the configuration came from — the
-// file's path, or "(environment)" when only MD_BUILDER_S3_* variables were
-// set — and is meant for startup logging and error messages.
-func Load(pinned string) (storage.Config, string, error) {
-	path, source, err := locate(pinned)
+// file's path, or "(environment)" when no file was found — and is meant for
+// startup logging and error messages.
+//
+// The object storage section is not validated here: parsing the file and
+// enforcing the store's requirements are separate concerns, and a caller that
+// never opens the store should not need a complete section. The check happens
+// where the store is opened (openObjectStorage), which is also where a
+// deployment with no config file at all is told what it is missing.
+func Load(pinned string) (Config, string, error) {
+	return load(pinned, true)
+}
+
+// LoadOptional is Load for a caller that can run without object storage, such
+// as the adduser subcommand: a missing config file yields the defaults and
+// the environment instead of an error, since the command must work on a host
+// that has never been configured. A file that exists but does not parse is
+// still an error, so a broken configuration is never silently ignored.
+func LoadOptional(pinned string) (Config, string, error) {
+	return load(pinned, false)
+}
+
+func load(pinned string, fileRequired bool) (Config, string, error) {
+	path, source, err := locate(pinned, fileRequired)
 	if err != nil {
-		return storage.Config{}, "", err
+		return Config{}, "", err
 	}
 
-	cfg := storage.Config{}
+	cfg := defaults()
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return storage.Config{}, "", fmt.Errorf("read %s: %w", path, err)
+			return Config{}, "", fmt.Errorf("read %s: %w", path, err)
 		}
-		// Strict decoding: a misspelled key (objectStorage.endpont) must
-		// fail loudly instead of silently leaving the endpoint empty.
+		// Strict decoding: a misspelled key (server.adr) must fail loudly
+		// instead of silently leaving the setting at its default.
 		dec := yaml.NewDecoder(bytes.NewReader(data))
 		dec.KnownFields(true)
-		var f File
-		if err := dec.Decode(&f); err != nil {
-			return storage.Config{}, "", fmt.Errorf("parse %s: %w", path, err)
+		if err := dec.Decode(&cfg); err != nil {
+			return Config{}, "", fmt.Errorf("parse %s: %w", path, err)
 		}
-		cfg = f.ObjectStorage
-		cfg.ConfigPath = path
+		cfg.ObjectStorage.ConfigPath = path
 	}
 
 	if err := applyEnv(&cfg); err != nil {
-		return storage.Config{}, "", err
+		return Config{}, "", err
 	}
 	// The env may be the only source, so record where the values came from
 	// for the validation message.
-	if cfg.ConfigPath == "" {
-		cfg.ConfigPath = source
-	}
-	if err := cfg.Validate(); err != nil {
-		return storage.Config{}, "", err
+	if cfg.ObjectStorage.ConfigPath == "" {
+		cfg.ObjectStorage.ConfigPath = source
 	}
 	return cfg, source, nil
 }
 
 // locate resolves which config file to read: -config, then
 // $MD_BUILDER_CONFIG, then md-builder-server.yaml in the working directory or
-// under ./server. An empty path without an error means "no file at all" —
-// the environment alone must configure the store, which the caller's
-// Validate rejects when it does not.
-func locate(pinned string) (path, source string, err error) {
+// under ./server. An empty path without an error means "no file at all".
+//
+// When fileRequired is set, that is only acceptable if the environment
+// carries the object storage settings, since the server cannot run without a
+// store; otherwise the caller's defaults and environment are enough.
+func locate(pinned string, fileRequired bool) (path, source string, err error) {
 	if p := strings.TrimSpace(pinned); p != "" {
 		if _, statErr := os.Stat(p); statErr != nil {
 			return "", "", fmt.Errorf("config file %s (-config): %w", p, statErr)
@@ -117,7 +211,7 @@ func locate(pinned string) (path, source string, err error) {
 			return candidate, candidate, nil
 		}
 	}
-	if !envComplete() {
+	if fileRequired && !envComplete() {
 		return "", "", fmt.Errorf("no %s found (looked in the working directory and ./server) and no %s/%s environment settings; pass -config to name one",
 			DefaultFileName, "MD_BUILDER_S3_ENDPOINT", "MD_BUILDER_S3_BUCKET")
 	}
@@ -136,13 +230,15 @@ func envComplete() bool {
 }
 
 // applyEnv overlays the environment onto the file's values. Only set
-// variables win, so the file stays the documented source of truth — which is
-// also how a container deployment runs without a file at all.
+// variables win, so the file stays the documented source of truth for a
+// deployment that has one, while a container can be pointed elsewhere from
+// its environment alone.
 //
 // A variable that is set but unparseable is an error rather than a silent
 // no-op: MD_BUILDER_S3_GC=ture would otherwise leave orphan reclamation
-// switched off without a word.
-func applyEnv(cfg *storage.Config) error {
+// switched off without a word, and MD_BUILDER_PORT=eighty would quietly serve
+// on 8080.
+func applyEnv(cfg *Config) error {
 	setString := func(key string, dst *string) {
 		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 			*dst = v
@@ -160,19 +256,52 @@ func applyEnv(cfg *storage.Config) error {
 		*dst = b
 		return nil
 	}
-	setString("MD_BUILDER_S3_ENDPOINT", &cfg.Endpoint)
-	setString("MD_BUILDER_S3_ACCESS_KEY", &cfg.AccessKey)
-	setString("MD_BUILDER_S3_SECRET_KEY", &cfg.SecretKey)
-	setString("MD_BUILDER_S3_BUCKET", &cfg.Bucket)
-	setString("MD_BUILDER_S3_REGION", &cfg.Region)
-	setString("MD_BUILDER_S3_PREFIX", &cfg.Prefix)
+
+	setString(EnvAddr, &cfg.Server.Addr)
+	if v := strings.TrimSpace(os.Getenv(EnvPort)); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 65535 {
+			return fmt.Errorf("%s: %q is not a port number", EnvPort, v)
+		}
+		cfg.Server.Port = n
+	} else if strings.TrimSpace(os.Getenv(EnvAddr)) != "" {
+		// An address from the environment carries its own port, and the
+		// file's port setting must not quietly override it:
+		// MD_BUILDER_ADDR=127.0.0.1:9000 with server.port: 8080 in the file
+		// has to listen on 9000. Set MD_BUILDER_PORT as well to replace the
+		// port inside the address.
+		cfg.Server.Port = 0
+	}
+	setString(EnvDSN, &cfg.Database.DSN)
+	setString(EnvDist, &cfg.Dist)
+	if v := strings.TrimSpace(os.Getenv(EnvWorkers)); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("%s: %q is not a positive number of workers", EnvWorkers, v)
+		}
+		cfg.Worker.Count = n
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvDisableWorker)); v != "" {
+		disabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("%s: %q is not a boolean", EnvDisableWorker, v)
+		}
+		cfg.Worker.Enabled = !disabled
+	}
+
+	setString("MD_BUILDER_S3_ENDPOINT", &cfg.ObjectStorage.Endpoint)
+	setString("MD_BUILDER_S3_ACCESS_KEY", &cfg.ObjectStorage.AccessKey)
+	setString("MD_BUILDER_S3_SECRET_KEY", &cfg.ObjectStorage.SecretKey)
+	setString("MD_BUILDER_S3_BUCKET", &cfg.ObjectStorage.Bucket)
+	setString("MD_BUILDER_S3_REGION", &cfg.ObjectStorage.Region)
+	setString("MD_BUILDER_S3_PREFIX", &cfg.ObjectStorage.Prefix)
 	for _, b := range []struct {
 		key string
 		dst *bool
 	}{
-		{"MD_BUILDER_S3_USE_SSL", &cfg.UseSSL},
-		{"MD_BUILDER_S3_AUTO_CREATE_BUCKET", &cfg.AutoCreateBucket},
-		{"MD_BUILDER_S3_GC", &cfg.GC},
+		{"MD_BUILDER_S3_USE_SSL", &cfg.ObjectStorage.UseSSL},
+		{"MD_BUILDER_S3_AUTO_CREATE_BUCKET", &cfg.ObjectStorage.AutoCreateBucket},
+		{"MD_BUILDER_S3_GC", &cfg.ObjectStorage.GC},
 	} {
 		if err := setBool(b.key, b.dst); err != nil {
 			return err
@@ -183,7 +312,7 @@ func applyEnv(cfg *storage.Config) error {
 		if err != nil || n <= 0 {
 			return fmt.Errorf("MD_BUILDER_S3_GC_INTERVAL_HOURS: %q is not a positive number of hours", v)
 		}
-		cfg.GCIntervalHours = n
+		cfg.ObjectStorage.GCIntervalHours = n
 	}
 	return nil
 }

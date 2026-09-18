@@ -11,8 +11,10 @@
 # md-builder-server.example.yaml instead.
 md-builder-server.yaml
 
-# Docker/Podman deployment settings, incl. the MinIO root password. Commit
-# .env.example instead.
+# Optional Docker/Podman deployment settings. docker-compose.yml needs no
+# file — it defaults everything but the MinIO password, which it takes from
+# the environment — but compose reads a .env automatically if you make one,
+# and that one holds a credential.
 .env
 
 # Docker/Podman deployment state: the SQLite database and the MinIO buckets

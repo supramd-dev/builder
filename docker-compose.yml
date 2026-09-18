@@ -26,9 +26,15 @@
 # and podman compose with the docker-compose provider. Nothing here depends on
 # Docker-only features.
 
-# The server reads its configuration from the environment
-# (MD_BUILDER_S3_*), which is why both the server and the CLI share this
-# block: a subcommand must open the same database and reach the same bucket.
+# The server reads its configuration from the environment (MD_BUILDER_*),
+# which is why both the server and the CLI share this block: a subcommand
+# must open the same database and reach the same bucket.
+#
+# A deployment with more settings than variables is easier to write as a file:
+# mount your md-builder-server.yaml at /app/md-builder-server.yaml — the
+# default location, since the image's working directory is /app — and drop the
+# variables it replaces. The environment wins over the file, so the two can be
+# mixed, and the image's healthcheck reads the port from either.
 x-app-env: &app-env
   # State that must outlive the container. The image defaults to this path;
   # it is repeated so the whole deployment reads from one file.

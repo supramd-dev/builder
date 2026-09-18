@@ -41,6 +41,10 @@ objectStorage:
 未知的键会导致启动失败,因此像 `endpont` 这样的拼写错误会被报出来,
 而不会静默地留下空 endpoint。
 
+服务端其余配置也在同一个文件里 —— `server.addr` 与 `server.port`、
+`database.dsn`、`dist`、`worker` —— 每一项都有同样形式的环境变量可以
+覆盖,详见 [快速开始](#/docs/getting-started)。
+
 ### 通过环境变量配置
 
 容器与 CI 部署通常注入凭据而不是挂载文件。每个配置项都有对应的环境

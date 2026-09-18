@@ -1,10 +1,16 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
-// resolveListenAddr is what turns -addr/-port into the address the server
-// binds, so its precedence is worth pinning down: -port wins over the port
-// inside -addr, and an address without a port takes the default one.
+// resolveListenAddr is what turns server.addr / server.port (or their
+// MD_BUILDER_ADDR / MD_BUILDER_PORT overrides) into the address the server
+// binds, so its precedence is worth pinning down: the port setting wins over
+// the port inside the address, and an address without a port takes the
+// default one.
 func TestResolveListenAddr(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -14,16 +20,16 @@ func TestResolveListenAddr(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "defaults", addr: defaultListenAddr, want: ":8080"},
-		{name: "port flag", addr: defaultListenAddr, port: 9000, want: ":9000"},
+		{name: "port setting", addr: defaultListenAddr, port: 9000, want: ":9000"},
 		{name: "host only", addr: "127.0.0.1", want: "127.0.0.1:8080"},
-		{name: "host only with port flag", addr: "127.0.0.1", port: 9000, want: "127.0.0.1:9000"},
+		{name: "host only with port setting", addr: "127.0.0.1", port: 9000, want: "127.0.0.1:9000"},
 		{name: "hostname only", addr: "localhost", want: "localhost:8080"},
 		{name: "addr port kept", addr: "127.0.0.1:8000", want: "127.0.0.1:8000"},
-		{name: "port flag overrides addr port", addr: "127.0.0.1:8000", port: 9000, want: "127.0.0.1:9000"},
+		{name: "port setting overrides addr port", addr: "127.0.0.1:8000", port: 9000, want: "127.0.0.1:9000"},
 		{name: "all interfaces", addr: "0.0.0.0:9000", want: "0.0.0.0:9000"},
 		{name: "ipv6 literal", addr: "::1", want: "[::1]:8080"},
 		{name: "ipv6 with port", addr: "[::1]:8000", want: "[::1]:8000"},
-		{name: "ipv6 with port flag", addr: "[::1]", port: 9000, want: "[::1]:9000"},
+		{name: "ipv6 with port setting", addr: "[::1]", port: 9000, want: "[::1]:9000"},
 		{name: "ephemeral port", addr: ":0", want: ":0"},
 		{name: "empty addr", addr: "", want: ":8080"},
 
@@ -67,42 +73,23 @@ func TestListenURL(t *testing.T) {
 	}
 }
 
-// The container image is configured through MD_BUILDER_ADDR/MD_BUILDER_PORT,
-// with the flags still overriding them.
-func TestDefaultListenFlags(t *testing.T) {
-	cases := []struct {
-		name     string
-		envAddr  string
-		envPort  string
-		wantAddr string
-		wantPort int
-		wantErr  bool
-	}{
-		{name: "unset", wantAddr: ":8080"},
-		{name: "env addr", envAddr: "127.0.0.1:9000", wantAddr: "127.0.0.1:9000"},
-		{name: "env port", envPort: "9000", wantAddr: ":8080", wantPort: 9000},
-		{name: "both", envAddr: "0.0.0.0", envPort: "9000", wantAddr: "0.0.0.0", wantPort: 9000},
-		{name: "port zero", envPort: "0", wantAddr: ":8080"},
-		{name: "not a number", envPort: "eighty", wantErr: true},
-		{name: "out of range", envPort: "70000", wantErr: true},
+// resolveDistDir takes the configured directory when there is one, and
+// otherwise searches the working directory, so the binary runs from either
+// the project root or server/.
+func TestResolveDistDir(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	if got := resolveDistDir("/srv/dist"); got != "/srv/dist" {
+		t.Errorf("configured dist = %q, want it used as given", got)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(envAddr, tc.envAddr)
-			t.Setenv(envPort, tc.envPort)
-			addr, port, err := defaultListenFlags()
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected an error for %s=%s", envPort, tc.envPort)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("defaultListenFlags: %v", err)
-			}
-			if addr != tc.wantAddr || port != tc.wantPort {
-				t.Fatalf("got (%q, %d), want (%q, %d)", addr, port, tc.wantAddr, tc.wantPort)
-			}
-		})
+	if got := resolveDistDir(""); got != "frontend/dist" {
+		t.Errorf("unconfigured dist = %q, want the built-in default when nothing exists", got)
+	}
+
+	if err := os.MkdirAll(filepath.Join("..", "frontend", "dist"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if got := resolveDistDir(""); got != "../frontend/dist" {
+		t.Errorf("dist = %q, want the first existing candidate", got)
 	}
 }

@@ -45,6 +45,11 @@ deployment. `md-builder -h` lists the flag, and `seed` takes it too
 An unknown key is a startup error, so a typo like `endpont` is reported
 instead of silently leaving the endpoint empty.
 
+This file is also where the server's other settings live — `server.addr`
+and `server.port`, `database.dsn`, `dist`, `worker` — each with the same
+kind of environment override; see
+[Getting started](#/docs/getting-started).
+
 ### Through the environment
 
 Containers and CI deployments usually inject credentials instead of

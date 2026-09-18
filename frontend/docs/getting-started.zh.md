@@ -34,8 +34,8 @@ make seed-demo FORCE=1  # 重建演示任务图
 
 ## 数据库选择
 
-DSN 优先取自环境变量 `MD_BUILDER_DSN`,未设置时默认使用本地 SQLite
-文件 `md-builder.db`。
+DSN 取自服务端配置文件的 `database.dsn`;文件里没写时默认使用本地
+SQLite 文件 `md-builder.db`。环境变量 `MD_BUILDER_DSN` 会覆盖两者。
 
 ```sh
 export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=disable'
@@ -45,19 +45,27 @@ export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=dis
 
 ```sh
 go run ./server                       # http://localhost:8080
-go run ./server -port 9000            # 换一个端口
-go run ./server -addr 127.0.0.1:9000  # 指定监听的主机与端口
 go run ./server -config /etc/md-builder/server.yaml
 ```
 
-`-addr` 接受主机或 主机:端口 的形式,`-port` 会覆盖其中的端口 ——
-因此 `-addr 127.0.0.1 -port 9000` 监听 127.0.0.1:9000。服务端还需要
-对象存储(见 [对象存储(MinIO)](#/docs/object-storage));`-config`
-用于指定该配置文件,`-h` 会列出全部参数。
+`-config` 指定服务端配置文件,也是服务端唯一的命令行参数:监听地址、
+数据库、worker 数量都来自这个文件。`-h` 会列出程序与各个子命令的参数。
 
-容器里改用环境变量配置:`MD_BUILDER_ADDR` 与 `MD_BUILDER_PORT` 提供和
-命令行参数相同的默认值,`MD_BUILDER_DSN` 指定数据库,`MD_BUILDER_S3_*`
-配置对象存储。参数仍然优先于对应的环境变量。
+```yaml
+server:
+  addr: 127.0.0.1   # 主机或 主机:端口;留空表示监听所有网卡
+  port: 9000        # 0 表示取 addr 里的端口,都没有则为 8080
+```
+
+配置文件里还有服务端必需的对象存储配置(见
+[对象存储(MinIO)](#/docs/object-storage))和 `worker` 执行池。可以复制
+`md-builder-server.example.yaml` 作为起点。
+
+每个配置项都有对应的环境变量,环境变量优先于文件,容器部署通常就用
+这种方式:`MD_BUILDER_ADDR` 与 `MD_BUILDER_PORT` 对应监听地址,
+`MD_BUILDER_DSN` 对应数据库,`MD_BUILDER_DIST` 对应前端构建产物,
+`MD_BUILDER_WORKERS` 与 `MD_BUILDER_DISABLE_WORKER` 对应执行池,
+`MD_BUILDER_S3_*` 对应对象存储。
 
 ## 用 Docker 或 Podman 部署
 
@@ -74,6 +82,11 @@ docker compose up -d                  # 或者:podman compose up -d
 都有默认值,密码从环境变量读取(没设置就拒绝启动)。其它默认值同样
 可以用环境变量覆盖 —— 例如 `MD_BUILDER_PORT=9000 docker compose up -d`
 会同时改掉监听端口和映射到宿主机的端口。
+
+配置项比 compose 变量更多时,写成文件更方便:挂载到
+`/app/md-builder-server.yaml`(镜像的工作目录就是 `/app`,服务端默认
+会读这个路径),同时去掉对应的 `MD_BUILDER_*` 变量即可。环境变量优先
+于文件,两者可以混用。
 
 之后界面在 <http://localhost:8080>,MinIO 控制台在
 <http://127.0.0.1:9001>。
@@ -98,7 +111,7 @@ docker compose --profile tools run --rm cli adduser -username alice -email alice
 shell 历史里)。需要演示数据时,`seed` 走同一条路。
 
 不用 compose 也可以,直接构建镜像即可 —— 镜像里是一个静态二进制
-文件加上构建好的前端,运行在 Alpine 上,全部配置都来自环境变量:
+文件加上构建好的前端,运行在 Alpine 上,全部配置也可以来自环境变量:
 
 ```sh
 docker build -t md-builder:local .
@@ -106,6 +119,7 @@ mkdir -p data/md-builder
 docker run -d --name md-builder -p 8080:8080 \
   --user "$(id -u):$(id -g)" \
   -v "$PWD/data/md-builder:/data" \
+  -v "$PWD/md-builder-server.yaml:/app/md-builder-server.yaml:ro" \
   -e MD_BUILDER_S3_ENDPOINT=minio.example.com:9000 \
   -e MD_BUILDER_S3_ACCESS_KEY=... -e MD_BUILDER_S3_SECRET_KEY=... \
   -e MD_BUILDER_S3_BUCKET=md-builder \

@@ -30,16 +30,25 @@ import (
 // left over from a previous interrupted seed (e.g. live tasks without runs).
 func seedSubcommand() int {
 	fs := flag.NewFlagSet("seed", flag.ContinueOnError)
-	dsn := fs.String("dsn", defaultDSN(), "database DSN (sqlite path or postgres URL)")
+	dsn := fs.String("dsn", "", "database DSN (default: database.dsn from the config file)")
 	force := fs.Bool("force", false, "delete leftover demo tasks before seeding")
 	configPath := fs.String(config.FlagName, "", config.FlagUsage)
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return 2
 	}
 
+	srvCfg, source, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: config: %v\n", err)
+		return 1
+	}
+	if *dsn == "" {
+		*dsn = srvCfg.Database.DSN
+	}
+
 	// The demo data includes artifacts, so seeding needs the same object
 	// storage the server uses.
-	objs, _, err := openObjectStorage(*configPath)
+	objs, err := openObjectStorage(srvCfg, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: object storage: %v\n", err)
 		return 1
@@ -736,7 +745,8 @@ func seedGraph(s *store.Store, env *store.TestEnvironment, commit *store.Commit,
 // "running" snapshot's remaining pending stages get claimed (and fail on
 // the unreachable demo host, since the stage snapshots carry valid configs
 // but no real environment), and ResetStaleRunning resets running rows to
-// pending on restart. Demo with MD_BUILDER_DISABLE_WORKER=1 for a frozen
+// pending on restart. Demo with `worker.enabled: false` (or
+// MD_BUILDER_DISABLE_WORKER=1) for a frozen
 // in-flight state; with workers on, the snapshot degrades into a genuine
 // failing dispatch, which the seeded logs and configs are shaped to
 // survive gracefully.

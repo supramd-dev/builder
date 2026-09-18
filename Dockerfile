@@ -80,11 +80,18 @@ USER md-builder
 # Liveness only: /api/health answers unauthenticated as long as the HTTP
 # server is up. The dependency probes live behind /api/health/deep (they
 # need a session) and would make the container flap whenever the object
-# store is briefly slow. The port is read the same way the server reads it
-# — MD_BUILDER_PORT wins, then the port inside MD_BUILDER_ADDR, else 8080 —
-# so a container started with -port is still probed correctly. busybox
-# provides wget.
+# store is briefly slow. The port is resolved the same way the server
+# resolves it — MD_BUILDER_PORT wins, then the port inside MD_BUILDER_ADDR,
+# then server.port in a mounted config file, then the port inside its
+# server.addr, else 8080 — so a container configured either way is probed
+# correctly. busybox provides wget and sed.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD p="${MD_BUILDER_PORT:-}"; [ -n "$p" ] || p="${MD_BUILDER_ADDR##*:}"; case "$p" in ''|*[!0-9]*) p=8080;; esac; wget -q -O /dev/null "http://127.0.0.1:$p/api/health"
+  CMD cfg=/app/md-builder-server.yaml; \
+      p="${MD_BUILDER_PORT:-}"; \
+      if [ -z "$p" ] && [ -n "${MD_BUILDER_ADDR:-}" ]; then p="${MD_BUILDER_ADDR##*:}"; fi; \
+      if [ -z "$p" ]; then p=$(sed -n 's/^[[:space:]]*port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$cfg" 2>/dev/null | head -1); fi; \
+      if [ -z "$p" ]; then p=$(sed -n 's/^[[:space:]]*addr:[[:space:]]*.*:\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$cfg" 2>/dev/null | head -1); fi; \
+      case "$p" in ''|*[!0-9]*) p=8080;; esac; \
+      wget -q -O /dev/null "http://127.0.0.1:$p/api/health"
 
 ENTRYPOINT ["/app/md-builder"]

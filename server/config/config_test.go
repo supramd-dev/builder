@@ -25,7 +25,9 @@ func writeConfig(t *testing.T, body string) string {
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
-		EnvConfigPath, "MD_BUILDER_S3_ENDPOINT", "MD_BUILDER_S3_ACCESS_KEY",
+		EnvConfigPath, EnvAddr, EnvPort, EnvDSN, EnvDist, EnvWorkers,
+		EnvDisableWorker,
+		"MD_BUILDER_S3_ENDPOINT", "MD_BUILDER_S3_ACCESS_KEY",
 		"MD_BUILDER_S3_SECRET_KEY", "MD_BUILDER_S3_BUCKET", "MD_BUILDER_S3_REGION",
 		"MD_BUILDER_S3_PREFIX", "MD_BUILDER_S3_USE_SSL",
 		"MD_BUILDER_S3_AUTO_CREATE_BUCKET", "MD_BUILDER_S3_GC",
@@ -53,17 +55,112 @@ objectStorage:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Endpoint != "minio.example.com:9000" || cfg.Bucket != "artifacts" || !cfg.UseSSL {
-		t.Fatalf("cfg = %+v", cfg)
+	st := cfg.ObjectStorage
+	if st.Endpoint != "minio.example.com:9000" || st.Bucket != "artifacts" || !st.UseSSL {
+		t.Fatalf("cfg = %+v", st)
 	}
-	if cfg.Prefix != "ci" || !cfg.AutoCreateBucket || !cfg.GC || cfg.GCIntervalHours != 3 {
-		t.Fatalf("cfg = %+v", cfg)
+	if st.Prefix != "ci" || !st.AutoCreateBucket || !st.GC || st.GCIntervalHours != 3 {
+		t.Fatalf("cfg = %+v", st)
 	}
-	if cfg.KeyPrefix() != "ci" {
-		t.Fatalf("KeyPrefix = %q", cfg.KeyPrefix())
+	if st.KeyPrefix() != "ci" {
+		t.Fatalf("KeyPrefix = %q", st.KeyPrefix())
 	}
 	if !strings.HasSuffix(source, DefaultFileName) {
 		t.Fatalf("source = %q", source)
+	}
+}
+
+// Every section the file can hold, read from one file.
+func TestLoadAllSections(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, `
+server:
+  addr: 127.0.0.1
+  port: 9000
+database:
+  dsn: /data/md-builder.db
+dist: /srv/dist
+worker:
+  enabled: false
+  count: 7
+objectStorage:
+  endpoint: minio:9000
+  accessKey: ak
+  secretKey: sk
+  bucket: artifacts
+`)
+	cfg, _, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.Addr != "127.0.0.1" || cfg.Server.Port != 9000 {
+		t.Fatalf("server = %+v", cfg.Server)
+	}
+	if cfg.Database.DSN != "/data/md-builder.db" {
+		t.Fatalf("database = %+v", cfg.Database)
+	}
+	if cfg.Dist != "/srv/dist" {
+		t.Fatalf("dist = %q", cfg.Dist)
+	}
+	if cfg.Worker.Enabled || cfg.Worker.Count != 7 {
+		t.Fatalf("worker = %+v", cfg.Worker)
+	}
+}
+
+// A file that sets only object storage leaves every other section at its
+// default, so a deployment can grow into the file one setting at a time.
+func TestLoadPartialFileKeepsDefaults(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, "objectStorage:\n  endpoint: e\n  accessKey: ak\n  secretKey: sk\n  bucket: b\n")
+
+	cfg, _, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.Addr != "" || cfg.Server.Port != 0 {
+		t.Fatalf("server = %+v, want the empty address and port 0", cfg.Server)
+	}
+	if cfg.Database.DSN != DefaultDSN {
+		t.Fatalf("dsn = %q, want %q", cfg.Database.DSN, DefaultDSN)
+	}
+	if !cfg.Worker.Enabled || cfg.Worker.Count != 0 {
+		t.Fatalf("worker = %+v, want it enabled with the runner's default count", cfg.Worker)
+	}
+	if cfg.Dist != "" {
+		t.Fatalf("dist = %q", cfg.Dist)
+	}
+}
+
+// With no file at all, every setting is its default. adduser runs this way on
+// a host that has never been configured.
+func TestLoadOptionalWithoutFile(t *testing.T) {
+	clearEnv(t)
+	t.Chdir(t.TempDir())
+
+	cfg, source, err := LoadOptional("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Database.DSN != DefaultDSN || cfg.Server.Port != 0 || !cfg.Worker.Enabled {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	if source != "(environment)" {
+		t.Fatalf("source = %q", source)
+	}
+
+	// The server itself still refuses to start without a store.
+	if _, _, err := Load(""); err == nil {
+		t.Fatal("Load should require a config file when the environment has no store")
+	}
+}
+
+// A file that exists but is broken is an error even for the lenient caller:
+// falling back to the defaults would point adduser at a different database.
+func TestLoadOptionalRejectsBrokenFile(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, "server:\n  port: not-a-number\n")
+	if _, _, err := LoadOptional(""); err == nil {
+		t.Fatal("a malformed file should be reported")
 	}
 }
 
@@ -83,6 +180,23 @@ objectStorage:
 	}
 }
 
+// The same for the new sections.
+func TestLoadRejectsUnknownKeyInServerSection(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, `
+server:
+  adr: 127.0.0.1
+objectStorage:
+  endpoint: e
+  accessKey: ak
+  secretKey: sk
+  bucket: b
+`)
+	if _, _, err := Load(""); err == nil || !strings.Contains(err.Error(), "adr") {
+		t.Fatalf("err = %v, want an unknown-field error", err)
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	clearEnv(t)
 	t.Chdir(t.TempDir())
@@ -91,17 +205,22 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsIncompleteFile(t *testing.T) {
+// Load parses; it is the caller that opens the store and enforces its
+// requirements. The message still names the file to fix.
+func TestLoadLeavesValidationToTheStore(t *testing.T) {
 	clearEnv(t)
 	writeConfig(t, `
 objectStorage:
   endpoint: minio.example.com:9000
 `)
-	_, _, err := Load("")
+	cfg, _, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	err = cfg.ObjectStorage.Validate()
 	if err == nil || !strings.Contains(err.Error(), "objectStorage.accessKey") {
 		t.Fatalf("err = %v", err)
 	}
-	// The message names the file to fix.
 	if !strings.Contains(err.Error(), DefaultFileName) {
 		t.Fatalf("err = %v, want it to name the config file", err)
 	}
@@ -126,14 +245,96 @@ objectStorage:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Endpoint != "env.example.com:9000" || cfg.SecretKey != "from-env" {
-		t.Fatalf("env did not win: %+v", cfg)
+	st := cfg.ObjectStorage
+	if st.Endpoint != "env.example.com:9000" || st.SecretKey != "from-env" {
+		t.Fatalf("env did not win: %+v", st)
 	}
-	if cfg.AccessKey != "from-file" || cfg.Bucket != "from-file" {
-		t.Fatalf("unset variables should not clear the file: %+v", cfg)
+	if st.AccessKey != "from-file" || st.Bucket != "from-file" {
+		t.Fatalf("unset variables should not clear the file: %+v", st)
 	}
-	if !cfg.UseSSL {
+	if !st.UseSSL {
 		t.Fatal("UseSSL should come from the environment")
+	}
+}
+
+// Every setting, not just the store's, is overridable from the environment.
+func TestLoadEnvOverridesAllSections(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, `
+server:
+  addr: 127.0.0.1
+  port: 9000
+database:
+  dsn: from-file.db
+dist: /from/file
+worker:
+  enabled: true
+  count: 3
+objectStorage:
+  endpoint: e
+  accessKey: ak
+  secretKey: sk
+  bucket: b
+`)
+	t.Setenv(EnvAddr, "0.0.0.0")
+	t.Setenv(EnvPort, "9100")
+	t.Setenv(EnvDSN, "from-env.db")
+	t.Setenv(EnvDist, "/from/env")
+	t.Setenv(EnvWorkers, "9")
+	t.Setenv(EnvDisableWorker, "1")
+
+	cfg, _, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.Addr != "0.0.0.0" || cfg.Server.Port != 9100 {
+		t.Fatalf("server = %+v", cfg.Server)
+	}
+	if cfg.Database.DSN != "from-env.db" {
+		t.Fatalf("database = %+v", cfg.Database)
+	}
+	if cfg.Dist != "/from/env" {
+		t.Fatalf("dist = %q", cfg.Dist)
+	}
+	if cfg.Worker.Enabled || cfg.Worker.Count != 9 {
+		t.Fatalf("worker = %+v", cfg.Worker)
+	}
+}
+
+// An address from the environment replaces the file's address together with
+// the port inside it, so a container can move the server off the port the
+// file names. Adding MD_BUILDER_PORT overrides the port in the address too.
+func TestLoadEnvAddrCarriesItsPort(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, `
+server:
+  addr: 127.0.0.1
+  port: 8080
+objectStorage:
+  endpoint: e
+  accessKey: ak
+  secretKey: sk
+  bucket: b
+`)
+	t.Setenv(EnvAddr, "0.0.0.0:9000")
+
+	cfg, _, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	// Port 0 is what makes the port inside the address stick; see
+	// resolveListenAddr in package main for the other half.
+	if cfg.Server.Addr != "0.0.0.0:9000" || cfg.Server.Port != 0 {
+		t.Fatalf("server = %+v, want the environment's address and no port override", cfg.Server)
+	}
+
+	t.Setenv(EnvPort, "9100")
+	cfg, _, err = Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Server.Port != 9100 {
+		t.Fatalf("server = %+v, want the environment's port", cfg.Server)
 	}
 }
 
@@ -151,8 +352,11 @@ func TestLoadFromEnvOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Endpoint != "minio:9000" || cfg.Bucket != "artifacts" {
-		t.Fatalf("cfg = %+v", cfg)
+	if cfg.ObjectStorage.Endpoint != "minio:9000" || cfg.ObjectStorage.Bucket != "artifacts" {
+		t.Fatalf("cfg = %+v", cfg.ObjectStorage)
+	}
+	if cfg.Server.Port != 0 || cfg.Database.DSN != DefaultDSN {
+		t.Fatalf("cfg = %+v, want the defaults for everything the environment did not set", cfg)
 	}
 	if source != "(environment)" {
 		t.Fatalf("source = %q", source)
@@ -176,10 +380,10 @@ func TestLoadEnvToggles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if !cfg.AutoCreateBucket || !cfg.GC {
-		t.Fatalf("toggles did not apply: %+v", cfg)
+	if !cfg.ObjectStorage.AutoCreateBucket || !cfg.ObjectStorage.GC {
+		t.Fatalf("toggles did not apply: %+v", cfg.ObjectStorage)
 	}
-	if got := cfg.GCInterval(); got.Hours() != 12 {
+	if got := cfg.ObjectStorage.GCInterval(); got.Hours() != 12 {
 		t.Fatalf("GCInterval = %v, want 12h", got)
 	}
 }
@@ -206,8 +410,9 @@ objectStorage:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if !cfg.AutoCreateBucket || !cfg.GC || cfg.GCIntervalHours != 24 {
-		t.Fatalf("cfg = %+v", cfg)
+	st := cfg.ObjectStorage
+	if !st.AutoCreateBucket || !st.GC || st.GCIntervalHours != 24 {
+		t.Fatalf("cfg = %+v", st)
 	}
 }
 
@@ -239,6 +444,64 @@ func TestLoadRejectsMalformedEnvToggle(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.key) {
 				t.Fatalf("err should name the variable: %v", err)
+			}
+		})
+	}
+}
+
+// The listen address and the worker pool are numbers too, and a typo must not
+// quietly fall back to the default.
+func TestLoadRejectsMalformedEnvNumbers(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, value string
+	}{
+		{"port not a number", EnvPort, "eighty"},
+		{"port out of range", EnvPort, "70000"},
+		{"port negative", EnvPort, "-1"},
+		{"workers not a number", EnvWorkers, "two"},
+		{"workers zero", EnvWorkers, "0"},
+		{"workers negative", EnvWorkers, "-2"},
+		{"disable worker not a boolean", EnvDisableWorker, "maybe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Chdir(t.TempDir())
+			t.Setenv(tc.key, tc.value)
+
+			_, _, err := LoadOptional("")
+			if err == nil {
+				t.Fatalf("%s=%s should be rejected", tc.key, tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("err should name the variable: %v", err)
+			}
+		})
+	}
+}
+
+// MD_BUILDER_DISABLE_WORKER is named for what it turns off, so it inverts.
+func TestLoadDisableWorker(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"1", false},
+		{"true", false},
+		{"0", true},
+		{"false", true},
+		{"", true},
+	} {
+		t.Run("disable="+tc.value, func(t *testing.T) {
+			clearEnv(t)
+			t.Chdir(t.TempDir())
+			t.Setenv(EnvDisableWorker, tc.value)
+
+			cfg, _, err := LoadOptional("")
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.Worker.Enabled != tc.want {
+				t.Fatalf("worker.enabled = %t, want %t", cfg.Worker.Enabled, tc.want)
 			}
 		})
 	}
@@ -282,8 +545,8 @@ func TestLoadFindsServerSubdirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Bucket != "b" {
-		t.Fatalf("cfg = %+v", cfg)
+	if cfg.ObjectStorage.Bucket != "b" {
+		t.Fatalf("cfg = %+v", cfg.ObjectStorage)
 	}
 	if !strings.Contains(source, "server") {
 		t.Fatalf("source = %q", source)
@@ -306,11 +569,11 @@ func TestLoadFromPinnedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Endpoint != "pinned" || cfg.Bucket != "pinned" {
-		t.Fatalf("the pinned file should win: %+v", cfg)
+	if cfg.ObjectStorage.Endpoint != "pinned" || cfg.ObjectStorage.Bucket != "pinned" {
+		t.Fatalf("the pinned file should win: %+v", cfg.ObjectStorage)
 	}
-	if source != pinned || cfg.ConfigPath != pinned {
-		t.Fatalf("source = %q, config path = %q", source, cfg.ConfigPath)
+	if source != pinned || cfg.ObjectStorage.ConfigPath != pinned {
+		t.Fatalf("source = %q, config path = %q", source, cfg.ObjectStorage.ConfigPath)
 	}
 }
 
@@ -334,16 +597,16 @@ func TestLoadPinnedPathBeatsEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Endpoint != "pinned" {
-		t.Fatalf("cfg = %+v", cfg)
+	if cfg.ObjectStorage.Endpoint != "pinned" {
+		t.Fatalf("cfg = %+v", cfg.ObjectStorage)
 	}
 
 	cfg, _, err = Load("")
 	if err != nil {
 		t.Fatalf("load env: %v", err)
 	}
-	if cfg.Endpoint != "env" {
-		t.Fatalf("cfg = %+v", cfg)
+	if cfg.ObjectStorage.Endpoint != "env" {
+		t.Fatalf("cfg = %+v", cfg.ObjectStorage)
 	}
 }
 
@@ -373,7 +636,7 @@ func TestLoadPinnedEmptyKeepsEnvOnlyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Endpoint != "minio:9000" || source != "(environment)" {
-		t.Fatalf("cfg = %+v, source = %q", cfg, source)
+	if cfg.ObjectStorage.Endpoint != "minio:9000" || source != "(environment)" {
+		t.Fatalf("cfg = %+v, source = %q", cfg.ObjectStorage, source)
 	}
 }

@@ -115,31 +115,13 @@ func TestSchedulerSkipsOnFailure(t *testing.T) {
 	t.Fatal("root did not finish in time")
 }
 
-// TestNewServiceWorkersEnv checks the MD_BUILDER_WORKERS parsing.
-func TestNewServiceWorkersEnv(t *testing.T) {
+// TestNewServiceWorkersDefault checks that NewService leaves the pool size
+// unset: the configuration (worker.count / MD_BUILDER_WORKERS) is what fills
+// it in, and 0 means the package default.
+func TestNewServiceWorkersDefault(t *testing.T) {
 	s := openTestStore(t)
 
-	t.Setenv("MD_BUILDER_WORKERS", "5")
-	svc := NewService(s)
-	if svc.Workers != 5 {
-		t.Errorf("workers: want 5, got %d", svc.Workers)
-	}
-
-	t.Setenv("MD_BUILDER_WORKERS", "bogus")
-	svc = NewService(s)
-	if svc.Workers != 0 {
-		t.Errorf("invalid value should leave 0, got %d", svc.Workers)
-	}
-
-	t.Setenv("MD_BUILDER_WORKERS", "-2")
-	svc = NewService(s)
-	if svc.Workers != 0 {
-		t.Errorf("negative value should leave 0, got %d", svc.Workers)
-	}
-
-	t.Setenv("MD_BUILDER_WORKERS", "")
-	svc = NewService(s)
-	if svc.Workers != 0 {
-		t.Errorf("unset should leave 0, got %d", svc.Workers)
+	if svc := NewService(s); svc.Workers != 0 {
+		t.Errorf("workers: want 0 (default), got %d", svc.Workers)
 	}
 }

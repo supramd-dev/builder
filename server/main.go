@@ -1,9 +1,10 @@
 // md-builder is the backend server for the md-builder scientific computing
 // test platform. It hosts the frontend assets, serves the JSON API, and
 // provides CLI subcommands (adduser, seed) for user management and demo
-// data. Serving is the default action, with -addr/-port choosing where to
-// listen and -config naming the server config file the API and the seed
-// subcommand read (see the config package).
+// data. Serving is the default action; -config names the server config file
+// the API and the seed subcommand read, and everything else — where to
+// listen, which database to open, how many workers to run — comes from that
+// file or its MD_BUILDER_* environment overrides (see the config package).
 package main
 
 import (
@@ -29,45 +30,21 @@ import (
 	"md-builder/server/store"
 )
 
-// defaultPort is the API's listen port when neither -addr nor -port says
-// otherwise; defaultListenAddr is the matching -addr default (all
-// interfaces, so a container or a LAN host is reachable without extra flags).
+// defaultPort is the API's listen port when neither server.port (or
+// $MD_BUILDER_PORT) nor the address itself says otherwise; defaultListenAddr
+// is the matching address (all interfaces, so a container or a LAN host is
+// reachable without further configuration).
 const defaultPort = "8080"
 
 const defaultListenAddr = ":" + defaultPort
 
-// envAddr and envPort supply the defaults for -addr and -port, so a container
-// can be pointed at a different port from its environment alone (compose sets
-// them from .env). The flags still win when they are given.
-const envAddr = "MD_BUILDER_ADDR"
-
-const envPort = "MD_BUILDER_PORT"
-
-// defaultListenFlags reads those defaults, rejecting an unparseable port the
-// same way -port would.
-func defaultListenFlags() (addr string, port int, err error) {
-	addr = defaultListenAddr
-	if v := strings.TrimSpace(os.Getenv(envAddr)); v != "" {
-		addr = v
-	}
-	v := strings.TrimSpace(os.Getenv(envPort))
-	if v == "" {
-		return addr, 0, nil
-	}
-	n, convErr := strconv.Atoi(v)
-	if convErr != nil || n < 0 || n > 65535 {
-		return "", 0, fmt.Errorf("%s: %q is not a port number", envPort, v)
-	}
-	return addr, n, nil
-}
-
-// resolveListenAddr combines -addr and -port into the address the HTTP server
-// listens on. -port wins over the port inside -addr, and an address given
-// without one ("127.0.0.1", "::1", "localhost") takes it from -port or the
-// default.
+// resolveListenAddr combines the configured address and port into the address
+// the HTTP server listens on. The port wins over the port inside the address,
+// and an address given without one ("127.0.0.1", "::1", "localhost") takes it
+// from the port setting or the default.
 func resolveListenAddr(addr string, port int) (string, error) {
 	if port < 0 || port > 65535 {
-		return "", fmt.Errorf("-port %d is not a port number", port)
+		return "", fmt.Errorf("port %d is not a port number (server.port / %s)", port, config.EnvPort)
 	}
 	if addr = strings.TrimSpace(addr); addr == "" {
 		addr = defaultListenAddr
@@ -80,7 +57,7 @@ func resolveListenAddr(addr string, port int) (string, error) {
 		// than as a listen error later.
 		host = strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
 		if strings.Contains(host, ":") && net.ParseIP(host) == nil {
-			return "", fmt.Errorf("-addr %s is not a host:port address", addr)
+			return "", fmt.Errorf("%s is not a host:port address (server.addr / %s)", addr, config.EnvAddr)
 		}
 		portPart = ""
 	}
@@ -91,7 +68,7 @@ func resolveListenAddr(addr string, port int) (string, error) {
 		portPart = defaultPort
 	}
 	if n, err := strconv.Atoi(portPart); err != nil || n < 0 || n > 65535 {
-		return "", fmt.Errorf("%q is not a port number (-addr %s)", portPart, addr)
+		return "", fmt.Errorf("%s: %q is not a port number (server.addr / %s)", addr, portPart, config.EnvAddr)
 	}
 	return net.JoinHostPort(host, portPart), nil
 }
@@ -115,46 +92,35 @@ func listenURL(addr string) string {
 // "dev" means a plain `go build` without the stamp.
 var version = "dev"
 
-// defaultDSN determines the database DSN: MD_BUILDER_DSN env var first, then
-// a sensible SQLite file location.
-func defaultDSN() string {
-	if d := os.Getenv("MD_BUILDER_DSN"); d != "" {
-		return d
-	}
-	return "md-builder.db" // SQLite file in the working directory
-}
-
-// openObjectStorage loads the server config file and connects to the artifact
-// store, verifying that the bucket exists. It is the startup gate for every
-// subcommand that records artifacts.
+// openObjectStorage connects to the artifact store, verifying that the bucket
+// exists. It is the startup gate for every subcommand that records artifacts,
+// and the place the object storage section is validated: a deployment with no
+// config file and no store variables is told what it is missing here rather
+// than on the first artifact write.
 //
-// configPath is the -config flag ("" to search the usual places).
-func openObjectStorage(configPath string) (*storage.MinIO, storage.Config, error) {
-	cfg, source, err := config.Load(configPath)
+// source names where the configuration came from, for the log line.
+func openObjectStorage(cfg config.Config, source string) (*storage.MinIO, error) {
+	objs, err := storage.NewMinIO(cfg.ObjectStorage)
 	if err != nil {
-		return nil, storage.Config{}, err
-	}
-	objs, err := storage.NewMinIO(cfg)
-	if err != nil {
-		return nil, storage.Config{}, err
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), objectStorageTimeout)
 	defer cancel()
 	if err := objs.EnsureBucket(ctx); err != nil {
-		return nil, storage.Config{}, fmt.Errorf("config %s: %w", source, err)
+		return nil, fmt.Errorf("config %s: %w", source, err)
 	}
 	log.Printf("object storage ready: %s (config: %s)", objs.Describe(), source)
-	return objs, cfg, nil
+	return objs, nil
 }
 
 // objectStorageTimeout bounds the startup connectivity check.
 const objectStorageTimeout = 15 * time.Second
 
-// distDir is resolved from the working directory so the binary can run from
-// either the project root or the server/ directory.
-func resolveDistDir() string {
-	// Prefer environment variable (for deployments).
-	if d := os.Getenv("MD_BUILDER_DIST"); d != "" {
+// resolveDistDir returns where the built frontend lives: the configured
+// `dist` (or $MD_BUILDER_DIST), or the first of the common locations that
+// exists, so the binary can run from either the project root or server/.
+func resolveDistDir(configured string) string {
+	if d := strings.TrimSpace(configured); d != "" {
 		return d
 	}
 	// Try common working directories in order.
@@ -181,22 +147,22 @@ func main() {
 	}
 
 	// Serving the API is what the binary does when no subcommand is given;
-	// -config names the server config file to read, -addr/-port where to
-	// listen.
+	// -config names the configuration file to read. Where to listen, which
+	// database to open and how many workers to run all come from that file
+	// (or its MD_BUILDER_* overrides).
 	flags := flag.NewFlagSet("md-builder", flag.ExitOnError)
 	configPath := flags.String(config.FlagName, "", config.FlagUsage)
-	addrDefault, portDefault, err := defaultListenFlags()
-	if err != nil {
-		log.Fatalf("listen address: %v", err)
-	}
-	addr := flags.String("addr", addrDefault, "listen address: host or host:port; $"+envAddr+" sets the default")
-	port := flags.Int("port", portDefault, "listen port, overriding the port in -addr; $"+envPort+" sets the default (0: take it from -addr)")
 	_ = flags.Parse(os.Args[1:])
 	if flags.NArg() > 0 {
 		// A mistyped subcommand would otherwise start the server silently.
 		log.Fatalf("unexpected argument %q (subcommands: adduser, seed — their flags follow the name, e.g. md-builder seed -config FILE; see -h)", flags.Arg(0))
 	}
-	listenAddr, err := resolveListenAddr(*addr, *port)
+
+	cfg, source, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	listenAddr, err := resolveListenAddr(cfg.Server.Addr, cfg.Server.Port)
 	if err != nil {
 		log.Fatalf("listen address: %v", err)
 	}
@@ -204,12 +170,12 @@ func main() {
 	// Object storage is mandatory: artifacts live there, so a deployment
 	// without a reachable backend cannot record test output. Fail before
 	// serving anything rather than on the first artifact write.
-	objs, objCfg, err := openObjectStorage(*configPath)
+	objs, err := openObjectStorage(cfg, source)
 	if err != nil {
 		log.Fatalf("object storage: %v", err)
 	}
 
-	s, err := store.Open(defaultDSN(), store.WithObjects(objs))
+	s, err := store.Open(cfg.Database.DSN, store.WithObjects(objs))
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
@@ -225,22 +191,23 @@ func main() {
 
 	// Reclaim objects that no artifact row references any more (runs deleted
 	// or replaced after they were written).
-	if objCfg.GC {
+	if cfg.ObjectStorage.GC {
 		gcCtx, cancelGC := context.WithCancel(context.Background())
 		defer cancelGC()
-		s.StartArtifactGC(gcCtx, objCfg.GCInterval())
+		s.StartArtifactGC(gcCtx, cfg.ObjectStorage.GCInterval())
 	}
 
 	mux := http.NewServeMux()
 
 	// --- Runner component: task dispatch + scheduling pool ---
 	runnerSvc := runner.NewService(s)
-	if os.Getenv("MD_BUILDER_DISABLE_WORKER") != "1" {
+	runnerSvc.Workers = cfg.Worker.Count
+	if cfg.Worker.Enabled {
 		rootCtx, cancel := context.WithCancel(context.Background())
 		runnerSvc.Start(rootCtx)
 		defer cancel()
 	} else {
-		log.Print("worker pool disabled (MD_BUILDER_DISABLE_WORKER=1); dispatch still records tasks")
+		log.Printf("worker pool disabled (worker.enabled: false / %s); dispatch still records tasks", config.EnvDisableWorker)
 	}
 
 	// --- JSON API (auth) ---
@@ -250,7 +217,7 @@ func main() {
 	apiServer.SetRunner(runnerSvc)
 
 	// --- Static frontend assets (with SPA fallback) ---
-	distDir := resolveDistDir()
+	distDir := resolveDistDir(cfg.Dist)
 	fs := http.FileServer(http.Dir(distDir))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Serve existing static files directly.
@@ -268,7 +235,7 @@ func main() {
 	})
 
 	log.Printf("md-builder %s listening on %s (dist: %s, db: %s)",
-		version, listenURL(listenAddr), distDir, defaultDSN())
+		version, listenURL(listenAddr), distDir, cfg.Database.DSN)
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
 	}

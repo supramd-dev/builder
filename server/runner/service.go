@@ -14,8 +14,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"os"
-	"strconv"
 	"time"
 
 	"md-builder/server/store"
@@ -37,8 +35,8 @@ type Service struct {
 	FetchYAML  YAMLFetcher                                                                           // reads md-builder.yaml at a commit (tests inject)
 	ResolveRef func(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) // ref → SHA for manual dispatch (tests inject)
 
-	// Workers is the scheduling pool size (0 = defaultWorkers; the
-	// MD_BUILDER_WORKERS env var overrides at NewService time).
+	// Workers is the scheduling pool size (0 = defaultWorkers). main sets
+	// it from the configuration's worker section.
 	Workers int
 }
 
@@ -52,22 +50,14 @@ func (s *Service) resolveRef(ctx context.Context, repoURL, ref string, creds *Gi
 }
 
 // NewService returns a Service wired to the real SSH transport and git
-// cloner, honoring MD_BUILDER_WORKERS.
+// cloner. Workers starts at 0, the default pool size; main sets it from the
+// configuration.
 func NewService(s *store.Store) *Service {
-	workers := 0
-	if v := os.Getenv("MD_BUILDER_WORKERS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			workers = n
-		} else {
-			log.Printf("runner: invalid MD_BUILDER_WORKERS %q; using default", v)
-		}
-	}
 	return &Service{
 		Store:     s,
 		SSH:       SSHExecer{},
 		Clone:     SSHExecer{},
 		FetchYAML: GitYAMLFetcher,
-		Workers:   workers,
 	}
 }
 
