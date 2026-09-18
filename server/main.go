@@ -1,8 +1,9 @@
 // md-builder is the backend server for the md-builder scientific computing
 // test platform. It hosts the frontend assets, serves the JSON API, and
 // provides CLI subcommands (adduser, seed) for user management and demo
-// data. Serving is the default action; -config names the server config file
-// the API and the seed subcommand read (see the config package).
+// data. Serving is the default action, with -addr/-port choosing where to
+// listen and -config naming the server config file the API and the seed
+// subcommand read (see the config package).
 package main
 
 import (
@@ -10,8 +11,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	// Embed the IANA time zone database so the site-config timezone setting
@@ -26,7 +29,61 @@ import (
 	"md-builder/server/store"
 )
 
-const listenAddr = ":8080"
+// defaultPort is the API's listen port when neither -addr nor -port says
+// otherwise; defaultListenAddr is the matching -addr default (all
+// interfaces, so a container or a LAN host is reachable without extra flags).
+const defaultPort = "8080"
+
+const defaultListenAddr = ":" + defaultPort
+
+// resolveListenAddr combines -addr and -port into the address the HTTP server
+// listens on. -port wins over the port inside -addr, and an address given
+// without one ("127.0.0.1", "::1", "localhost") takes it from -port or the
+// default.
+func resolveListenAddr(addr string, port int) (string, error) {
+	if port < 0 || port > 65535 {
+		return "", fmt.Errorf("-port %d is not a port number", port)
+	}
+	if addr = strings.TrimSpace(addr); addr == "" {
+		addr = defaultListenAddr
+	}
+	host, portPart, err := net.SplitHostPort(addr)
+	if err != nil {
+		// A bare host — an IPv6 literal either way ("::1" or the bracketed
+		// form "[::1]" with the port left off). Anything else with a colon
+		// in it (127.0.0.1:8080:9000) is a typo worth reporting here rather
+		// than as a listen error later.
+		host = strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+		if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+			return "", fmt.Errorf("-addr %s is not a host:port address", addr)
+		}
+		portPart = ""
+	}
+	if port != 0 {
+		portPart = strconv.Itoa(port)
+	}
+	if portPart == "" {
+		portPart = defaultPort
+	}
+	if n, err := strconv.Atoi(portPart); err != nil || n < 0 || n > 65535 {
+		return "", fmt.Errorf("%q is not a port number (-addr %s)", portPart, addr)
+	}
+	return net.JoinHostPort(host, portPart), nil
+}
+
+// listenURL renders the resolved listen address for the startup log. An
+// unspecified host (":8080", "0.0.0.0:8080") is shown as localhost, which is
+// where the operator will open it.
+func listenURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
 
 // version is the build's source revision, embedded at link time (see the
 // Makefile's build-server target): -ldflags "-X main.version=<git describe>".
@@ -99,13 +156,20 @@ func main() {
 	}
 
 	// Serving the API is what the binary does when no subcommand is given;
-	// -config names the server config file to read.
+	// -config names the server config file to read, -addr/-port where to
+	// listen.
 	flags := flag.NewFlagSet("md-builder", flag.ExitOnError)
 	configPath := flags.String(config.FlagName, "", config.FlagUsage)
+	addr := flags.String("addr", defaultListenAddr, "listen address: host or host:port")
+	port := flags.Int("port", 0, "listen port, overriding the port in -addr (0: take it from -addr)")
 	_ = flags.Parse(os.Args[1:])
 	if flags.NArg() > 0 {
 		// A mistyped subcommand would otherwise start the server silently.
 		log.Fatalf("unexpected argument %q (subcommands: adduser, seed — their flags follow the name, e.g. md-builder seed -config FILE; see -h)", flags.Arg(0))
+	}
+	listenAddr, err := resolveListenAddr(*addr, *port)
+	if err != nil {
+		log.Fatalf("listen address: %v", err)
 	}
 
 	// Object storage is mandatory: artifacts live there, so a deployment
@@ -174,8 +238,8 @@ func main() {
 		http.ServeFile(w, r, distDir+"/index.html")
 	})
 
-	log.Printf("md-builder %s listening on http://localhost%s (dist: %s, db: %s)",
-		version, listenAddr, distDir, defaultDSN())
+	log.Printf("md-builder %s listening on %s (dist: %s, db: %s)",
+		version, listenURL(listenAddr), distDir, defaultDSN())
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
 	}

@@ -41,6 +41,20 @@ DSN 优先取自环境变量 `MD_BUILDER_DSN`,未设置时默认使用本地 SQL
 export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=disable'
 ```
 
+## 启动服务
+
+```sh
+go run ./server                       # http://localhost:8080
+go run ./server -port 9000            # 换一个端口
+go run ./server -addr 127.0.0.1:9000  # 指定监听的主机与端口
+go run ./server -config /etc/md-builder/server.yaml
+```
+
+`-addr` 接受主机或 主机:端口 的形式,`-port` 会覆盖其中的端口 ——
+因此 `-addr 127.0.0.1 -port 9000` 监听 127.0.0.1:9000。服务端还需要
+对象存储(见 [对象存储(MinIO)](#/docs/object-storage));`-config`
+用于指定该配置文件,`-h` 会列出全部参数。
+
 ## 首次运行清单
 
 1. 用 `adduser` 创建用户并登录。

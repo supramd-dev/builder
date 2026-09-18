@@ -42,6 +42,21 @@ otherwise it defaults to a local SQLite file `md-builder.db`.
 export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=disable'
 ```
 
+## Running the server
+
+```sh
+go run ./server                       # http://localhost:8080
+go run ./server -port 9000            # a different port
+go run ./server -addr 127.0.0.1:9000  # a specific host and port
+go run ./server -config /etc/md-builder/server.yaml
+```
+
+`-addr` takes a host or a host:port, and `-port` overrides the port inside
+it — so `-addr 127.0.0.1 -port 9000` listens on 127.0.0.1:9000. The
+server also needs object storage (see
+[Object storage (MinIO)](#/docs/object-storage)); `-config` names that
+file, and `-h` lists every flag.
+
 ## First-run checklist
 
 1. Create a user with `adduser`, log in.
