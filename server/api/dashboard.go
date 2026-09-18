@@ -463,8 +463,9 @@ func liveSubStatus(sub *store.Task) string {
 // the reported run.
 type caseInput struct {
 	Name           string  `json:"name"`
-	Status         string  `json:"status"`  // "passed", "failed" or "skipped"
-	Message        string  `json:"message"` // short note / failure reason
+	Description    string  `json:"description"` // the case's human label (md-builder.yaml preset description)
+	Status         string  `json:"status"`      // "passed", "failed" or "skipped"
+	Message        string  `json:"message"`     // short note / failure reason
 	DurationMillis float64 `json:"durationMillis"`
 	TaskID         int64   `json:"taskId"` // the case's own sub-task, when known
 }
@@ -477,10 +478,11 @@ type runInputJSON struct {
 	CommitID      int64       `json:"commitId"`
 	CommitSHA     string      `json:"commitSha"` // alternative to commitId: repo+sha lookup
 	CommitRepo    string      `json:"commitRepo"`
-	Kind          string      `json:"kind"`    // "regression", "unit" or "build"
-	Status        string      `json:"status"`  // used only when cases is empty
-	Summary       string      `json:"summary"` // used only when cases is empty
-	Total         int         `json:"total"`   // aggregate counts, used only when cases is empty
+	Kind          string      `json:"kind"`        // "regression", "unit" or "build"
+	Description   string      `json:"description"` // human label from md-builder.yaml (optional)
+	Status        string      `json:"status"`      // used only when cases is empty
+	Summary       string      `json:"summary"`     // used only when cases is empty
+	Total         int         `json:"total"`       // aggregate counts, used only when cases is empty
 	Passed        int         `json:"passed"`
 	Failed        int         `json:"failed"`
 	Skipped       int         `json:"skipped"`
@@ -495,7 +497,8 @@ type runJSON struct {
 	Kind          string `json:"kind"`
 	Status        string `json:"status"`
 	Summary       string `json:"summary"`
-	Name          string `json:"name"` // child runs: the preset/case name; empty on top-level runs
+	Description   string `json:"description,omitempty"` // human label from md-builder.yaml, stored at dispatch/report time
+	Name          string `json:"name"`                  // child runs: the preset/case name; empty on top-level runs
 	Message       string `json:"message"`
 	Total         int    `json:"total"`
 	Passed        int    `json:"passed"`
@@ -564,6 +567,7 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 		EnvironmentID: in.EnvironmentID,
 		CommitID:      commitID,
 		Kind:          in.Kind,
+		Description:   in.Description,
 		Status:        in.Status,
 		Summary:       in.Summary,
 		Total:         in.Total,
@@ -574,6 +578,7 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 	for i := range in.Cases {
 		input.Cases = append(input.Cases, store.CaseInput{
 			Name:           strings.TrimSpace(in.Cases[i].Name),
+			Description:    in.Cases[i].Description,
 			Status:         in.Cases[i].Status,
 			Message:        in.Cases[i].Message,
 			DurationMillis: in.Cases[i].DurationMillis,
@@ -747,6 +752,7 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 type caseJSON struct {
 	ID             int64   `json:"id"`
 	Name           string  `json:"name"`
+	Description    string  `json:"description,omitempty"` // the case's human label (preset description)
 	Status         string  `json:"status"`
 	Message        string  `json:"message"`
 	DurationMillis float64 `json:"durationMillis"`
@@ -1183,6 +1189,7 @@ func toRunJSON(run *store.TestRun) runJSON {
 		Kind:          run.Kind,
 		Status:        run.Status,
 		Summary:       run.Summary,
+		Description:   run.Description,
 		Name:          run.Name,
 		Message:       run.Message,
 		Total:         run.Total,
@@ -1201,6 +1208,7 @@ func toCaseJSON(c *store.TestRun) caseJSON {
 	return caseJSON{
 		ID:             c.ID,
 		Name:           c.Name,
+		Description:    c.Description,
 		Status:         c.Status,
 		Message:        c.Message,
 		DurationMillis: c.DurationMillis,

@@ -853,6 +853,22 @@ a.dash-full-graph:hover {
   word-break: break-word;
 }
 
+/* Run detail: the stage's human label from md-builder.yaml (stored per
+   trigger). Sits under the title, above the commit/results summary. */
+.dash-run-description {
+  margin: 0 0 0.5rem 0;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+/* Run detail: a regression case's description (preset label) under its
+   name in the case table. */
+.dash-case-description {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 400;
+}
+
 /* Clickable case rows in the run detail table. */
 .dash-case-row {
   cursor: pointer;

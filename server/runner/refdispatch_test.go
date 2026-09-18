@@ -126,6 +126,110 @@ matrix:
 	}
 }
 
+// TestDispatchStoresDescriptions verifies the dispatch-time placeholder
+// runs carry the yaml stage descriptions into the database: the build /
+// unit / regression parent runs and every regression case child row.
+func TestDispatchStoresDescriptions(t *testing.T) {
+	s, err := store.Open("file::memory:?cache=shared")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	u := &store.User{Username: "descman", Email: "d@example.com", PasswordHash: "x"}
+	if err := s.CreateUser(u); err != nil {
+		t.Fatal(err)
+	}
+	env := &store.TestEnvironment{
+		OwnerID: u.ID, Name: "cpu-desc", Host: "h", Username: "u", PrivateKey: "k",
+		Tags: "cpu", Enabled: true,
+	}
+	if err := s.CreateEnvironment(env); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.example.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+
+	const sha = "dddddddddddddddddddddddddddddddddddddddd"
+	svc := &Service{Store: s}
+	svc.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) {
+		return sha, nil
+	}
+	svc.FetchYAML = func(codeRepoURL, atSHA string, creds *GitCredentials) ([]byte, error) {
+		return []byte(`version: 2
+defaults:
+  build:
+    command: "make -j8"
+presets:
+  simple:
+    description: "Simple regression test"
+    command: "./run_simple"
+matrix:
+  - tags: [cpu]
+    build:
+      description: "Build the code with gcc and cmake"
+    unit:
+      command: "ctest -L unit"
+      description: "Run unit tests"
+    regression:
+      description: "Run regression tests"
+      use: [simple]
+`), nil
+	}
+
+	commit, res := svc.DispatchForRef(testContext(), "main")
+	if res.Err != nil {
+		t.Fatalf("dispatch: %v", res.Err)
+	}
+	if res.TasksCreated != 1 {
+		t.Fatalf("tasks created: %d, want 1", res.TasksCreated)
+	}
+
+	// The seeded placeholder runs carry the descriptions.
+	runs, err := s.FindRunsByCommits(store.RunKindBuild, []int64{env.ID}, []int64{commit.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := runs[store.EnvCommit{Env: env.ID, Commit: commit.ID}]
+	if build.Description != "Build the code with gcc and cmake" {
+		t.Errorf("build run description: %q", build.Description)
+	}
+	if build.Status != store.StatusPending {
+		t.Errorf("build run should be the pending placeholder: %q", build.Status)
+	}
+	runs, err = s.FindRunsByCommits(store.RunKindUnit, []int64{env.ID}, []int64{commit.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := runs[store.EnvCommit{Env: env.ID, Commit: commit.ID}]
+	if unit.Description != "Run unit tests" {
+		t.Errorf("unit run description: %q", unit.Description)
+	}
+	runs, err = s.FindRunsByCommits(store.RunKindRegression, []int64{env.ID}, []int64{commit.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := runs[store.EnvCommit{Env: env.ID, Commit: commit.ID}]
+	if reg.Description != "Run regression tests" {
+		t.Errorf("regression parent description: %q", reg.Description)
+	}
+	children, err := s.ListChildRuns(reg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 1 {
+		t.Fatalf("want 1 case child, got %d", len(children))
+	}
+	if children[0].Name != "simple" || children[0].Description != "Simple regression test" {
+		t.Errorf("case child: %+v", children[0])
+	}
+	if children[0].Status != store.StatusPending {
+		t.Errorf("case child should be pending: %q", children[0].Status)
+	}
+}
+
 // TestDispatchForRefBadRef surfaces resolver failures to the API caller.
 func TestDispatchForRefBadRef(t *testing.T) {
 	s, err := store.Open("file::memory:?cache=shared")

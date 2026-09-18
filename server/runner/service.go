@@ -196,17 +196,23 @@ func (s *Service) recordSkippedRuns(failed *store.Task) {
 				log.Printf("runner: task %d: record skipped %s run: %v", sub.ID, sub.Kind, err)
 			}
 		case store.TaskKindRegression:
-			// The preset name comes from the sub-task's case snapshot.
+			// The preset name (and its description) come from the sub-task's
+			// case snapshot.
 			name := sub.Name
+			desc := ""
 			var stage CaseStageConfig
-			if err := json.Unmarshal([]byte(sub.Config), &stage); err == nil && stage.Case != "" {
-				name = stage.Case
+			if err := json.Unmarshal([]byte(sub.Config), &stage); err == nil {
+				if stage.Case != "" {
+					name = stage.Case
+				}
+				desc = stage.Description
 			}
 			if _, _, err := s.Store.UpsertCaseRun(&store.CaseRunInput{
 				EnvironmentID: sub.EnvironmentID,
 				CommitID:      sub.CommitID,
 				TaskID:        sub.ID,
 				Name:          name,
+				Description:   desc,
 				Status:        store.StatusSkipped,
 				Message:       failed.Name + " failed: " + failed.Error,
 			}); err != nil {

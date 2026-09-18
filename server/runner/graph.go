@@ -53,11 +53,12 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 	testDep := store.TaskSubPlaceholderBase + 0 // clone
 	if !entry.Build.Command.IsEmpty() {
 		buildJSON, err := marshalJSON(BuildStageConfig{
-			Command:   entry.Build.Command.Clean(),
-			Workdir:   entry.Build.Workdir,
-			Artifacts: entry.Build.Artifacts.Clean(),
-			Timeout:   resolveStageTimeout(0, entry),
-			Env:       entry.Env,
+			Command:     entry.Build.Command.Clean(),
+			Description: entry.Build.Description,
+			Workdir:     entry.Build.Workdir,
+			Artifacts:   entry.Build.Artifacts.Clean(),
+			Timeout:     resolveStageTimeout(0, entry),
+			Env:         entry.Env,
 		})
 		if err != nil {
 			return nil, err
@@ -76,11 +77,12 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 	// parallel execution and per-case cells on the graph page.
 	if entry.Unit != nil {
 		cfg, err := marshalJSON(StageConfig{
-			Command:   entry.Unit.Command.Clean(),
-			Workdir:   entry.Unit.Workdir,
-			Timeout:   resolveStageTimeout(entry.Unit.Timeout, entry),
-			Env:       entry.Env,
-			Artifacts: entry.Unit.Artifacts,
+			Command:     entry.Unit.Command.Clean(),
+			Description: entry.Unit.Description,
+			Workdir:     entry.Unit.Workdir,
+			Timeout:     resolveStageTimeout(entry.Unit.Timeout, entry),
+			Env:         entry.Env,
+			Artifacts:   entry.Unit.Artifacts,
 		})
 		if err != nil {
 			return nil, err
@@ -95,12 +97,13 @@ func BuildTaskGraph(entry *MergedEntry) ([]GraphTask, error) {
 	for i := range entry.Regression {
 		c := &entry.Regression[i]
 		cfg, err := marshalJSON(CaseStageConfig{
-			Case:      c.Name,
-			Command:   c.Command.Clean(),
-			Workdir:   c.Workdir,
-			Timeout:   resolveStageTimeout(c.Timeout, entry),
-			Env:       entry.Env,
-			Artifacts: c.Artifacts,
+			Case:        c.Name,
+			Description: c.Description,
+			Command:     c.Command.Clean(),
+			Workdir:     c.Workdir,
+			Timeout:     resolveStageTimeout(c.Timeout, entry),
+			Env:         entry.Env,
+			Artifacts:   c.Artifacts,
 		})
 		if err != nil {
 			return nil, err

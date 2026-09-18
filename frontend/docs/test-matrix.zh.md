@@ -46,11 +46,14 @@ matrix:
       CXX: g++
     build:
       command: "cmake -DENABLE_MPI=OFF . && cmake --build ."
+      description: "用 gcc 和 cmake 构建代码"
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
+      description: "运行单元测试"
       timeout: 600
       artifacts: "build/test_detail.xml"  # googletest 结果文件
     regression:
+      description: "运行回归测试"        # 整个回归阶段的标签
       use: [heat, poisson]          # 在此条目上运行哪些预设(留空 = 全部)
   - tags: [gpu, cuda]
     env:
@@ -76,12 +79,14 @@ matrix:
 | matrix[].timeout             | 否       | 默认阶段超时秒数(默认 3600,上限 14400)。                          |
 | matrix[].env                 | 否       | 为所有阶段导出的额外环境变量。                                      |
 | matrix[].build               | 否       | 构建阶段(见下)。                                                   |
-| matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 workdir、timeout、artifacts。    |
-| matrix[].regression          | 否       | 回归测试选择:use / disable 引用预设。                              |
+| matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 description、workdir、timeout、artifacts。 |
+| matrix[].regression          | 否       | 回归测试选择:use / disable 引用预设;可选整个阶段的 description。  |
 | unit.command                 | 是(每阶段) | shell 命令,或命令列表(见命令列表)。                       |
+| unit.description             | 否       | 阶段的人类可读标签:显示在其运行详情页,且每次触发运行时都会存入数据库(描述可能随 yaml 变更)。 |
 | unit.workdir                 | 否       | 命令的运行目录(见工作目录)。                                       |
 | unit.artifacts                | 否       | 工件文件路径(或路径列表),runner 会在阶段结束后取回(见工件文件)。 |
 | unit.timeout                 | 否       | 覆盖默认值的阶段超时。                                              |
+| regression.description       | 否       | 整个回归阶段(父运行)的人类可读标签;每个用例另带自己预设的 description。 |
 
 构建阶段是一条 shell 命令 —— 或者像测试阶段一样是命令列表(没有内置的
 cmake 支持 —— cmake/make/ninja/脚本调用自己写):
@@ -89,6 +94,7 @@ cmake 支持 —— cmake/make/ninja/脚本调用自己写):
 | 字段           | 说明                                                              |
 |----------------|-------------------------------------------------------------------|
 | build.command  | 编译代码的 shell 命令(必填 —— 条目或 defaults 提供),或命令列表(见命令列表)。 |
+| build.description | 构建阶段的人类可读标签:显示在其运行详情页,且每次触发运行时都会存入数据库(缺省回退到 defaults.build.description)。 |
 | build.workdir  | 命令运行目录(语义与 unit/presets 相同)。                         |
 | build.artifacts | 可选的文件路径(或列表):构建结束后 runner 取回并存到构建运行上,可在运行详情页下载。不做任何解析 —— 构建结论只看退出码。 |
 
@@ -121,7 +127,7 @@ presets:
 | 字段                     | 必填 | 说明                                                        |
 |--------------------------|------|--------------------------------------------------------------|
 | presets.<名称>.command   | 是   | 运行该用例的 shell 命令,或命令列表(见命令列表)。                |
-| presets.<名称>.description | 否 | 人类可读的标签。                                              |
+| presets.<名称>.description | 否 | 用例的人类可读标签:显示在回归运行详情页的用例名下方及用例自己的详情页;每次触发运行时都会存入数据库。 |
 | presets.<名称>.workdir   | 否   | 命令的运行目录(见工作目录)。                                 |
 | presets.<名称>.timeout   | 否   | 用例超时(缺省回退到 defaults / 矩阵条目的 timeout)。          |
 | presets.<名称>.artifacts | 否   | 要收集的工件文件(见工件文件)。                                |

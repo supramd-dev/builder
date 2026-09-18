@@ -173,6 +173,49 @@ func TestBuildTaskGraphNil(t *testing.T) {
 	}
 }
 
+// Stage descriptions land in the per-stage config snapshots so the runner
+// can store them on the dispatched runs (they may change between triggers).
+func TestBuildTaskGraphDescriptionPassthrough(t *testing.T) {
+	entry := sampleEntry()
+	entry.Build.Description = "Build the code with gcc and cmake"
+	entry.Unit.Description = "Run unit tests"
+	entry.RegressionDescription = "Run regression tests"
+	entry.Regression[0].Description = "Heat equation convergence"
+	tasks, err := BuildTaskGraph(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var build BuildStageConfig
+	if err := json.Unmarshal([]byte(tasks[1].Config), &build); err != nil {
+		t.Fatal(err)
+	}
+	if build.Description != "Build the code with gcc and cmake" {
+		t.Errorf("build description not snapshotted: %+v", build)
+	}
+	var unit StageConfig
+	if err := json.Unmarshal([]byte(tasks[2].Config), &unit); err != nil {
+		t.Fatal(err)
+	}
+	if unit.Description != "Run unit tests" {
+		t.Errorf("unit description not snapshotted: %+v", unit)
+	}
+	var heat CaseStageConfig
+	if err := json.Unmarshal([]byte(tasks[3].Config), &heat); err != nil {
+		t.Fatal(err)
+	}
+	if heat.Description != "Heat equation convergence" {
+		t.Errorf("case description not snapshotted: %+v", heat)
+	}
+	// A case without a preset description stays empty.
+	var poisson CaseStageConfig
+	if err := json.Unmarshal([]byte(tasks[4].Config), &poisson); err != nil {
+		t.Fatal(err)
+	}
+	if poisson.Description != "" {
+		t.Errorf("poisson description should be empty: %+v", poisson)
+	}
+}
+
 // The build commands run verbatim under timeout, in the workdir like any
 // other stage (an out-of-source cmake is just `cmake <src>` written by hand).
 func TestBuildScript(t *testing.T) {

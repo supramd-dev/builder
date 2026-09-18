@@ -371,6 +371,9 @@ export async function getFullDashboard(
 export interface CaseResult {
   id: number
   name: string
+  // Human label of the case (md-builder.yaml preset description); stored
+  // per trigger, so it always reflects the yaml at dispatch time.
+  description?: string
   // "skipped" marks a case whose sub-task never ran (upstream failure);
   // "pending"/"running" are dispatch-time placeholders — the case's stage
   // sub-task has not reported yet.
@@ -404,6 +407,10 @@ export interface TestRunDetail {
   // stage sub-task live until the real outcome lands.
   status: 'passed' | 'failed' | 'skipped' | 'pending' | 'running'
   summary: string
+  // Human label of the stage (md-builder.yaml description: build/unit/
+  // regression stanza, or a preset for a case child run); stored per
+  // trigger, so it always reflects the yaml at dispatch time.
+  description?: string
   // Child runs carry the case (preset) name and message; empty on
   // top-level runs.
   name: string

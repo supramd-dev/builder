@@ -136,6 +136,10 @@ export default function TestRunDetailPage({ onError }: Props) {
         {run.environmentName && <span className="text-muted"> on {run.environmentName}</span>}
       </h2>
 
+      {/* Stage description from md-builder.yaml (stored per trigger, so it
+          reflects the yaml at dispatch time). */}
+      {run.description && <p className="dash-run-description">{run.description}</p>}
+
       {/* Summary: commit, author, results, time. */}
       <div className="task-summary text-muted">
         {run.commitMessage && <>{run.commitMessage} · </>}
@@ -203,6 +207,7 @@ export default function TestRunDetailPage({ onError }: Props) {
             cases={run.cases.map((c) => ({
               id: c.id,
               name: c.name,
+              description: c.description,
               status: c.status,
               durationMs: c.durationMillis,
               message: c.message,
@@ -474,7 +479,7 @@ function CaseTable({
   cases,
   caseHref,
 }: {
-  cases: (GTestCase & { id: number })[]
+  cases: (GTestCase & { id: number; description?: string })[]
   caseHref: (childRunId: number) => string
 }) {
   const [note, setNote] = useState<{ name: string; message: string } | null>(null)
@@ -497,7 +502,12 @@ function CaseTable({
               onClick={() => (window.location.hash = caseHref(c.id))}
               title="Click to open the case's test run"
             >
-              <td>{c.name}</td>
+              <td>
+                {c.name}
+                {c.description && (
+                  <div className="dash-case-description">{c.description}</div>
+                )}
+              </td>
               <td>
                 {c.status === 'passed' ? (
                   <span className="text-success">✓ passed</span>

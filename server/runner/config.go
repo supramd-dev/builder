@@ -206,17 +206,19 @@ func (r ArtifactPaths) Clean() ArtifactPaths {
 // the command is a CommandList: one command or several, run in order and
 // stopping at the first failure.
 type BuildConfig struct {
-	Command   CommandList   `yaml:"command,omitempty" json:"command,omitempty"`   // one build command or a list
-	Workdir   string        `yaml:"workdir,omitempty" json:"workdir,omitempty"`   // command workdir; empty = code dir
-	Artifacts ArtifactPaths `yaml:"artifacts,omitempty" json:"artifacts,omitempty"` // files the build produces and the runner fetches back (stored as-is; never parsed for counts)
+	Command     CommandList   `yaml:"command,omitempty" json:"command,omitempty"`     // one build command or a list
+	Description string        `yaml:"description,omitempty" json:"description,omitempty"` // human label stored with every build run
+	Workdir     string        `yaml:"workdir,omitempty" json:"workdir,omitempty"`     // command workdir; empty = code dir
+	Artifacts   ArtifactPaths `yaml:"artifacts,omitempty" json:"artifacts,omitempty"` // files the build produces and the runner fetches back (stored as-is; never parsed for counts)
 }
 
 // RegressionUse is the matrix entry's regression stanza: it references
 // presets by name instead of inlining commands. Empty use = every preset;
 // disable drops named cases from the used set.
 type RegressionUse struct {
-	Use     []string `yaml:"use,omitempty" json:"use,omitempty"`
-	Disable []string `yaml:"disable,omitempty" json:"disable,omitempty"`
+	Use         []string `yaml:"use,omitempty" json:"use,omitempty"`
+	Disable     []string `yaml:"disable,omitempty" json:"disable,omitempty"`
+	Description string   `yaml:"description,omitempty" json:"description,omitempty"` // label of the regression stage as a whole (stored on the parent run)
 }
 
 // EntryConfig is one matrix entry, before defaults are merged in.
@@ -258,8 +260,12 @@ type MergedEntry struct {
 	Env         map[string]string `json:"env,omitempty"`
 	Build       BuildConfig       `json:"build"`
 	Unit        *EnvConfig        `json:"unit,omitempty"`
-	Regression  []RegressionCase  `json:"regression,omitempty"`
-	Timeout     int               `json:"timeout"`
+	// RegressionDescription is the label of the regression stage as a whole
+	// (the entry's regression.description); each case carries its own
+	// Description from the preset.
+	RegressionDescription string         `json:"regressionDescription,omitempty"`
+	Regression            []RegressionCase `json:"regression,omitempty"`
+	Timeout               int            `json:"timeout"`
 }
 
 // ParseConfig parses and validates md-builder.yaml. The returned entries are
@@ -403,6 +409,9 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 	if err != nil {
 		return MergedEntry{}, err
 	}
+	if entry.Regression != nil {
+		m.RegressionDescription = entry.Regression.Description
+	}
 
 	m.Env = map[string]string{}
 	if defaults != nil {
@@ -423,6 +432,9 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 	if defaults != nil {
 		if build.Command.IsEmpty() {
 			build.Command = defaults.Build.Command
+		}
+		if build.Description == "" {
+			build.Description = defaults.Build.Description
 		}
 		if build.Workdir == "" {
 			build.Workdir = defaults.Build.Workdir

@@ -53,6 +53,7 @@ type TestRun struct {
 	Name           string  `gorm:"uniqueIndex:idx_test_runs_env_commit_kind_name;not null;default:''"`
 	Status         string  `gorm:"not null"` // derived from the child runs (or reported directly)
 	Summary        string  `gorm:"not null;default:''"`
+	Description    string  `gorm:"not null;default:''"` // human label from md-builder.yaml, re-stored on every trigger (descriptions may change between runs)
 	Message        string  `gorm:"not null;default:''"` // child runs: the case's note (summary line / upstream error)
 	DurationMillis float64 `gorm:"column:duration_ms;not null;default:0"`
 	Position       int     `gorm:"not null;default:0"` // order within the parent
@@ -72,6 +73,7 @@ type TestRun struct {
 // run.
 type CaseInput struct {
 	Name           string
+	Description    string // the case's human label (preset description)
 	Status         string // passed | failed | skipped
 	Message        string
 	DurationMillis float64
@@ -91,6 +93,7 @@ type RunInput struct {
 	CommitID      int64
 	Kind          string
 	TaskID        int64
+	Description   string // human label from md-builder.yaml; re-stored on every report (may change between triggers)
 	Cases         []CaseInput
 	Total         int
 	Passed        int
@@ -112,6 +115,7 @@ type CaseRunInput struct {
 	CommitID       int64
 	TaskID         int64
 	Name           string
+	Description    string // the case's human label (preset description)
 	Status         string // passed | failed | skipped
 	Message        string
 	DurationMillis float64
@@ -180,6 +184,12 @@ func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
 		run.StartedAt = in.StartedAt
 		run.FinishedAt = in.FinishedAt
 		run.Summary = in.Summary
+		// A non-empty description overwrites the stored one (descriptions may
+		// change between triggers); reports without one keep the dispatched
+		// placeholder's description.
+		if in.Description != "" {
+			run.Description = in.Description
+		}
 		if len(in.Cases) > 0 {
 			run.Total = len(in.Cases)
 			run.Passed = 0
@@ -239,6 +249,7 @@ func childFromCase(in *RunInput, c *CaseInput, parentID int64, position int) Tes
 		Kind:           in.Kind,
 		ParentID:       parentID,
 		Name:           c.Name,
+		Description:    c.Description,
 		Status:         c.Status,
 		Message:        c.Message,
 		DurationMillis: c.DurationMillis,
@@ -320,8 +331,10 @@ func (s *Store) UpsertCaseRun(in *CaseRunInput) (*TestRun, *TestRun, error) {
 			return err
 		}
 		position := -1 // a replaced case keeps its original slot
+		prevDescription := ""
 		if err == nil {
 			position = previous.Position
+			prevDescription = previous.Description
 			if err := tx.Where("run_id = ?", previous.ID).Delete(&TestArtifact{}).Error; err != nil {
 				return err
 			}
@@ -343,12 +356,20 @@ func (s *Store) UpsertCaseRun(in *CaseRunInput) (*TestRun, *TestRun, error) {
 			}
 			position = int(count)
 		}
+		// A non-empty description overwrites the stored one (descriptions
+		// may change between triggers); reports without one keep the
+		// dispatched placeholder's description.
+		description := in.Description
+		if description == "" {
+			description = prevDescription
+		}
 		child = TestRun{
 			EnvironmentID:  in.EnvironmentID,
 			CommitID:       in.CommitID,
 			Kind:           RunKindRegression,
 			ParentID:       parent.ID,
 			Name:           in.Name,
+			Description:    description,
 			Status:         in.Status,
 			Message:        in.Message,
 			DurationMillis: in.DurationMillis,
@@ -568,6 +589,7 @@ func (s *Store) UpsertPlaceholderRun(in *RunInput) (*TestRun, error) {
 		run.TaskID = in.TaskID
 		run.Status = status
 		run.Summary = ""
+		run.Description = in.Description // every dispatch re-stores the current yaml description (it may have changed)
 		run.Message = ""
 		run.Total, run.Passed, run.Failed, run.Skipped = 0, 0, 0, 0
 		run.StartedAt = in.StartedAt

@@ -192,6 +192,58 @@ matrix:
 	}
 }
 
+// Stage descriptions: build/unit/regression stanzas each carry a
+// description; the regression section description labels the parent run
+// while each preset's description labels its case. A build description
+// falls back to defaults.build.description like the other build fields.
+func TestParseConfigV2StageDescriptions(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
+    description: "Default build"
+presets:
+  simple:
+    description: "Simple regression test"
+    command: "./run_simple"
+matrix:
+  - tags: [cpu]
+    build:
+      command: "cmake --build ."
+      description: "Build the code with gcc and cmake"
+    unit:
+      command: "ctest -L unit"
+      description: "Run unit tests"
+    regression:
+      description: "Run regression tests"
+      use: [simple]
+  - tags: [gpu]
+    unit:
+      command: "ctest -L unit"
+    regression: {}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := entries[0]
+	if e.Build.Description != "Build the code with gcc and cmake" {
+		t.Errorf("entry build description should win: %q", e.Build.Description)
+	}
+	if e.Unit.Description != "Run unit tests" {
+		t.Errorf("unit description: %q", e.Unit.Description)
+	}
+	if e.RegressionDescription != "Run regression tests" {
+		t.Errorf("regression section description: %q", e.RegressionDescription)
+	}
+	if len(e.Regression) != 1 || e.Regression[0].Description != "Simple regression test" {
+		t.Errorf("case description: %+v", e.Regression)
+	}
+	// Entry without its own build: the defaults' build description applies.
+	if got := entries[1].Build.Description; got != "Default build" {
+		t.Errorf("defaults build description should apply: %q", got)
+	}
+}
+
 func TestParseConfigV2PresetTimeoutDefault(t *testing.T) {
 	entries, err := ParseConfig([]byte(`version: 2
 defaults:

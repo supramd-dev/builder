@@ -1057,6 +1057,62 @@ func TestReportRunAggregateCounts(t *testing.T) {
 // TestArtifactDownloadAndRunZip checks the download endpoints: per-artifact
 // raw bytes with a Content-Disposition filename, and the per-run zip bundling
 // the run's own files plus its regression children's (under cases/<name>/).
+// Stage descriptions travel through the API: a reported run and its cases
+// expose them on the detail endpoint (the run detail page renders them),
+// and a POST report may set them.
+func TestRunDescriptionAPI(t *testing.T) {
+	apiServer, env := newDashboardEnv(t)
+
+	var env1 store.TestEnvironment
+	apiServer.Store.DB.Where("name = ?", "cpu-node-1").First(&env1)
+	commit := &store.Commit{Repo: "group/md-code", SHA: "3333333"}
+	if _, err := apiServer.Store.GetOrCreateCommit(commit); err != nil {
+		t.Fatalf("get commit: %v", err)
+	}
+
+	// POST a regression report with descriptions on the run and its cases.
+	body := fmt.Sprintf(`{
+		"environmentId": %d,
+		"commitId": %d,
+		"kind": "regression",
+		"description": "Run regression tests",
+		"cases": [
+			{"name": "simple", "description": "Simple regression test", "status": "passed"}
+		]
+	}`, env1.ID, commit.ID)
+	rec := env.authed(http.MethodPost, "/api/test-runs", body)
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("post run: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Find the stored parent run and fetch its detail.
+	runs, err := apiServer.Store.FindRunsByCommits(store.RunKindRegression, []int64{env1.ID}, []int64{commit.ID})
+	if err != nil {
+		t.Fatalf("find runs: %v", err)
+	}
+	run := runs[store.EnvCommit{Env: env1.ID, Commit: commit.ID}]
+	rec = env.authed(http.MethodGet, fmt.Sprintf("/api/test-runs/%d", run.ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail struct {
+		Description string `json:"description"`
+		Cases       []struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detail.Description != "Run regression tests" {
+		t.Errorf("run description: %q", detail.Description)
+	}
+	if len(detail.Cases) != 1 || detail.Cases[0].Description != "Simple regression test" {
+		t.Errorf("case descriptions: %+v", detail.Cases)
+	}
+}
+
 func TestArtifactDownloadAndRunZip(t *testing.T) {
 	apiServer, env := newDashboardEnv(t)
 

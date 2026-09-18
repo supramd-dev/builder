@@ -49,11 +49,14 @@ matrix:
       CXX: g++
     build:
       command: "cmake -DENABLE_MPI=OFF . && cmake --build ."
+      description: "Build the code with gcc and cmake"
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
+      description: "Run unit tests"
       timeout: 600
       artifacts: "build/test_detail.xml"  # googletest XML file
     regression:
+      description: "Run regression tests"   # label of the stage as a whole
       use: [heat, poisson]          # which presets run here (empty = all)
   - tags: [gpu, cuda]
     env:
@@ -79,12 +82,14 @@ matrix:
 | matrix[].timeout             | no       | Default stage timeout in seconds (default 3600, capped at 14400).   |
 | matrix[].env                 | no       | Extra environment variables exported for all stages.                |
 | matrix[].build               | no       | Build stage (see below).                                            |
-| matrix[].unit                | no       | Unit test stage: at least command; optional workdir, timeout, artifacts. |
-| matrix[].regression          | no       | Regression selection: use and/or disable referencing presets.       |
+| matrix[].unit                | no       | Unit test stage: at least command; optional description, workdir, timeout, artifacts. |
+| matrix[].regression          | no       | Regression selection: use and/or disable referencing presets; optional description of the stage as a whole. |
 | unit.command                 | yes (per stage) | Shell command, or a list of commands (see Command lists).    |
+| unit.description             | no       | Human-readable label of the stage, shown on its run detail page and stored with every triggered run. |
 | unit.workdir                 | no       | Directory the command runs in (see Working directories).            |
 | unit.artifacts               | no       | Artifact file path (or list) the runner fetches back (see Artifact files). |
 | unit.timeout                 | no       | Stage timeout overriding defaults.                                  |
+| regression.description       | no       | Human-readable label of the regression stage as a whole (the parent run); each case carries its preset's own description. |
 
 The build stage is one shell command — or a list of them, like the
 test stages (no built-in cmake support — write the
@@ -93,6 +98,7 @@ cmake/make/ninja/script invocation yourself):
 | Field          | Description                                                          |
 |----------------|----------------------------------------------------------------------|
 | build.command  | Shell command compiling the code (required — entry or defaults), or a list of commands (see Command lists). |
+| build.description | Human-readable label of the build stage, shown on its run detail page and stored with every triggered run (falls back to defaults.build.description). |
 | build.workdir  | Directory the command runs in (same semantics as unit/presets).      |
 | build.artifacts | Optional file path (or list) the runner fetches back after the build and stores on the build run — downloadable from the run's detail page. Never parsed: the build verdict is its exit code alone. |
 
@@ -128,7 +134,7 @@ presets:
 | Field                | Required | Description                                                   |
 |----------------------|----------|---------------------------------------------------------------|
 | presets.<name>.command | yes    | Shell command, or a list of commands (see Command lists).    |
-| presets.<name>.description | no | Human-readable label.                                         |
+| presets.<name>.description | no | Human-readable label of the case, shown under its name on the regression run's detail page and on the case's own page; stored with every triggered run. |
 | presets.<name>.workdir | no    | Directory the command runs in (see Working directories).     |
 | presets.<name>.timeout | no     | Case timeout (falls back to defaults/matrix timeout).        |
 | presets.<name>.artifacts | no    | Artifact files to collect (see Artifact files).              |

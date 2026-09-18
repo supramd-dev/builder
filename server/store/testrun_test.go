@@ -80,6 +80,102 @@ func TestUpsertTestRunCreates(t *testing.T) {
 	}
 }
 
+// Descriptions are stored on every trigger (they may change between
+// dispatches): the placeholder seed carries them, execution reports refresh
+// them, and an empty report description keeps the stored one.
+func TestRunDescriptionPersistence(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+
+	// Dispatch-time placeholder: top-level and per-case descriptions.
+	run, err := s.UpsertPlaceholderRun(&RunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		Kind:          RunKindRegression,
+		TaskID:        7,
+		Status:        StatusPending,
+		Description:   "Run regression tests",
+		Cases: []CaseInput{
+			{Name: "simple", Description: "Simple regression test"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("placeholder: %v", err)
+	}
+	if run.Description != "Run regression tests" {
+		t.Errorf("placeholder description: %q", run.Description)
+	}
+	children, err := s.ListChildRuns(run.ID)
+	if err != nil {
+		t.Fatalf("children: %v", err)
+	}
+	if len(children) != 1 || children[0].Description != "Simple regression test" {
+		t.Errorf("case placeholder description: %+v", children)
+	}
+
+	// Execution report: UpsertCaseRun replaces the child with the case's
+	// (possibly changed) description.
+	if _, child, err := s.UpsertCaseRun(&CaseRunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		TaskID:        8,
+		Name:          "simple",
+		Description:   "Simple regression test (v2)",
+		Status:        StatusPassed,
+	}); err != nil {
+		t.Fatalf("case run: %v", err)
+	} else if child.Description != "Simple regression test (v2)" {
+		t.Errorf("case description not refreshed: %q", child.Description)
+	}
+
+	// A report WITHOUT a description keeps the stored one (skipped-stage
+	// paths and external reporters may not know it).
+	if _, err := s.UpsertTestRun(&RunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		Kind:          RunKindUnit,
+		Status:        StatusPassed,
+		Description:   "Run unit tests",
+	}); err != nil {
+		t.Fatalf("unit run: %v", err)
+	}
+	if _, err := s.UpsertTestRun(&RunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		Kind:          RunKindUnit,
+		Status:        StatusPassed,
+	}); err != nil {
+		t.Fatalf("unit re-run: %v", err)
+	}
+	runs, err := s.FindRunsByCommits(RunKindUnit, []int64{env.ID}, []int64{commit.ID})
+	if err != nil {
+		t.Fatalf("find runs: %v", err)
+	}
+	unit := runs[EnvCommit{Env: env.ID, Commit: commit.ID}]
+	if unit.Description != "Run unit tests" {
+		t.Errorf("empty report description should keep the stored one: %q", unit.Description)
+	}
+
+	// A re-dispatch placeholder overwrites with the fresh yaml description.
+	if _, err := s.UpsertPlaceholderRun(&RunInput{
+		EnvironmentID: env.ID,
+		CommitID:      commit.ID,
+		Kind:          RunKindRegression,
+		TaskID:        9,
+		Status:        StatusPending,
+		Description:   "Run regression tests (new yaml)",
+	}); err != nil {
+		t.Fatalf("re-dispatch: %v", err)
+	}
+	again, err := s.GetTestRun(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if again.Description != "Run regression tests (new yaml)" {
+		t.Errorf("re-dispatch should overwrite the description: %q", again.Description)
+	}
+}
+
 func TestUpsertTestRunAllPassed(t *testing.T) {
 	s := newTestStore(t)
 	env, commit := seedEnvAndCommit(t, s)

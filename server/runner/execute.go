@@ -114,7 +114,9 @@ func (s *Service) failEarly(task *store.Task, msg string) {
 	if err := s.Store.FinishTask(task.ID, store.TaskFailed, msg); err != nil {
 		log.Printf("runner: task %d: finish failed: %v", task.ID, err)
 	}
-	s.recordStageRun(task, store.StatusFailed, truncateSummary(msg), 0, 0, 0, nil)
+	// The snapshot may be the very thing that failed to parse; keep the
+	// dispatch-time description by passing an empty one.
+	s.recordStageRun(task, store.StatusFailed, truncateSummary(msg), "", 0, 0, 0, nil)
 }
 
 // creds builds the git credentials from the site config.
@@ -273,7 +275,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	if res.ExitCode < 0 {
 		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
 	}
-	s.recordStageRun(task, status, summary, 0, 0, 0, artifacts)
+	s.recordStageRun(task, status, summary, stage.Description, 0, 0, 0, artifacts)
 
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
 }
@@ -326,7 +328,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 			summary = s
 		}
 	}
-	s.recordStageRun(task, status, summary, counts.total, counts.failed, counts.skipped, artifacts)
+	s.recordStageRun(task, status, summary, stage.Description, counts.total, counts.failed, counts.skipped, artifacts)
 	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
 }
 
@@ -381,6 +383,7 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 		CommitID:       task.CommitID,
 		TaskID:         task.ID,
 		Name:           stage.Case,
+		Description:    stage.Description,
 		Status:         status,
 		Message:        message,
 		DurationMillis: float64(finished.Sub(started).Milliseconds()),
@@ -486,13 +489,16 @@ func (s *Service) readLogTail(taskID int64) string {
 // recordStageRun upserts the dashboard TestRun for a finished (or failed to
 // even start) test stage. counts/artifacts carry the fetched results files'
 // summed aggregates and raw contents (nil when not configured or unfetchable).
-func (s *Service) recordStageRun(task *store.Task, status, summary string,
+// description is the stage's yaml label re-stored with the outcome (empty
+// keeps the dispatch-time placeholder's description — see UpsertTestRun).
+func (s *Service) recordStageRun(task *store.Task, status, summary, description string,
 	total, failed, skipped int, artifacts []store.ArtifactInput) {
 	input := &store.RunInput{
 		EnvironmentID: task.EnvironmentID,
 		CommitID:      task.CommitID,
 		Kind:          task.Kind, // unit/regression match the run kinds
 		TaskID:        task.ID,
+		Description:   description,
 		Total:         total,
 		Failed:        failed,
 		Skipped:       skipped,
@@ -558,14 +564,19 @@ func (s *Service) failScriptBuild(task *store.Task, logw *LogWriter, msg string)
 		// aggregate then stops reading as in flight.
 		var stage CaseStageConfig
 		name := task.Name
-		if err := json.Unmarshal([]byte(task.Config), &stage); err == nil && stage.Case != "" {
-			name = stage.Case
+		desc := ""
+		if err := json.Unmarshal([]byte(task.Config), &stage); err == nil {
+			if stage.Case != "" {
+				name = stage.Case
+			}
+			desc = stage.Description
 		}
 		if _, _, err := s.Store.UpsertCaseRun(&store.CaseRunInput{
 			EnvironmentID: task.EnvironmentID,
 			CommitID:      task.CommitID,
 			TaskID:        task.ID,
 			Name:          name,
+			Description:   desc,
 			Status:        store.StatusSkipped,
 			Message:       truncateSummary(msg),
 		}); err != nil {
@@ -573,7 +584,7 @@ func (s *Service) failScriptBuild(task *store.Task, logw *LogWriter, msg string)
 		}
 		return
 	}
-	s.recordStageRun(task, store.StatusFailed, truncateSummary("task failed: "+msg), 0, 0, 0, nil)
+	s.recordStageRun(task, store.StatusFailed, truncateSummary("task failed: "+msg), "", 0, 0, 0, nil)
 }
 
 func taskStart(task *store.Task) time.Time {

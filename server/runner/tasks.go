@@ -409,24 +409,42 @@ func (s *Service) createSubTasks(root *store.Task, graph []GraphTask) error {
 // its kind; the stage overwrites it (the case runs update their own child)
 // when it executes.
 func (s *Service) seedStageRuns(root *store.Task, subs []*store.Task) error {
+	// The regression parent run's description lives on the root snapshot
+	// (the merged entry), not on the per-case sub-tasks.
+	var rootCfg RootConfig
+	if err := json.Unmarshal([]byte(root.Config), &rootCfg); err != nil {
+		return fmt.Errorf("seed runs: parse root config: %w", err)
+	}
+
 	// Group by run kind: regression expands to several sub-tasks (one per
 	// case) that all aggregate under ONE parent run.
 	taskID := map[string]int64{}
+	desc := map[string]string{store.RunKindRegression: rootCfg.Entry.RegressionDescription}
 	cases := map[string][]store.CaseInput{}
 	for _, sub := range subs {
 		var kind string
 		switch sub.Kind {
 		case store.TaskKindBuild:
 			kind = store.RunKindBuild
+			var stage BuildStageConfig
+			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
+				return fmt.Errorf("seed build run: %w", err)
+			}
+			desc[kind] = stage.Description
 		case store.TaskKindUnit:
 			kind = store.RunKindUnit
+			var stage StageConfig
+			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
+				return fmt.Errorf("seed unit run: %w", err)
+			}
+			desc[kind] = stage.Description
 		case store.TaskKindRegression:
 			kind = store.RunKindRegression
 			var stage CaseStageConfig
 			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
 				return fmt.Errorf("seed regression run: %w", err)
 			}
-			cases[kind] = append(cases[kind], store.CaseInput{Name: stage.Case})
+			cases[kind] = append(cases[kind], store.CaseInput{Name: stage.Case, Description: stage.Description})
 		default:
 			continue // clone has no run
 		}
@@ -441,6 +459,7 @@ func (s *Service) seedStageRuns(root *store.Task, subs []*store.Task) error {
 			Kind:          kind,
 			TaskID:        id,
 			Status:        store.StatusPending,
+			Description:   desc[kind],
 			Cases:         cases[kind],
 		})
 		if err != nil {
