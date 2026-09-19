@@ -49,7 +49,7 @@ func seedDashboardData(t *testing.T, apiServer *Server) {
 		}
 	}
 	// Disable gpu-a100: it must still appear as a matrix row.
-	if _, err := apiServer.Store.SetEnvironmentEnabled(alice.ID, envs[1].ID, false); err != nil {
+	if _, err := apiServer.Store.SetEnvironmentEnabled(envs[1].ID, false); err != nil {
 		t.Fatalf("disable env: %v", err)
 	}
 
@@ -223,6 +223,7 @@ func TestDashboardRegressionMatrix(t *testing.T) {
 			ID      int64  `json:"id"`
 			Name    string `json:"name"`
 			Enabled bool   `json:"enabled"`
+			Owner   string `json:"owner"`
 		} `json:"environments"`
 		Rows []struct {
 			Commit struct {
@@ -253,6 +254,14 @@ func TestDashboardRegressionMatrix(t *testing.T) {
 		dash.Environments[1].Name != "gpu-a100" ||
 		dash.Environments[2].Name != "mpi-cluster" {
 		t.Fatalf("unexpected environment order: %v", dash.Environments)
+	}
+	// Each column names the account that manages it: the matrix is site-wide,
+	// so a column may be someone else's machine and has to say so.
+	if dash.Environments[0].Owner != "alice" || dash.Environments[1].Owner != "alice" {
+		t.Fatalf("expected alice to own the first two columns, got %v", dash.Environments)
+	}
+	if dash.Environments[2].Owner != "bob" {
+		t.Fatalf("expected bob to own mpi-cluster, got %q", dash.Environments[2].Owner)
 	}
 
 	// Rows: no codeRepo configured yet, so all repos are shown as commit
@@ -584,6 +593,14 @@ func TestDashboardFullMatrix(t *testing.T) {
 	}
 	if len(dash.Rows) != 3 {
 		t.Fatalf("expected 3 md-code commit rows, got %d", len(dash.Rows))
+	}
+	// The full matrix labels its columns with the owning account too.
+	owners := map[string]string{}
+	for _, e := range dash.Environments {
+		owners[e.Name] = e.Owner
+	}
+	if owners["cpu-node-1"] != "alice" || owners["mpi-cluster"] != "bob" {
+		t.Fatalf("unexpected column owners: %+v", owners)
 	}
 
 	var cpuEnv, mpiEnv store.TestEnvironment

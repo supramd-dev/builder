@@ -10,6 +10,30 @@ The server connects over SSH to upload the sources (a tar stream extracted
 into `~/.md-builder/tasks/<sha12>`) and to run the build/test scripts — see
 [Runner and tasks](#/docs/runner-strategy).
 
+## Who may see and change an environment
+
+Environments are a **shared, site-wide pool**. A push is dispatched to
+whichever environment's tags match an entry in `md-builder.yaml`, no matter
+which account registered that machine — so every signed-in user sees every
+environment in the list and every environment is a column of the dashboard
+matrix (which labels each column with its owner).
+
+What differs is what you may do with a row:
+
+| | Owner | Administrator | Everyone else |
+|---|---|---|---|
+| See it in the list and on the dashboard | yes | yes | yes |
+| Edit, enable/disable, delete | yes | yes | no (read-only) |
+| **Test**, **Run command**, **Run script** (uses the stored private key) | yes | yes | no |
+
+A refused write is `403` with a message naming the reason; a row you do not
+own shows as read-only instead of offering buttons that would fail. The
+owner is the account that created the environment, and it never changes.
+
+Administrators can therefore clean up an environment nobody maintains — for
+instance the demo rows left behind by `md-builder seed` (user `demo`), which
+a normal user could neither disable nor delete.
+
 ## Prerequisites
 
 Each environment needs:

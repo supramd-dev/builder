@@ -119,7 +119,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, id int64) {
 		cj := s.toCommitJSON(commit)
 		detail.Commit = &cj
 	}
-	if env, err := s.Store.GetEnvironmentAny(task.EnvironmentID); err == nil {
+	if env, err := s.Store.GetEnvironment(task.EnvironmentID); err == nil {
 		ev := dashboardEnvJSON{
 			ID:          env.ID,
 			Name:        env.Name,

@@ -65,6 +65,11 @@ export async function updateAccount(
 
 export interface TestEnvironment {
   id: number
+  // The account that manages this environment. Every signed-in user sees the
+  // whole site-wide pool, but only the owner and the administrators may
+  // change a row or use its private key.
+  owner: string
+  canEdit: boolean
   name: string
   host: string
   username: string
@@ -245,6 +250,10 @@ export interface DashboardEnvironment {
   description: string
   tags: string
   enabled: boolean
+  // The account that manages this environment. The matrix is site-wide — a
+  // column may be someone else's machine, since dispatch matches yaml entries
+  // against every enabled environment — so the header names the owner.
+  owner?: string
 }
 
 export interface DashboardCommit {

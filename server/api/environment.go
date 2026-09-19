@@ -19,6 +19,8 @@ import (
 // env script is not secret and round-trips verbatim.
 type environmentJSON struct {
 	ID          int64    `json:"id"`
+	Owner       string   `json:"owner"`   // username of the account that manages it
+	CanEdit     bool     `json:"canEdit"` // whether the caller may change it (owner or administrator)
 	Name        string   `json:"name"`
 	Host        string   `json:"host"`
 	Username    string   `json:"username"`
@@ -125,16 +127,22 @@ func (s *Server) handleEnvironmentItem(w http.ResponseWriter, r *http.Request, u
 
 // --- /api/environments ---
 
+// listEnvironments returns every environment on the site, each flagged with
+// canEdit. The pool is shared — dispatch matches a yaml entry against every
+// enabled environment, whoever owns it — so hiding the other rows would leave
+// a user unable to explain which machine their tests ran on. Rows the caller
+// does not own are read-only; administrators may manage all of them.
 func (s *Server) listEnvironments(w http.ResponseWriter, r *http.Request, user *store.User) {
-	envs, err := s.Store.ListEnvironments(user.ID)
+	envs, err := s.Store.ListAllEnvironments()
 	if err != nil {
 		log.Printf("list environments: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	owners := s.environmentOwnerNames(envs)
 	out := make([]environmentJSON, 0, len(envs))
 	for i := range envs {
-		out = append(out, toEnvironmentJSON(&envs[i]))
+		out = append(out, toEnvironmentJSON(&envs[i], owners[envs[i].OwnerID], canManageEnvironment(user, &envs[i])))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"environments": out})
 }
@@ -169,24 +177,25 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request, user 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	writeJSON(w, http.StatusCreated, toEnvironmentJSON(env))
+	// The creator owns it, so it is editable by definition; the name is the
+	// caller's own.
+	writeJSON(w, http.StatusCreated, toEnvironmentJSON(env, user.Username, true))
 }
 
 // --- /api/environments/{id} ---
 
 func (s *Server) getEnvironment(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
-	env, err := s.Store.GetEnvironment(user.ID, id)
+	env, err := s.Store.GetEnvironment(id)
 	if err != nil {
 		respondEnvironmentError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toEnvironmentJSON(env))
+	writeJSON(w, http.StatusOK, s.toEnvironmentJSONFor(user, env))
 }
 
 func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
-	env, err := s.Store.GetEnvironment(user.ID, id)
-	if err != nil {
-		respondEnvironmentError(w, err)
+	env, ok := s.loadManageableEnvironment(w, user, id)
+	if !ok {
 		return
 	}
 	var in environmentInput
@@ -220,7 +229,7 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request, user 
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	writeJSON(w, http.StatusOK, toEnvironmentJSON(env))
+	writeJSON(w, http.StatusOK, s.toEnvironmentJSONFor(user, env))
 }
 
 // toggleEnvironment handles PUT/PATCH /api/environments/{id}/enabled with
@@ -237,16 +246,22 @@ func (s *Server) toggleEnvironment(w http.ResponseWriter, r *http.Request, user 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "enabled field is required"})
 		return
 	}
-	env, err := s.Store.SetEnvironmentEnabled(user.ID, id, *req.Enabled)
+	if _, ok := s.loadManageableEnvironment(w, user, id); !ok {
+		return
+	}
+	env, err := s.Store.SetEnvironmentEnabled(id, *req.Enabled)
 	if err != nil {
 		respondEnvironmentError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toEnvironmentJSON(env))
+	writeJSON(w, http.StatusOK, s.toEnvironmentJSONFor(user, env))
 }
 
 func (s *Server) deleteEnvironment(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
-	if err := s.Store.DeleteEnvironment(user.ID, id); err != nil {
+	if _, ok := s.loadManageableEnvironment(w, user, id); !ok {
+		return
+	}
+	if err := s.Store.DeleteEnvironment(id); err != nil {
 		log.Printf("delete environment %d: %v", id, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
@@ -256,10 +271,12 @@ func (s *Server) deleteEnvironment(w http.ResponseWriter, r *http.Request, user 
 
 // --- /api/environments/{id}/test ---
 
+// testEnvironment checks SSH connectivity. It logs in with the stored private
+// key, so it is limited to the environment's owner and the administrators —
+// reading someone else's environment never uses their credential.
 func (s *Server) testEnvironment(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
-	env, err := s.Store.GetEnvironment(user.ID, id)
-	if err != nil {
-		respondEnvironmentError(w, err)
+	env, ok := s.loadManageableEnvironment(w, user, id)
+	if !ok {
 		return
 	}
 	res := runner.CheckSSH(runner.SSHHostFromEnv(env))
@@ -269,11 +286,11 @@ func (s *Server) testEnvironment(w http.ResponseWriter, r *http.Request, user *s
 // --- /api/environments/{id}/exec ---
 
 // execEnvironment runs a shell command on the remote host of the environment.
-// Only enabled environments accept commands.
+// Only enabled environments accept commands, and only from their owner or an
+// administrator: it is the owner's credential that opens the connection.
 func (s *Server) execEnvironment(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
-	env, err := s.Store.GetEnvironment(user.ID, id)
-	if err != nil {
-		respondEnvironmentError(w, err)
+	env, ok := s.loadManageableEnvironment(w, user, id)
+	if !ok {
 		return
 	}
 	if !env.Enabled {
@@ -308,11 +325,11 @@ func (s *Server) execEnvironment(w http.ResponseWriter, r *http.Request, user *s
 //	#!/usr/bin/env bash    (or "# bash", default for language "bash")
 //	#!/usr/bin/env python3 (or "# python3", default for language "python")
 //
-// Only enabled environments accept scripts.
+// Only enabled environments accept scripts, and only from their owner or an
+// administrator (the script runs under the owner's key).
 func (s *Server) scriptEnvironment(w http.ResponseWriter, r *http.Request, user *store.User, id int64) {
-	env, err := s.Store.GetEnvironment(user.ID, id)
-	if err != nil {
-		respondEnvironmentError(w, err)
+	env, ok := s.loadManageableEnvironment(w, user, id)
+	if !ok {
 		return
 	}
 	if !env.Enabled {
@@ -425,10 +442,13 @@ func isPEMKey(key string) bool {
 }
 
 // toEnvironmentJSON converts a stored environment for the wire. The private
-// key is never sent back in full.
-func toEnvironmentJSON(env *store.TestEnvironment) environmentJSON {
+// key is never sent back in full. owner is the owner's username (empty when
+// it could not be resolved) and canEdit whether the caller may change it.
+func toEnvironmentJSON(env *store.TestEnvironment, owner string, canEdit bool) environmentJSON {
 	return environmentJSON{
 		ID:          env.ID,
+		Owner:       owner,
+		CanEdit:     canEdit,
 		Name:        env.Name,
 		Host:        env.Host,
 		Username:    env.Username,
@@ -439,6 +459,61 @@ func toEnvironmentJSON(env *store.TestEnvironment) environmentJSON {
 		CreatedAt:   env.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:   env.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
+}
+
+// toEnvironmentJSONFor renders one environment for a specific caller,
+// resolving the owner name and the caller's rights.
+func (s *Server) toEnvironmentJSONFor(user *store.User, env *store.TestEnvironment) environmentJSON {
+	owners := s.environmentOwnerNames([]store.TestEnvironment{*env})
+	return toEnvironmentJSON(env, owners[env.OwnerID], canManageEnvironment(user, env))
+}
+
+// canManageEnvironment reports whether user may change an environment: it is
+// theirs, or they are an administrator. Dispatch matches yaml entries against
+// every enabled environment site-wide, so an administrator has to be able to
+// manage the whole pool — including rows created by someone else, which are
+// otherwise impossible to disable.
+func canManageEnvironment(user *store.User, env *store.TestEnvironment) bool {
+	return user != nil && (user.IsAdmin() || env.OwnerID == user.ID)
+}
+
+// loadManageableEnvironment loads the environment a mutating request targets
+// and reports whether the caller may touch it, writing the error response
+// itself when they may not. Every path that changes an environment or uses
+// its private key goes through here, so the rule lives in one place.
+func (s *Server) loadManageableEnvironment(w http.ResponseWriter, user *store.User, id int64) (*store.TestEnvironment, bool) {
+	env, err := s.Store.GetEnvironment(id)
+	if err != nil {
+		respondEnvironmentError(w, err)
+		return nil, false
+	}
+	if !canManageEnvironment(user, env) {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "this environment belongs to another user; only its owner or an administrator can change it",
+		})
+		return nil, false
+	}
+	return env, true
+}
+
+// environmentOwnerNames resolves the owner usernames of a set of environments
+// in one query. A lookup failure is logged and yields no names: the label is
+// explanatory, and losing it must not fail the page that asked for it.
+func (s *Server) environmentOwnerNames(envs []store.TestEnvironment) map[int64]string {
+	ids := make([]int64, 0, len(envs))
+	seen := make(map[int64]bool, len(envs))
+	for i := range envs {
+		if id := envs[i].OwnerID; !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	names, err := s.Store.UsernamesByID(ids)
+	if err != nil {
+		log.Printf("environment owners: %v", err)
+		return map[int64]string{}
+	}
+	return names
 }
 
 // respondEnvironmentError maps store errors to HTTP responses.

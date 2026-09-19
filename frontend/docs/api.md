@@ -161,6 +161,12 @@ overrides the declared language:
 Only bash, sh, python and python3 are accepted. Commands time out after
 60s, scripts after 10 minutes. Disabled environments reject both.
 
+Both endpoints log in with the environment's stored private key, so — like
+`POST /api/environments/{id}/test` and every write to an environment — they
+are limited to the environment's owner and the administrators (`403`
+otherwise). Reading the list is not limited: see
+[Test environments](#/docs/environments) for the ownership model.
+
 ## Manual test dispatch
 
 The **Run command** page also dispatches user-configured tests as
@@ -243,11 +249,18 @@ there too, with `adduser -admin`.
 | GET    | `/api/me`                       | Current user (`id`, `username`, `email`, `role`) |
 | GET    | `/api/users`                    | List every account (administrator only)       |
 | PUT    | `/api/users/{id}`               | Edit an account: your own, or anyone's as an administrator |
-| GET    | `/api/environments`             | List the user's test environments             |
-| POST   | `/api/environments`             | Create a test environment                     |
-| GET    | `/api/environments/{id}`        | Get one environment                           |
-| PUT    | `/api/environments/{id}`        | Update one environment                        |
-| DELETE | `/api/environments/{id}`        | Delete one environment (and its test runs)    |
+| GET    | `/api/environments`             | List every environment on the site, each with `owner` and `canEdit` |
+| POST   | `/api/environments`             | Create a test environment (you become its owner) |
+| GET    | `/api/environments/{id}`        | Get one environment (any signed-in user)      |
+| PUT    | `/api/environments/{id}`        | Update one environment (owner or administrator) |
+| DELETE | `/api/environments/{id}`        | Delete one environment (owner or administrator; also its test runs) |
+
+The list is **not** owner-scoped: dispatch matches a yaml entry against every
+enabled environment, so the pool is site-wide and every row is visible to
+everyone. Each row carries `owner` (the managing account's username) and
+`canEdit` (true for the owner and for administrators), which is what the UI
+uses to render a foreign row read-only. Mutating a row you do not own is
+`403`; an id that does not exist is `404`.
 
 Environment create/update bodies carry `name`, `host`, `username`,
 `privateKey`, `tags`, `description`, `enabled` and `envScript` (the

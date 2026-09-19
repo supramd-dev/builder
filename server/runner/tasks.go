@@ -242,7 +242,7 @@ func (s *Service) DispatchManual(in ManualDispatch) (roots []*store.Task, err er
 
 	roots = make([]*store.Task, 0, len(in.EnvironmentIDs))
 	for _, envID := range in.EnvironmentIDs {
-		env, err := s.Store.GetEnvironmentAny(envID)
+		env, err := s.Store.GetEnvironment(envID)
 		if err != nil {
 			return roots, fmt.Errorf("environment %d: %w", envID, err)
 		}

@@ -203,6 +203,24 @@ func (s *Store) ListUsers() ([]User, error) {
 	return users, nil
 }
 
+// UsernamesByID resolves user IDs to usernames in one query, so labelling a
+// site-wide list (environments and their owners) does not become a query per
+// row. IDs that match no account are absent from the result.
+func (s *Store) UsernamesByID(ids []int64) (map[int64]string, error) {
+	out := make(map[int64]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var users []User
+	if err := s.DB.Where("id IN ?", ids).Find(&users).Error; err != nil {
+		return nil, err
+	}
+	for i := range users {
+		out[users[i].ID] = users[i].Username
+	}
+	return out, nil
+}
+
 // UpdateUser applies u to the account with the given id. It does not report
 // whether the row existed — callers load the user first — and it never
 // touches the role.

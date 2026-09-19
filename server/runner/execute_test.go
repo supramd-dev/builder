@@ -987,7 +987,7 @@ func TestExecuteCaseFailureMarksRunFailed(t *testing.T) {
 func TestExecuteEnvScriptWrittenAndSourced(t *testing.T) {
 	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
 	// Configure an env script on the environment.
-	env, err := s.GetEnvironmentAny(cloneTask.EnvironmentID)
+	env, err := s.GetEnvironment(cloneTask.EnvironmentID)
 	if err != nil {
 		t.Fatal(err)
 	}

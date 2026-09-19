@@ -398,7 +398,7 @@ func TestDeleteEnvironmentCascadesRuns(t *testing.T) {
 		t.Fatalf("expected 1 child, got %d (%v)", len(children), err)
 	}
 
-	if err := s.DeleteEnvironment(env.OwnerID, env.ID); err != nil {
+	if err := s.DeleteEnvironment(env.ID); err != nil {
 		t.Fatalf("delete env: %v", err)
 	}
 

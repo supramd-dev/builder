@@ -216,7 +216,14 @@ function MatrixTable({
   onOpenTask,
   onShowDispatchNote,
 }: {
-  environments: { id: number; name: string; description: string; tags: string; enabled: boolean }[]
+  environments: {
+    id: number
+    name: string
+    description: string
+    tags: string
+    enabled: boolean
+    owner?: string
+  }[]
   rows: MatrixRow[]
   kind?: DashboardKind
   onOpenRun: (runId: number) => void
@@ -261,11 +268,17 @@ function MatrixTable({
                 key={env.id}
                 colSpan={isFull ? 4 : 1}
                 className={'dash-env-head' + (env.enabled ? '' : ' dash-row-disabled')}
-                title={env.description}
+                // The matrix is site-wide, so the column names whose machine
+                // it is: a push is dispatched to whichever environment's tags
+                // match, not only to the viewer's own.
+                title={[env.description, env.owner && `owned by ${env.owner}`]
+                  .filter(Boolean)
+                  .join(' — ')}
               >
                 {env.name}
                 {!env.enabled && <span className="text-muted"> (off)</span>}
                 {env.tags && <span className="dash-env-tags">{env.tags}</span>}
+                {env.owner && <span className="dash-env-owner">{env.owner}</span>}
               </th>
             ))}
           </tr>

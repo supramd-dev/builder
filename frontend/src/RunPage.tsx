@@ -97,7 +97,10 @@ function ExecTab({ onError }: RunPageProps) {
     listEnvironments()
       .then((envs) => {
         if (cancelled) return
-        const enabled = envs.filter((e) => e.enabled)
+        // Running a command here logs in with the environment's private key,
+        // and the list is site-wide: only offer the ones this account may
+        // actually use.
+        const enabled = envs.filter((e) => e.enabled && e.canEdit)
         setEnvironments(enabled)
         if (enabled.length > 0) {
           setEnvId((current) =>
@@ -424,7 +427,12 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
     Promise.all([listEnvironments(), cachedSiteConfig()])
       .then(([envs, cfg]) => {
         if (cancelled) return
-        const enabled = envs.filter((e) => e.enabled)
+        // A manual dispatch is a deliberate run on a named machine, so it
+        // offers the environments this account may use — its own, plus every
+        // one when it is an administrator. (A yaml/webhook dispatch is
+        // site-wide and may still land on the others; see the Runner Envs
+        // page.)
+        const enabled = envs.filter((e) => e.enabled && e.canEdit)
         setEnvironments(enabled)
         setSelected(new Set(enabled.map((e) => e.id))) // default: all
         if (cfg) setRepo(cfg.codeRepo)

@@ -196,7 +196,7 @@ func TestDispatchManualRecordsError(t *testing.T) {
 	}
 	// The column defaults to true, so a fresh row is enabled: flip it off
 	// through the setter rather than relying on a zero value.
-	if _, err := s.SetEnvironmentEnabled(off.OwnerID, off.ID, false); err != nil {
+	if _, err := s.SetEnvironmentEnabled(off.ID, false); err != nil {
 		t.Fatal(err)
 	}
 

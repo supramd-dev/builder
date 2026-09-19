@@ -82,7 +82,7 @@ func (s *Service) loadRootContext(task *store.Task) (*rootContext, bool) {
 		s.failEarly(task, "commit lookup failed")
 		return nil, false
 	}
-	env, err := s.Store.GetEnvironmentAny(task.EnvironmentID)
+	env, err := s.Store.GetEnvironment(task.EnvironmentID)
 	if err != nil {
 		s.failEarly(task, fmt.Sprintf("environment lookup failed: %v", err))
 		return nil, false

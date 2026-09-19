@@ -164,6 +164,84 @@ check "list contains created env" \
 body_code=$(req GET "/api/environments/$ENV_ID")
 check "get environment 200" "$(tail -n1 <<<"$body_code")" "200"
 
+check "list carries the owner" \
+  "$(head -n1 <<<"$(req GET /api/environments)" | jq -r --arg id "$ENV_ID" \
+     '.environments[] | select(.id == ($id | tonumber)) | .owner')" \
+  "$USERNAME"
+check "own row is editable" \
+  "$(head -n1 <<<"$(req GET /api/environments)" | jq -r --arg id "$ENV_ID" \
+     '.environments[] | select(.id == ($id | tonumber)) | .canEdit')" \
+  "true"
+
+# --- the pool is site-wide, but other accounts' rows are read-only ---
+# A second, non-administrator account: it sees every environment (dispatch
+# matches yaml entries against all of them), and may change none of the ones
+# it does not own.
+echo "== environment ownership =="
+
+OTHER_USER="${OTHER_USER:-smoke-other}"
+OTHER_PASS="${OTHER_PASS:-smoke-other-pass-123}"
+OTHER_JAR="$(mktemp)"
+trap 'rm -f "$CJAR" "$OTHER_JAR" /tmp/api-smoke-*.json' EXIT
+
+if [ "${SKIP_SETUP:-0}" != "1" ]; then
+  if [ -n "${MD_BUILDER_BIN:-}" ]; then
+    OTHER_ADDUSER=("$MD_BUILDER_BIN" adduser)
+  else
+    OTHER_ADDUSER=(go run . adduser)
+  fi
+  # No -admin: this account must NOT be able to manage another's environment.
+  if ! (cd "$ROOT/server" && "${OTHER_ADDUSER[@]}" -dsn "$DSN" \
+      -username "$OTHER_USER" -email "other@example.com" -password "$OTHER_PASS") >/dev/null 2>&1; then
+    echo "note: adduser failed; assuming user $OTHER_USER already exists" >&2
+  fi
+fi
+
+body_code=$(curl -s -c "$OTHER_JAR" -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$OTHER_USER\",\"password\":\"$OTHER_PASS\"}" \
+  -w '\n%{http_code}' "$BASE_URL/api/login")
+check "second user login 200" "$(tail -n1 <<<"$body_code")" "200"
+
+# req_other METHOD PATH [BODY] — same as req, with the other account's jar.
+req_other() {
+  local method="$1" path="$2" body="${3:-}"
+  local args=(-s -b "$OTHER_JAR" -c "$OTHER_JAR" -X "$method"
+      -H 'Content-Type: application/json' -w '\n%{http_code}'
+      "$BASE_URL$path")
+  if [ -n "$body" ]; then
+    args+=(-d "$body")
+  fi
+  curl "${args[@]}"
+}
+
+body_code=$(req_other GET /api/environments)
+check "other user sees the whole pool" \
+  "$(head -n1 <<<"$body_code" | jq -r --arg id "$ENV_ID" \
+     '.environments | map(select(.id == ($id | tonumber))) | length')" \
+  "1"
+check "foreign row is read-only" \
+  "$(head -n1 <<<"$body_code" | jq -r --arg id "$ENV_ID" \
+     '.environments[] | select(.id == ($id | tonumber)) | .canEdit')" \
+  "false"
+
+body_code=$(req_other GET "/api/environments/$ENV_ID")
+check "other user may read it" "$(tail -n1 <<<"$body_code")" "200"
+
+body_code=$(req_other PUT "/api/environments/$ENV_ID" \
+  '{"name":"hijacked","host":"203.0.113.99","username":"runner","privateKey":"","enabled":false}')
+check "foreign update 403" "$(tail -n1 <<<"$body_code")" "403"
+body_code=$(req_other PUT "/api/environments/$ENV_ID/enabled" '{"enabled":false}')
+check "foreign toggle 403" "$(tail -n1 <<<"$body_code")" "403"
+body_code=$(req_other POST "/api/environments/$ENV_ID/test" '')
+check "foreign connectivity test 403" "$(tail -n1 <<<"$body_code")" "403"
+body_code=$(req_other DELETE "/api/environments/$ENV_ID")
+check "foreign delete 403" "$(tail -n1 <<<"$body_code")" "403"
+
+# None of the refusals changed anything.
+check "refused writes changed nothing" \
+  "$(head -n1 <<<"$(req GET "/api/environments/$ENV_ID")" | jq -r .name)" \
+  "smoke-node"
+
 # Update (empty privateKey keeps the stored key).
 body_code=$(req PUT "/api/environments/$ENV_ID" \
   '{"name":"smoke-node-2","host":"203.0.113.2","username":"runner2","privateKey":"","description":"updated"}')
@@ -416,6 +494,19 @@ body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
   "$BASE_URL/api/webhooks/gitlab")
 check "webhook dispatch error surfaced" \
   "$(head -n1 <<<"$body_code" | jq 'has("dispatchError")')" "true"
+
+# The same failure is stored on the commit row and exposed by the matrix:
+# the webhook response is long gone by the time anyone looks at the
+# dashboard, which has to explain the commit's empty columns by itself (the
+# full view's graph column renders it as a warning icon).
+COMMIT_ID=$(head -n1 <<<"$body_code" | jq -r .commitId)
+DASH=$(req GET /api/dashboard/full | head -n1)
+check "dispatch error recorded on the commit" \
+  "$(jq -r --argjson id "$COMMIT_ID" \
+     '.rows[] | select(.commit.id == $id) | .commit.dispatchError | length > 0' <<<"$DASH")" "true"
+check "failed dispatch leaves no task graph" \
+  "$(jq -r --argjson id "$COMMIT_ID" \
+     '.rows[] | select(.commit.id == $id) | .taskIds | length' <<<"$DASH")" "0"
 
 # Rotating the webhook secret (administrators only; the smoke user is one)
 # issues a new value and retires the old one on the spot. This runs last so
