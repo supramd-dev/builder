@@ -70,11 +70,14 @@ server:
 ## 用 Docker 或 Podman 部署
 
 仓库自带 `Dockerfile` 与 `docker-compose.yml`,会把服务端和一份 MinIO
-一起启动:
+一起启动。compose 只负责运行镜像、不负责构建,所以要先构建服务端镜像
+(或者从镜像仓库拉取):
 
 ```sh
+docker build -t genshen/md-builder:1.0 .   # 或者:podman build ...
 export MINIO_ROOT_PASSWORD='换成一个足够长的密码'
 mkdir -p data/md-builder data/minio   # 第一次 up 之前先建好
+sudo chown 10001:10001 data/md-builder   # 服务端以 uid 10001 运行
 docker compose up -d                  # 或者:podman compose up -d
 ```
 
@@ -82,6 +85,15 @@ docker compose up -d                  # 或者:podman compose up -d
 都有默认值,密码从环境变量读取(没设置就拒绝启动)。其它默认值同样
 可以用环境变量覆盖 —— 例如 `MD_BUILDER_PORT=9000 docker compose up -d`
 会同时改掉监听端口和映射到宿主机的端口。
+
+两个服务运行的镜像都是 `genshen/md-builder:1.0`,其中的 `1.0` 就是变量
+`MD_BUILDER_TAG`。要换成别的 tag,先用该名字构建,再把变量设成同一个
+值:
+
+```sh
+docker build -t genshen/md-builder:1.1 .
+MD_BUILDER_TAG=1.1 docker compose up -d
+```
 
 配置项比 compose 变量更多时,写成文件更方便:挂载到
 `/app/md-builder-server.yaml`(镜像的工作目录就是 `/app`,服务端默认
@@ -96,9 +108,23 @@ docker compose up -d                  # 或者:podman compose up -d
 自己先建好:Docker 会自动创建不存在的挂载源目录,但所有者是 root,
 而 root 属主的目录容器里的用户写不进去。
 
-服务端以 uid 10001 运行。macOS 上这一点看不出来(文件共享会映射属主),
-但在 Linux 上文件会属于一个宿主上并不存在的 uid —— 用 `id -u`/`id -g`
-查出来,设成 `MD_BUILDER_UID`/`MD_BUILDER_GID`,文件就仍然归你所有。
+服务端以 uid 10001 运行,而 bind mount 的属主取自宿主机目录、不是镜像
+—— 镜像里对 `/data` 的 `chown` 只对 named volume 生效。所以在 Linux 上,
+第一次 `up` 之前这个目录必须对该 uid 可写,办法是把属主让出去:
+
+```sh
+sudo chown 10001:10001 data/md-builder
+```
+
+或者让容器以你自己的身份运行 —— 用 `id -u`/`id -g` 查出来,设成
+`MD_BUILDER_UID`/`MD_BUILDER_GID`,文件也就仍然归你所有。macOS 上这一
+点看不出来,因为文件共享会映射属主。
+
+两样都不做,服务端就建不出 SQLite 文件:启动时会以 `open store: open
+db: unable to open database file ... (14)` 退出 —— 14 是 SQLite 的
+`SQLITE_CANTOPEN`,消息里那句 "out of memory" 并不是真正的原因 —— 重启
+策略会把它变成不停重启。而 MinIO 照样能起来,因为它的镜像以 root 运行,
+所以看起来像是只有服务端出问题。
 
 因为没有注册界面,第一个账号仍然要用命令行创建。`cli` 服务与
 服务端共用同一个数据库和对象存储:
@@ -114,7 +140,7 @@ shell 历史里)。需要演示数据时,`seed` 走同一条路。
 文件加上构建好的前端,运行在 Alpine 上,全部配置也可以来自环境变量:
 
 ```sh
-docker build -t md-builder:local .
+docker build -t genshen/md-builder:1.0 .
 mkdir -p data/md-builder
 docker run -d --name md-builder -p 8080:8080 \
   --user "$(id -u):$(id -g)" \
@@ -123,7 +149,7 @@ docker run -d --name md-builder -p 8080:8080 \
   -e MD_BUILDER_S3_ENDPOINT=minio.example.com:9000 \
   -e MD_BUILDER_S3_ACCESS_KEY=... -e MD_BUILDER_S3_SECRET_KEY=... \
   -e MD_BUILDER_S3_BUCKET=md-builder \
-  md-builder:local
+  genshen/md-builder:1.0
 ```
 
 无论是容器还是直接跑在宿主机上,服务端都需要对象存储才能启动:启动

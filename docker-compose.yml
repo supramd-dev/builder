@@ -1,15 +1,31 @@
-# md-builder with its object storage, for Docker or Podman. One value has to
-# be supplied — the MinIO password — everything else has a default here:
+# md-builder with its object storage, for Docker or Podman. This file only
+# runs images — it never builds one — so build the server image first (see
+# the Dockerfile) and then bring the deployment up:
 #
+#   docker build -t genshen/md-builder:1.0 .   # or: podman build ...
 #   export MINIO_ROOT_PASSWORD='pick-something-long'
 #   mkdir -p data/md-builder data/minio
+#   sudo chown 10001:10001 data/md-builder   # the server runs as uid 10001
 #   docker compose up -d                     # or: podman compose up -d
+#
+# The chown is not optional on Linux: a bind mount takes its ownership from
+# the host directory, so without it uid 10001 cannot create the SQLite file
+# and the server exits with "open store: open db: unable to open database
+# file". Set MD_BUILDER_UID/MD_BUILDER_GID to your own ids instead to keep
+# the files yours.
 #   docker compose --profile tools run --rm cli adduser -username alice -email alice@example.com
 #
 # No .env file is needed: compose reads one if you happen to create it, and
 # every variable below that carries a default can also be set from the
 # environment. What you must not do is leave the password unset — MinIO would
 # fall back to its published default credentials.
+#
+# Both md-builder services use the image genshen/md-builder:1.0, and the tag
+# is the variable MD_BUILDER_TAG. To run another tag, build it under that
+# name and set the variable to match:
+#
+#   docker build -t genshen/md-builder:1.1 .
+#   MD_BUILDER_TAG=1.1 docker compose up -d
 #
 # The first account has to come from the CLI, so the tools profile below
 # carries a one-off `cli` service that shares this deployment's database and
@@ -63,14 +79,11 @@ x-app-env: &app-env
   # MD_BUILDER_S3_REGION: ""
   # MD_BUILDER_S3_PREFIX: artifacts
 
+# The server image, built outside compose (docker build / podman build / a
+# registry). The tag is MD_BUILDER_TAG, so one value names the image for both
+# services and they cannot drift into different binaries.
 x-app-image: &app-image
-  image: "${MD_BUILDER_IMAGE:-md-builder:local}"
-  build:
-    context: .
-    args:
-      # Stamp the source revision into the binary, as `make build-server`
-      # does — build with MD_BUILDER_VERSION="$(git describe --always --dirty)".
-      VERSION: "${MD_BUILDER_VERSION:-dev}"
+  image: "genshen/md-builder:${MD_BUILDER_TAG:-1.0}"
 
 services:
   md-builder:
@@ -101,7 +114,7 @@ services:
     #   - /tmp
 
   minio:
-    image: "${MINIO_IMAGE:-minio/minio:latest}"
+    image: "${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z}"
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -134,11 +147,10 @@ services:
   # `--profile tools` because the service sits behind that profile: a plain
   # `up` leaves it alone, which is what you want for a one-off command.
   #
-  # Build the image first (`docker compose build`, or any `up`): this service
-  # reuses the image the server builds and never builds one of its own, so
-  # the two cannot drift into different binaries.
+  # Same image and tag as the server (see x-app-image), so the CLI runs the
+  # binary that is actually deployed.
   cli:
-    image: "${MD_BUILDER_IMAGE:-md-builder:local}"
+    image: "genshen/md-builder:${MD_BUILDER_TAG:-1.0}"
     profiles: ["tools"]
     # A bare `run cli` prints the usage instead of starting a second server
     # against the same database. Args given to `run` replace this.

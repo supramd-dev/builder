@@ -74,11 +74,14 @@ for the worker pool, and `MD_BUILDER_S3_*` for the object store.
 ## Deployment with Docker or Podman
 
 The repository ships a `Dockerfile` and a `docker-compose.yml` that run the
-server together with a MinIO instance:
+server together with a MinIO instance. Compose only runs images — it never
+builds one — so build the server image first (or pull it from a registry):
 
 ```sh
+docker build -t genshen/md-builder:1.0 . # or: podman build ...
 export MINIO_ROOT_PASSWORD='pick-something-long'
 mkdir -p data/md-builder data/minio      # before the first `up`
+sudo chown 10001:10001 data/md-builder   # the server runs as uid 10001
 docker compose up -d                     # or: podman compose up -d
 ```
 
@@ -87,6 +90,15 @@ everything except the MinIO password, which it reads from the environment
 (and refuses to start without). Any of those defaults can be overridden the
 same way — `MD_BUILDER_PORT=9000 docker compose up -d` moves both the
 listening port and the published one.
+
+Both services run the image `genshen/md-builder:1.0`, where `1.0` is the
+`MD_BUILDER_TAG` variable. To run another tag, build it under that name and
+set the variable to match:
+
+```sh
+docker build -t genshen/md-builder:1.1 .
+MD_BUILDER_TAG=1.1 docker compose up -d
+```
 
 A deployment with more settings than compose variables is easier to write
 as a file: mount it at `/app/md-builder-server.yaml`, which is the default
@@ -103,10 +115,25 @@ compose file — the database in `data/md-builder`, the buckets in
 first: Docker happily creates a missing bind-mount source, but it does so as
 root, and a root-owned directory is one the container's user cannot write.
 
-The server runs as uid 10001. On macOS that is invisible (file sharing maps
-ownership), but on Linux the files would be owned by a uid that does not
-exist on the host — run `id -u`/`id -g` and set
-`MD_BUILDER_UID`/`MD_BUILDER_GID` to those numbers to keep them yours.
+The server runs as uid 10001, and a bind mount takes its ownership from the
+host directory, not from the image — the image's `chown` of `/data` only
+applies to a named volume. So on Linux the directory has to be writable by
+that uid before the first `up`, either by giving it away:
+
+```sh
+sudo chown 10001:10001 data/md-builder
+```
+
+or by running the container as yourself — `id -u`/`id -g` and set
+`MD_BUILDER_UID`/`MD_BUILDER_GID` to those numbers, which also keeps the
+files yours. On macOS this is invisible, because file sharing maps ownership.
+
+Skip both and the server cannot create its SQLite file: it exits at startup
+with `open store: open db: unable to open database file ... (14)` — 14 is
+SQLite's `SQLITE_CANTOPEN`, and the "out of memory" the message carries is
+not the real cause — and the restart policy turns that into a loop. MinIO
+comes up regardless, because its image runs as root, so the failure looks
+like it is the server's alone.
 
 There is no registration UI, so the first account comes from the CLI — the
 `cli` service runs against the same database and object store as the
@@ -125,7 +152,7 @@ the built frontend on Alpine, and it can take its whole configuration from
 the environment:
 
 ```sh
-docker build -t md-builder:local .
+docker build -t genshen/md-builder:1.0 .
 mkdir -p data/md-builder
 docker run -d --name md-builder -p 8080:8080 \
   --user "$(id -u):$(id -g)" \
@@ -134,7 +161,7 @@ docker run -d --name md-builder -p 8080:8080 \
   -e MD_BUILDER_S3_ENDPOINT=minio.example.com:9000 \
   -e MD_BUILDER_S3_ACCESS_KEY=... -e MD_BUILDER_S3_SECRET_KEY=... \
   -e MD_BUILDER_S3_BUCKET=md-builder \
-  md-builder:local
+  genshen/md-builder:1.0
 ```
 
 The server needs object storage to start, in a container exactly as on a

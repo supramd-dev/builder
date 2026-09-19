@@ -3,13 +3,17 @@
 # md-builder: the Vite frontend and the Go server in one image. Build with
 # Docker or Podman from the repository root:
 #
-#   docker build -t md-builder:local .
-#   podman build -t md-builder:local .
+#   docker build -t genshen/md-builder:1.0 .
+#   podman build -t genshen/md-builder:1.0 .
 #
 # To stamp the source revision into the binary (it shows up next to the
 # footer's health link), pass the same value the Makefile uses:
 #
-#   docker build --build-arg VERSION="$(git describe --always --dirty)" -t md-builder:local .
+#   docker build --build-arg VERSION="$(git describe --always --dirty)" -t genshen/md-builder:1.0 .
+#
+# docker-compose.yml runs this image rather than building it, and reads the
+# tag from MD_BUILDER_TAG, so build under the name it expects (or pull it
+# from a registry).
 #
 # The server is built with CGO_ENABLED=0 — SQLite is the pure-Go driver,
 # git is go-git, SSH is x/crypto/ssh — so the runtime stage needs no build
