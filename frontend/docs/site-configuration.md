@@ -1,5 +1,11 @@
 # Site configuration
 
+On a site that has no account yet, the code repository is the first block of
+the setup page that opens instead of the login form (see
+[Getting started](#/docs/getting-started)) — the same two fields, stored in
+the same place. Everything below is the **Settings** page, where they are
+changed afterwards.
+
 Open **Settings** and fill in:
 
 - **Code repository** — the repository under test. Webhook pushes to it

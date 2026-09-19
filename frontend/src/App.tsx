@@ -1,8 +1,9 @@
 import { Suspense, lazy, useEffect, useState } from 'react'
 import { HashRouter, NavLink as RRNavLink, Navigate, Route, Routes, useLocation } from 'react-router'
 import './App.css'
-import { api, cachedSiteConfig, getHealth, type Me } from './api'
+import { api, cachedSiteConfig, getHealth, getSetupState, type Me } from './api'
 import LoginPage from './LoginPage'
+import SetupPage from './SetupPage'
 import DashboardPage from './DashboardPage'
 import TaskPipelinePage from './TaskPipelinePage'
 import TestRunDetailPage from './TestRunDetailPage'
@@ -41,6 +42,11 @@ const HealthPage = lazy(() => import('./HealthPage'))
 function App() {
   const [me, setMe] = useState<Me | null>(null)
   const [loadingMe, setLoadingMe] = useState(true)
+  // Whether the site still needs its first-run setup — a site with no account
+  // at all has nothing to log in with, so it gets the setup page instead of
+  // the login form. Resolved together with the session: rendering the login
+  // page first would flash a form that cannot work.
+  const [setupRequired, setSetupRequired] = useState(false)
   // Bumped when the display timezone changes so every page re-renders its
   // timestamps (the formatters read the module-level state directly).
   const [, setTimezoneTick] = useState(0)
@@ -54,11 +60,21 @@ function App() {
       .catch(() => {}) // offline: the footer simply shows no version
   }, [])
 
-  // Check for an existing session on mount.
+  // Check for an existing session on mount; without one, ask whether the site
+  // is set up at all. The two are sequential so a signed-in visit costs no
+  // extra request.
   useEffect(() => {
     api<Me>('/api/me')
       .then(setMe)
-      .catch(() => setMe(null))
+      .catch(async () => {
+        setMe(null)
+        try {
+          setSetupRequired(await getSetupState())
+        } catch {
+          // Offline or the check failed: fall back to the login page, which
+          // is where a configured site wants to go anyway.
+        }
+      })
       .finally(() => setLoadingMe(false))
   }, [])
 
@@ -109,6 +125,11 @@ function App() {
             <p className="text-muted">Loading…</p>
           ) : me ? (
             <PageRoutes me={me} onMeChange={setMe} />
+          ) : setupRequired ? (
+            <SetupPage
+              onLogin={setMe}
+              onAlreadySetUp={() => setSetupRequired(false)}
+            />
           ) : (
             <LoginPage onLogin={setMe} />
           )}

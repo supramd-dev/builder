@@ -9,6 +9,7 @@ import {
   type SiteConfig,
 } from './api'
 import AccountPanel from './AccountPanel'
+import { gitlabWebhooksURL } from './gitlab'
 import {
   allTimezones,
   applySiteTimezone,
@@ -468,18 +469,6 @@ function DisplayTab({ onError }: { onError: (message: string) => void }) {
 }
 
 // --- Webhook tab --------------------------------------------------------------
-
-// gitlabWebhooksURL turns a repository location (the site config's codeRepo)
-// into the GitLab project's webhook integration page URL — the page the user
-// would otherwise navigate to by hand (project → Settings → Webhooks).
-// Returns "" when the repository is not an http(s) GitLab URL (a bare
-// "group/project" path or an SSH remote gives no host to link to).
-function gitlabWebhooksURL(codeRepo: string): string {
-  let url = codeRepo.trim()
-  if (!url.startsWith('http://') && !url.startsWith('https://')) return ''
-  url = url.replace(/\/+$/, '').replace(/\.git$/, '')
-  return `${url}/-/hooks`
-}
 
 // WebhookTab shows the webhook endpoint as a copy-ready absolute URL, the
 // shared secret GitLab has to send back with every event, and a link

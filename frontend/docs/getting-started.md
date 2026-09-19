@@ -1,9 +1,40 @@
 # Getting started
 
+## First start: the setup page
+
+A site whose database holds **no account at all** opens on a guide page
+instead of the login form. It has three blocks:
+
+1. **Code repository** — the GitLab repository under test, and an optional
+   Project Access Token (`read_repository`). An empty token means a public
+   repository.
+2. **Administrator account** — username, email and password. The first
+   account of a site is always an administrator.
+3. **GitLab webhook** — nothing to fill in: the webhook URL to paste into
+   GitLab (project → Settings → Webhooks), the triggers to enable, and a note
+   that the secret token is in **Settings → Webhook** once you are signed in.
+
+Confirming stores the repository and the account in one transaction and signs
+the new administrator in, so the page leads straight to the dashboard. A
+rejected field writes nothing.
+
+The page appears **exactly once**: the server offers it only while no account
+exists, and closes it the moment one does — created there, by `adduser`, or by
+`seed`. It also means the first account is the one thing that cannot be made
+any other way: an administrator needs an administrator to create one, so on an
+empty site the setup page is the only way in.
+
+The endpoints behind it are unauthenticated (there is no session to use yet),
+which is why the window is kept as narrow as possible. Do not leave a
+**fresh, empty** database reachable from the internet before it is set up: the
+first visitor to the setup page claims the administrator account. Once any
+account exists, the endpoints answer `409` and do nothing.
+
 ## Accounts
 
-There is **no registration UI**. Users are created via the `adduser` CLI
-subcommand on the server; the web UI only handles login.
+Apart from that first administrator, there is **no registration UI**. Users
+are created via the `adduser` CLI subcommand on the server; the web UI only
+handles login.
 
 ```sh
 # Interactive password (hidden, read from the terminal):
@@ -32,6 +63,10 @@ make seed-demo FORCE=1  # rebuild the demo task graphs
 ```
 
 Then (re)start the server and log in as `demo`.
+
+`seed` creates the `demo` account, so the setup page no longer appears on that
+database — create the administrator it needs with
+`adduser -admin -username root -email root@example.com`.
 
 ## Database selection
 

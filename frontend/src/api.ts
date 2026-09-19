@@ -28,6 +28,36 @@ export interface Me {
   role: Role
 }
 
+// SetupInput is the POST body of the first-run setup page: the code
+// repository, and the account that becomes the site's first administrator.
+// The access token is optional (a public repository needs none), and the
+// webhook needs nothing here — the site generates its own secret.
+export interface SetupInput {
+  codeRepo: string
+  accessToken: string
+  username: string
+  email: string
+  password: string
+}
+
+// getSetupState asks whether the site still needs its first-run setup. It is
+// unauthenticated (it runs before any account exists), so it answers a single
+// boolean: true while the database has no account at all.
+export async function getSetupState(): Promise<boolean> {
+  const res = await api<{ required: boolean }>('/api/setup')
+  return res.required
+}
+
+// completeSetup creates the first administrator and stores the code
+// repository, then signs the new account in — the caller receives the same
+// `Me` a login returns. It fails with 409 once the site has an account.
+export async function completeSetup(input: SetupInput): Promise<Me> {
+  return api<Me>('/api/setup', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
 // Account is one row of the administrator's account list. The password hash
 // never leaves the server.
 export interface Account {

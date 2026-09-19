@@ -51,6 +51,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/logout", s.handleLogout)
 	mux.HandleFunc("/api/me", s.handleMe)
 	mux.HandleFunc("/api/health", s.handleHealth)
+	// First-run setup (unauthenticated: it runs before any account exists,
+	// and stops doing anything the moment one does — see handleSetup).
+	mux.HandleFunc("/api/setup", s.handleSetup)
 	// Deep health: the site-status board (git repo reachability, future
 	// object storage). Authenticated — the probes read site configuration.
 	mux.HandleFunc("/api/health/deep", s.requireAuth(s.handleHealthDeep))
@@ -138,11 +141,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := auth.NewToken()
-	if err != nil {
-		log.Printf("login: generate token: %v", err)
+	if err := s.startSession(w, user); err != nil {
+		log.Printf("login: create session: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
+	}
+	writeJSON(w, http.StatusOK, toMeJSON(user))
+}
+
+// startSession opens a login session for user and writes the session cookie.
+// The login handler and the first-run setup (which signs the administrator it
+// just created straight in) share it, so both hand out the same cookie.
+func (s *Server) startSession(w http.ResponseWriter, user *store.User) error {
+	token, err := auth.NewToken()
+	if err != nil {
+		return err
 	}
 	now := time.Now()
 	sess := &store.Session{
@@ -152,11 +165,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ExpiresAt: auth.SessionExpiry(now),
 	}
 	if err := s.Store.CreateSession(sess); err != nil {
-		log.Printf("login: create session: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-		return
+		return err
 	}
-
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
@@ -166,12 +176,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   false, // set true behind TLS in production
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{
+	return nil
+}
+
+// toMeJSON is the signed-in account as the frontend knows it. The password
+// hash is never part of it, and role is reported, not accepted.
+func toMeJSON(user *store.User) map[string]any {
+	return map[string]any{
 		"id":       user.ID,
 		"username": user.Username,
 		"email":    user.Email,
 		"role":     user.Role,
-	})
+	}
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -198,12 +214,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":       user.ID,
-		"username": user.Username,
-		"email":    user.Email,
-		"role":     user.Role,
-	})
+	writeJSON(w, http.StatusOK, toMeJSON(user))
 }
 
 // currentUser resolves the authenticated user from the session cookie, if any.
