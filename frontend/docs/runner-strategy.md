@@ -87,9 +87,10 @@ root (test <sha> on <environment>)
 
 - By default 2 worker goroutines claim ready sub-tasks atomically and run
   them, polling every 2 seconds. A sub-task is ready when all its
-  dependencies are done. Tune with the `MD_BUILDER_WORKERS` environment
-  variable; `MD_BUILDER_DISABLE_WORKER=1` disables the pool entirely
-  (dispatch still records tasks).
+  dependencies are done. The pool size is `worker.count` in the server
+  config file (or `MD_BUILDER_WORKERS`); `worker.enabled: false` (or
+  `MD_BUILDER_DISABLE_WORKER=1`) disables the pool entirely (dispatch still
+  records tasks).
 - Tasks left in `running` after a server crash are reset to pending at
   startup and re-executed.
 
@@ -268,7 +269,8 @@ which are also the reference for how the two scheduling modes behave:
 The scheduler treats the live graphs like any other graph; the difference
 is entirely in how the demo is served:
 
-- With `MD_BUILDER_DISABLE_WORKER=1` the pool is off: the snapshot is
+- With `worker.enabled: false` (or `MD_BUILDER_DISABLE_WORKER=1`) the pool
+  is off: the snapshot is
   frozen forever — no task is ever claimed, placeholder runs stay
   pending/running, logs stop growing. Use this for a stable demo.
 - With workers enabled, the pending stages of a live graph **are claimed

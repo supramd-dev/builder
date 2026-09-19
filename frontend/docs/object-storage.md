@@ -30,13 +30,25 @@ objectStorage:
 
 The file is looked up in this order:
 
-1. `$MD_BUILDER_CONFIG`, if set (the file must exist);
-2. `./md-builder-server.yaml`;
-3. `./server/md-builder-server.yaml` — so the binary also runs from the
+1. the `-config` flag:
+   `md-builder -config /etc/md-builder/server.yaml`;
+2. `$MD_BUILDER_CONFIG`, if set (the file must exist);
+3. `./md-builder-server.yaml`;
+4. `./server/md-builder-server.yaml` — so the binary also runs from the
    project root.
+
+A pinned path — the flag or the variable — must exist; it is never silently
+replaced by another file, so a typo cannot start a differently configured
+deployment. `md-builder -h` lists the flag, and `seed` takes it too
+(`md-builder seed -config …`).
 
 An unknown key is a startup error, so a typo like `endpont` is reported
 instead of silently leaving the endpoint empty.
+
+This file is also where the server's other settings live — `server.addr`
+and `server.port`, `database.dsn`, `dist`, `worker` — each with the same
+kind of environment override; see
+[Getting started](#/docs/getting-started).
 
 ### Through the environment
 
@@ -46,7 +58,7 @@ values win over the file:
 
 | Variable | Setting |
 | --- | --- |
-| `MD_BUILDER_CONFIG` | path to the config file |
+| `MD_BUILDER_CONFIG` | path to the config file (the `-config` flag wins over it) |
 | `MD_BUILDER_S3_ENDPOINT` | `endpoint` |
 | `MD_BUILDER_S3_ACCESS_KEY` | `accessKey` |
 | `MD_BUILDER_S3_SECRET_KEY` | `secretKey` |
@@ -54,9 +66,15 @@ values win over the file:
 | `MD_BUILDER_S3_REGION` | `region` |
 | `MD_BUILDER_S3_PREFIX` | `prefix` |
 | `MD_BUILDER_S3_USE_SSL` | `useSSL` (`true`/`false`) |
+| `MD_BUILDER_S3_AUTO_CREATE_BUCKET` | `autoCreateBucket` (`true`/`false`) |
+| `MD_BUILDER_S3_GC` | `gc` (`true`/`false`) |
+| `MD_BUILDER_S3_GC_INTERVAL_HOURS` | `gcIntervalHours` (a positive integer) |
 
 Setting those four required variables (`ENDPOINT`, `ACCESS_KEY`,
-`SECRET_KEY`, `BUCKET`) is enough to run without a file at all.
+`SECRET_KEY`, `BUCKET`) is enough to run without a file at all; the rest
+have sensible defaults. A variable that is set but unreadable
+(`MD_BUILDER_S3_GC=ture`, `MD_BUILDER_S3_GC_INTERVAL_HOURS=often`) is a
+startup error rather than a silently ignored typo.
 
 ## Object storage is mandatory
 
@@ -151,6 +169,10 @@ objectStorage:
 
 `useSSL: false` is for this local, plain-HTTP setup only — use TLS
 (`useSSL: true`) for anything reachable from a network.
+
+For a deployment rather than a scratch store, `docker-compose.yml` starts
+MinIO and the server together and wires the environment up for you (see
+[Deployment with Docker or Podman](#/docs/getting-started)).
 
 ## Credentials
 

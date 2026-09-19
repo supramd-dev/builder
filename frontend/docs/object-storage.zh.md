@@ -28,12 +28,22 @@ objectStorage:
 
 文件按以下顺序查找:
 
-1. `$MD_BUILDER_CONFIG`(若已设置,该文件必须存在);
-2. `./md-builder-server.yaml`;
-3. `./server/md-builder-server.yaml` —— 这样在项目根目录也能直接运行。
+1. `-config` 命令行参数:
+   `md-builder -config /etc/md-builder/server.yaml`;
+2. `$MD_BUILDER_CONFIG`(若已设置,该文件必须存在);
+3. `./md-builder-server.yaml`;
+4. `./server/md-builder-server.yaml` —— 这样在项目根目录也能直接运行。
+
+被显式指定的路径(命令行参数或环境变量)必须存在,绝不会静默地改用
+另一个文件,因此拼写错误不会启动一个配置不同的部署。`md-builder -h`
+会列出该参数;`seed` 子命令同样支持它(`md-builder seed -config …`)。
 
 未知的键会导致启动失败,因此像 `endpont` 这样的拼写错误会被报出来,
 而不会静默地留下空 endpoint。
+
+服务端其余配置也在同一个文件里 —— `server.addr` 与 `server.port`、
+`database.dsn`、`dist`、`worker` —— 每一项都有同样形式的环境变量可以
+覆盖,详见 [快速开始](#/docs/getting-started)。
 
 ### 通过环境变量配置
 
@@ -42,7 +52,7 @@ objectStorage:
 
 | 环境变量 | 配置项 |
 | --- | --- |
-| `MD_BUILDER_CONFIG` | 配置文件路径 |
+| `MD_BUILDER_CONFIG` | 配置文件路径(命令行 `-config` 优先于它) |
 | `MD_BUILDER_S3_ENDPOINT` | `endpoint` |
 | `MD_BUILDER_S3_ACCESS_KEY` | `accessKey` |
 | `MD_BUILDER_S3_SECRET_KEY` | `secretKey` |
@@ -50,9 +60,15 @@ objectStorage:
 | `MD_BUILDER_S3_REGION` | `region` |
 | `MD_BUILDER_S3_PREFIX` | `prefix` |
 | `MD_BUILDER_S3_USE_SSL` | `useSSL`(`true`/`false`) |
+| `MD_BUILDER_S3_AUTO_CREATE_BUCKET` | `autoCreateBucket`(`true`/`false`) |
+| `MD_BUILDER_S3_GC` | `gc`(`true`/`false`) |
+| `MD_BUILDER_S3_GC_INTERVAL_HOURS` | `gcIntervalHours`(正整数) |
 
 只要设置了这四个必需的变量(`ENDPOINT`、`ACCESS_KEY`、`SECRET_KEY`、
-`BUCKET`),就完全可以不使用配置文件运行。
+`BUCKET`),就完全可以不使用配置文件运行;其余配置项都有合理默认值。
+如果一个变量设置了却无法解析(如 `MD_BUILDER_S3_GC=ture`、
+`MD_BUILDER_S3_GC_INTERVAL_HOURS=often`),启动会直接报错,而不是把
+笔误悄悄忽略掉。
 
 ## 对象存储是强制要求
 
@@ -138,6 +154,10 @@ objectStorage:
 
 `useSSL: false` 仅适用于这种本地明文 HTTP 场景 —— 任何可从网络访问的
 部署都应使用 TLS(`useSSL: true`)。
+
+如果是正式部署而不是临时试一下,`docker-compose.yml` 会同时启动
+MinIO 与服务端并自动配好环境变量(见
+[用 Docker 或 Podman 部署](#/docs/getting-started))。
 
 ## 凭据
 

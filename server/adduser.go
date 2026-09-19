@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"md-builder/server/auth"
+	"md-builder/server/config"
 	"md-builder/server/store"
 )
 
@@ -15,17 +16,21 @@ import (
 //
 // Usage:
 //
-//	md-builder adduser -username <name> -email <addr> [-password <pw>]
+//	md-builder adduser -username <name> -email <addr> [-password <pw>] [-dsn <dsn>]
 //
 // If -password is omitted the password is read interactively from the
 // controlling terminal without echoing it. Stdin is read as a fallback when
 // there is no TTY (e.g. piping from another process).
+//
+// The database defaults to database.dsn in the server config file, so the
+// command writes the same database the server reads; -dsn overrides it.
 func adduserSubcommand() int {
 	fs := flag.NewFlagSet("adduser", flag.ContinueOnError)
 	username := fs.String("username", "", "username (required)")
 	email := fs.String("email", "", "email address (required)")
 	password := fs.String("password", "", "password (read interactively if omitted)")
-	dsn := fs.String("dsn", defaultDSN(), "database DSN (sqlite path or postgres URL)")
+	dsn := fs.String("dsn", "", "database DSN (default: database.dsn from the config file)")
+	configPath := fs.String(config.FlagName, "", config.FlagUsage)
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return 2
 	}
@@ -49,6 +54,17 @@ func adduserSubcommand() int {
 	if *password == "" {
 		fmt.Fprintln(os.Stderr, "error: password must not be empty")
 		return 2
+	}
+
+	// Only the database is needed here, so a missing config file is not an
+	// error: adduser must work on a host that has never been configured.
+	if *dsn == "" {
+		cfg, _, err := config.LoadOptional(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: config: %v\n", err)
+			return 1
+		}
+		*dsn = cfg.Database.DSN
 	}
 
 	s, err := store.Open(*dsn)

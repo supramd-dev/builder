@@ -63,6 +63,43 @@ make serve   # builds the frontend, then serves via Go on :8080
 ```
 
 Visit http://localhost:8080
+
+The server needs object storage for the artifacts it records (see
+[md-builder-server.example.yaml](md-builder-server.example.yaml) and
+[Object storage](frontend/docs/object-storage.md)); it refuses to start
+without it. `-config` names the config file, and everything else — the
+listen address, the database, the worker pool — is read from it or from the
+matching `MD_BUILDER_*` environment variable, which wins.
+
+### Containers
+
+[Dockerfile](Dockerfile) builds the frontend and the server into one image,
+`genshen/md-builder:1.0`; [docker-compose.yml](docker-compose.yml) runs it
+next to a MinIO instance. Compose only runs images — it never builds one —
+so build (or pull) the image first. The tag is the `MD_BUILDER_TAG`
+variable, so building `genshen/md-builder:1.1` and setting
+`MD_BUILDER_TAG=1.1` runs that one instead. No configuration file is
+needed — the MinIO password is the one value with no default, and it comes
+from the environment. Mount one at `/app/md-builder-server.yaml` when the
+settings outgrow the compose variables:
+
+```sh
+docker build -t genshen/md-builder:1.0 .   # or: podman build ...
+export MINIO_ROOT_PASSWORD='pick-something-long'
+mkdir -p data/md-builder data/minio   # the database and the buckets
+sudo chown 10001:10001 data/md-builder   # the server runs as uid 10001
+docker compose up -d                  # or: podman compose up -d
+docker compose --profile tools run --rm cli adduser -username alice -email alice@example.com
+```
+
+The `chown` is the one step that fails quietly if you skip it: a bind mount
+takes its ownership from the host directory, so the container's uid 10001
+cannot create the SQLite file and the server exits at startup with
+`open store: open db: unable to open database file`. Run the container as
+yourself instead (`MD_BUILDER_UID=$(id -u) MD_BUILDER_GID=$(id -g)`) if you
+would rather the files stay yours — see
+[the deployment docs](frontend/docs/getting-started.md).
+
 ## User documentation
 
 End-user documentation — site configuration, environment tags, the
@@ -94,9 +131,10 @@ go run ./server adduser -username alice -email alice@example.com -password 's3cr
 go run ./server adduser -username alice -email alice@example.com -dsn 'postgres://...'
 ```
 
-The DSN is taken from the `MD_BUILDER_DSN` environment variable if set,
-otherwise it defaults to a local SQLite file `md-builder.db` (both
-SQLite — pure-Go driver, no CGO — and PostgreSQL are supported):
+The DSN is the `database.dsn` key of the server config file, defaulting to a
+local SQLite file `md-builder.db`; the `MD_BUILDER_DSN` environment variable
+overrides both (SQLite — pure-Go driver, no CGO — and PostgreSQL are
+supported):
 
 ```sh
 export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=disable'

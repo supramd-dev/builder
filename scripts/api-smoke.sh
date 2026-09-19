@@ -94,8 +94,9 @@ if [ "${SKIP_SETUP:-0}" != "1" ]; then
     ADDUSER=(go run . adduser)
   fi
   # The server module lives in server/; -dsn pins the same database the
-  # running server uses (relative DSNs resolve against the CWD).
-  if ! (cd "$ROOT/server" && MD_BUILDER_DSN="$DSN" "${ADDUSER[@]}" \
+  # running server uses (relative DSNs resolve against the CWD), so adduser
+  # needs no config file here.
+  if ! (cd "$ROOT/server" && "${ADDUSER[@]}" -dsn "$DSN" \
       -username "$USERNAME" -email "$EMAIL" -password "$PASSWORD") >/dev/null 2>&1; then
     # "already exists" is fine — the user may be left over from a previous run.
     echo "note: adduser failed; assuming user $USERNAME already exists" >&2

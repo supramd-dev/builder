@@ -4,26 +4,56 @@
 # storage. The server reads this file at startup and refuses to run without
 # a working object store — artifacts live there, not in the database.
 #
-# Every setting can also be supplied through the environment, which wins
-# over this file: MD_BUILDER_S3_ENDPOINT, _ACCESS_KEY, _SECRET_KEY,
-# _BUCKET, _REGION, _PREFIX, _USE_SSL. Setting the first four is enough to
-# run with no file at all.
+# Where it is read from: -config <path>, then $MD_BUILDER_CONFIG, then
+# ./md-builder-server.yaml, then ./server/md-builder-server.yaml.
 #
-# See frontend/docs/object-storage.md.
+# Every setting below can also be supplied through the environment, which
+# wins over this file. See the MD_BUILDER_* names in the comments, and
+# frontend/docs/object-storage.md for the store's.
+#
+# A section left out keeps its default, so a file may set only what it needs.
+
+server:
+  # Where the API listens: a host ("127.0.0.1", "::1") or a host and port
+  # ("127.0.0.1:9000"). Empty listens on every interface. Override with
+  # MD_BUILDER_ADDR.
+  addr: ""
+  # Port to listen on. 0 takes the port from `addr`, and 0 with an address
+  # that has none means 8080. Override with MD_BUILDER_PORT.
+  port: 8080
+
+database:
+  # SQLite file path, or a PostgreSQL URL (postgres://user:pw@host/db).
+  # Override with MD_BUILDER_DSN.
+  dsn: md-builder.db
+
+# Where the built frontend lives. Leave it out to search frontend/dist,
+# ../frontend/dist and ./dist, which is what running from the project root
+# or from server/ needs. Override with MD_BUILDER_DIST.
+# dist: frontend/dist
+
+worker:
+  # The scheduling pool that executes dispatched tasks. Set enabled: false
+  # to record dispatches without running them (a demo deployment with no
+  # test nodes). Override with MD_BUILDER_DISABLE_WORKER=1.
+  enabled: true
+  # Pool size; 0 uses the built-in default (2). Override with
+  # MD_BUILDER_WORKERS.
+  count: 2
 
 objectStorage:
   # MinIO / S3 endpoint, host and port, no scheme.
-  endpoint: minio.example.com:9000
+  endpoint: 127.0.0.1:9000
 
   # Credentials of a user scoped to this bucket. Never logged, never
   # returned by the API — prefer a dedicated user over root.
-  accessKey: md-builder
-  secretKey: "change-me"
+  accessKey: minioadmin
+  secretKey: minioadmin
 
   bucket: md-builder
 
   # TLS. Use true for anything reachable from a network.
-  useSSL: true
+  useSSL: false
 
   # Optional namespace inside the bucket, so one bucket can host several
   # deployments.

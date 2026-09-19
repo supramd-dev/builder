@@ -34,12 +34,129 @@ make seed-demo FORCE=1  # 重建演示任务图
 
 ## 数据库选择
 
-DSN 优先取自环境变量 `MD_BUILDER_DSN`,未设置时默认使用本地 SQLite
-文件 `md-builder.db`。
+DSN 取自服务端配置文件的 `database.dsn`;文件里没写时默认使用本地
+SQLite 文件 `md-builder.db`。环境变量 `MD_BUILDER_DSN` 会覆盖两者。
 
 ```sh
 export MD_BUILDER_DSN='postgres://user:pass@localhost:5432/mdbuilder?sslmode=disable'
 ```
+
+## 启动服务
+
+```sh
+go run ./server                       # http://localhost:8080
+go run ./server -config /etc/md-builder/server.yaml
+```
+
+`-config` 指定服务端配置文件,也是服务端唯一的命令行参数:监听地址、
+数据库、worker 数量都来自这个文件。`-h` 会列出程序与各个子命令的参数。
+
+```yaml
+server:
+  addr: 127.0.0.1   # 主机或 主机:端口;留空表示监听所有网卡
+  port: 9000        # 0 表示取 addr 里的端口,都没有则为 8080
+```
+
+配置文件里还有服务端必需的对象存储配置(见
+[对象存储(MinIO)](#/docs/object-storage))和 `worker` 执行池。可以复制
+`md-builder-server.example.yaml` 作为起点。
+
+每个配置项都有对应的环境变量,环境变量优先于文件,容器部署通常就用
+这种方式:`MD_BUILDER_ADDR` 与 `MD_BUILDER_PORT` 对应监听地址,
+`MD_BUILDER_DSN` 对应数据库,`MD_BUILDER_DIST` 对应前端构建产物,
+`MD_BUILDER_WORKERS` 与 `MD_BUILDER_DISABLE_WORKER` 对应执行池,
+`MD_BUILDER_S3_*` 对应对象存储。
+
+## 用 Docker 或 Podman 部署
+
+仓库自带 `Dockerfile` 与 `docker-compose.yml`,会把服务端和一份 MinIO
+一起启动。compose 只负责运行镜像、不负责构建,所以要先构建服务端镜像
+(或者从镜像仓库拉取):
+
+```sh
+docker build -t genshen/md-builder:1.0 .   # 或者:podman build ...
+export MINIO_ROOT_PASSWORD='换成一个足够长的密码'
+mkdir -p data/md-builder data/minio   # 第一次 up 之前先建好
+sudo chown 10001:10001 data/md-builder   # 服务端以 uid 10001 运行
+docker compose up -d                  # 或者:podman compose up -d
+```
+
+整个过程不需要任何配置文件:compose 文件里除了 MinIO 密码之外每一项
+都有默认值,密码从环境变量读取(没设置就拒绝启动)。其它默认值同样
+可以用环境变量覆盖 —— 例如 `MD_BUILDER_PORT=9000 docker compose up -d`
+会同时改掉监听端口和映射到宿主机的端口。
+
+两个服务运行的镜像都是 `genshen/md-builder:1.0`,其中的 `1.0` 就是变量
+`MD_BUILDER_TAG`。要换成别的 tag,先用该名字构建,再把变量设成同一个
+值:
+
+```sh
+docker build -t genshen/md-builder:1.1 .
+MD_BUILDER_TAG=1.1 docker compose up -d
+```
+
+配置项比 compose 变量更多时,写成文件更方便:挂载到
+`/app/md-builder-server.yaml`(镜像的工作目录就是 `/app`,服务端默认
+会读这个路径),同时去掉对应的 `MD_BUILDER_*` 变量即可。环境变量优先
+于文件,两者可以混用。
+
+之后界面在 <http://localhost:8080>,MinIO 控制台在
+<http://127.0.0.1:9001>。
+
+部署写入的所有数据都留在这两个目录里 —— 数据库在 `data/md-builder`,
+桶数据在 `data/minio` —— 因此备份就是把 `data/` 拷走。这两个目录需要
+自己先建好:Docker 会自动创建不存在的挂载源目录,但所有者是 root,
+而 root 属主的目录容器里的用户写不进去。
+
+服务端以 uid 10001 运行,而 bind mount 的属主取自宿主机目录、不是镜像
+—— 镜像里对 `/data` 的 `chown` 只对 named volume 生效。所以在 Linux 上,
+第一次 `up` 之前这个目录必须对该 uid 可写,办法是把属主让出去:
+
+```sh
+sudo chown 10001:10001 data/md-builder
+```
+
+或者让容器以你自己的身份运行 —— 用 `id -u`/`id -g` 查出来,设成
+`MD_BUILDER_UID`/`MD_BUILDER_GID`,文件也就仍然归你所有。macOS 上这一
+点看不出来,因为文件共享会映射属主。
+
+两样都不做,服务端就建不出 SQLite 文件:启动时会以 `open store: open
+db: unable to open database file ... (14)` 退出 —— 14 是 SQLite 的
+`SQLITE_CANTOPEN`,消息里那句 "out of memory" 并不是真正的原因 —— 重启
+策略会把它变成不停重启。而 MinIO 照样能起来,因为它的镜像以 root 运行,
+所以看起来像是只有服务端出问题。
+
+因为没有注册界面,第一个账号仍然要用命令行创建。`cli` 服务与
+服务端共用同一个数据库和对象存储:
+
+```sh
+docker compose --profile tools run --rm cli adduser -username alice -email alice@example.com
+```
+
+密码会以交互方式读取(也可以用 `-password` 传入,但那样密码会留在
+shell 历史里)。需要演示数据时,`seed` 走同一条路。
+
+不用 compose 也可以,直接构建镜像即可 —— 镜像里是一个静态二进制
+文件加上构建好的前端,运行在 Alpine 上,全部配置也可以来自环境变量:
+
+```sh
+docker build -t genshen/md-builder:1.0 .
+mkdir -p data/md-builder
+docker run -d --name md-builder -p 8080:8080 \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD/data/md-builder:/data" \
+  -v "$PWD/md-builder-server.yaml:/app/md-builder-server.yaml:ro" \
+  -e MD_BUILDER_S3_ENDPOINT=minio.example.com:9000 \
+  -e MD_BUILDER_S3_ACCESS_KEY=... -e MD_BUILDER_S3_SECRET_KEY=... \
+  -e MD_BUILDER_S3_BUCKET=md-builder \
+  genshen/md-builder:1.0
+```
+
+无论是容器还是直接跑在宿主机上,服务端都需要对象存储才能启动:启动
+时存储不可达就会**退出**(见
+[对象存储(MinIO)](#/docs/object-storage))。compose 里的重启策略正是
+用来等 MinIO 就绪的;如果它一直重启不停,说明地址或凭据配错了,
+`docker compose logs md-builder` 会说明是哪一种。
 
 ## 首次运行清单
 
