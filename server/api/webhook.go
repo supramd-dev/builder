@@ -177,19 +177,39 @@ func (s *Server) recordPush(w http.ResponseWriter, payload gitlabEventPayload, e
 		"created":  created,
 	}
 	if s.Runner != nil {
-		if s.shouldDispatch(payload) {
+		if ok, reason := s.dispatchDecision(payload); ok {
 			d := s.Runner.DispatchForCommit(commit)
 			resp["jobsCreated"] = d.TasksCreated
 			resp["entriesSkipped"] = d.EntriesSkipped
 			if d.Err != nil {
 				// The commit is recorded; the dispatch failure is surfaced but
 				// is not a webhook-level error (GitLab would retry pointlessly).
+				// DispatchForCommit stores it on the commit row as well.
 				resp["dispatchError"] = d.Err.Error()
 				log.Printf("gitlab webhook: dispatch for commit %d failed: %v", commit.ID, d.Err)
 			}
+		} else {
+			// Not dispatched: the reason goes on the commit row too, so the
+			// matrix explains the empty row instead of just being empty.
+			resp["dispatchSkipped"] = reason
+			s.recordDispatchError(commit, reason)
 		}
+	} else {
+		s.recordDispatchError(commit, "task dispatch is not configured on the server")
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// recordDispatchError stores the reason a commit produced no task graph on
+// its row (see store.SetCommitDispatchError). Bookkeeping only: a failure to
+// store is logged, never surfaced — the webhook has already answered, and an
+// error status would make GitLab retry an event that was processed fine.
+func (s *Server) recordDispatchError(commit *store.Commit, msg string) {
+	if err := s.Store.SetCommitDispatchError(commit.ID, msg); err != nil {
+		log.Printf("gitlab webhook: commit %d: record dispatch error: %v", commit.ID, err)
+		return
+	}
+	commit.DispatchError = msg
 }
 
 // recordMergeRequest stores a merge request event as a dashboard commit
@@ -247,7 +267,7 @@ func (s *Server) recordMergeRequest(w http.ResponseWriter, payload gitlabEventPa
 		resp["message"] = "action " + oa.Action + " recorded; not dispatched (only open, reopen and merge trigger tests)"
 	}
 	if dispatch && s.Runner != nil {
-		if s.shouldDispatch(payload) {
+		if ok, reason := s.dispatchDecision(payload); ok {
 			d := s.Runner.DispatchForCommit(commit)
 			resp["jobsCreated"] = d.TasksCreated
 			resp["entriesSkipped"] = d.EntriesSkipped
@@ -255,28 +275,40 @@ func (s *Server) recordMergeRequest(w http.ResponseWriter, payload gitlabEventPa
 				resp["dispatchError"] = d.Err.Error()
 				log.Printf("gitlab webhook: dispatch for commit %d failed: %v", commit.ID, d.Err)
 			}
+		} else {
+			resp["dispatchSkipped"] = reason
+			s.recordDispatchError(commit, reason)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// shouldDispatch reports whether a push should trigger jobs: the pushed
-// repository must match the configured code repository (when one is set).
-// The payload carries path_with_namespace ("group/code"), while the config
-// may be a full URL — compare on the extracted repo path, falling back to a
-// suffix comparison for bare-path configs.
-func (s *Server) shouldDispatch(payload gitlabEventPayload) bool {
+// dispatchDecision reports whether a push should trigger jobs and, when it
+// should not, the reason to record on the commit row. The pushed repository
+// must match the configured code repository; the payload carries
+// path_with_namespace ("group/code"), while the config may be a full URL —
+// compare on the extracted repo path, falling back to a suffix comparison
+// for bare-path configs.
+//
+// A missing code repository is the only non-match worth recording: a push to
+// some *other* repository never reaches the matrix (the dashboard is filtered
+// to the code repo), so a message about it could only ever be stale.
+func (s *Server) dispatchDecision(payload gitlabEventPayload) (dispatch bool, reason string) {
 	cfg, err := s.Store.GetSiteConfig()
-	if err != nil || cfg.CodeRepo == "" {
-		return false
+	if err != nil {
+		return false, "site config could not be loaded: " + err.Error()
+	}
+	if cfg.CodeRepo == "" {
+		return false, "the site config has no code repository set: " +
+			"the push is recorded, but no tests are dispatched"
 	}
 	pushed := strings.TrimSuffix(strings.Trim(payload.Project.PathWithNamespace, "/"), ".git")
 	configured := store.RepoPath(cfg.CodeRepo)
 	if configured == "" || configured == pushed {
-		return configured == pushed
+		return configured == pushed, ""
 	}
 	// Configured as a bare path (e.g. "group/code"): match the tail.
-	return strings.HasSuffix(pushed, "/"+configured) || pushed == configured
+	return strings.HasSuffix(pushed, "/"+configured) || pushed == configured, ""
 }
 
 // firstLine returns the first line of a commit message (its title).

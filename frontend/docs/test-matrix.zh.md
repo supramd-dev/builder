@@ -370,7 +370,10 @@ presets:
   的预设。
 
 非法的 YAML 会使派发失败:推送仍被记录,`dispatchError` 出现在 webhook
-响应中(见 [Webhooks](#/docs/webhooks)),但不会创建任何任务。
+响应中(见 [Webhooks](#/docs/webhooks)),但不会创建任何任务。同一条
+消息也会存到 commit 行上,因此仪表板会在该 commit 的 **graph** 列显示
+它(一个警告三角:悬停或点击查看文本)—— 没有任何条目匹配到已启用
+环境时也是如此。
 
 ## Runner 做了什么
 

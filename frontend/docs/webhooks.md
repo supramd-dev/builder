@@ -52,7 +52,20 @@ that repository (matched by path), dispatching kicks in automatically:
    [The test matrix](#/docs/test-matrix)).
 3. The response carries `jobsCreated` / `entriesSkipped`, plus a
    `dispatchError` when the YAML cannot be fetched or parsed — the
-   commit is still recorded either way.
+   commit is still recorded either way. The response is for the caller
+   (GitLab's webhook log); the same message is stored on the commit row,
+   so the dashboard explains the commit's empty columns long after the
+   response is gone — see below.
+
+Nothing is dropped silently: every step between the event and the task
+graphs leaves a record. A push that fails to dispatch (unreadable or
+invalid `md-builder.yaml`, an entry matching no enabled environment)
+shows a warning triangle in the **graph** column of the full dashboard —
+hover for the reason, click for the full text. A push that is not
+dispatched at all because the site has no code repository configured
+says so on its row too. Failures *after* dispatch — the clone, the
+build, the tests — are recorded on the tasks and runs themselves and
+show up as the usual stage statuses.
 
 Private repositories are handled with the Project Access Token
 configured in the site settings (see

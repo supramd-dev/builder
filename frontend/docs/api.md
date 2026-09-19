@@ -27,6 +27,14 @@ task pipeline (clone → build → unit/regression), GitHub-Actions style —
 clicking a stage node jumps to its run detail or the live task log (see
 [Runner and tasks](#/docs/runner-strategy)).
 
+When a commit has **no graph at all** because the dispatch failed — an
+unreadable `md-builder.yaml`, an invalid one, no entry matching an
+environment, no code repository configured — the graph column shows a
+warning triangle in place of the link: hovering it reveals the reason and
+clicking opens the full text. The message is stored on the commit row
+(`dispatchError`, set at dispatch time and cleared by a later dispatch
+that works), so it outlives the webhook response that carried it.
+
 Manually dispatched graphs carry a small **M** badge in their cells and
 a "manual" label on the task pages. Rows of manual dispatches that were
 re-run (a newer attempt of the same commit exists) are kept but greyed
@@ -56,7 +64,8 @@ The full matrix response shape:
 Each stage either carries the recorded `runId` (opens the run detail) or
 the live `taskId` of the task graph while the run has not landed
 (`status` one of `pending`/`running`/`failed`/`done`). `taskIds` maps the
-environment to the root task id for the graph link.
+environment to the root task id for the graph link; `commit.dispatchError`
+carries the recorded reason when the dispatch produced no graph at all.
 
 ## Reporting results
 

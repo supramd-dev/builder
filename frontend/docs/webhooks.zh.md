@@ -47,7 +47,16 @@ Merge request 事件在 `open`、`reopen` 和 `merge` 动作时派发
    [Runner 与任务](#/docs/runner-strategy)和
    [测试矩阵](#/docs/test-matrix))。
 3. 响应携带 `jobsCreated` / `entriesSkipped`,以及 YAML 无法获取或解析
-   时的 `dispatchError` —— 无论成败,提交都会被记录。
+   时的 `dispatchError` —— 无论成败,提交都会被记录。响应是给调用方
+   (GitLab 的 webhook 日志)看的;同一条消息还会存到 commit 行上,
+   因此响应早已消失之后,仪表板仍然能解释该 commit 的空列 —— 见下。
+
+中间环节不会静默丢失:从收到事件到生成任务图,每一步都会留下记录。
+派发失败的推送(读不到或内容非法的 `md-builder.yaml`、没有任何条目
+匹配到已启用环境)会在全量仪表板的 **graph** 列显示一个警告三角 ——
+悬停看原因,点击看完整文本。如果站点没有配置代码仓库、推送根本没有
+被派发,它的行上同样会写明。派发*之后*的失败 —— clone、构建、测试
+—— 记录在任务和运行本身,以常规的阶段状态呈现。
 
 私有仓库通过站点设置中配置的 Project Access Token(项目访问令牌)处理
 (见[站点配置](#/docs/site-configuration))。

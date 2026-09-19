@@ -263,6 +263,11 @@ export interface DashboardCommit {
   // true when a newer attempt of the same SHA exists (manual re-dispatch):
   // the row is kept for history but rendered dimmed.
   superseded?: boolean
+  // Why this commit produced no task graph — the webhook's dispatchError,
+  // recorded at dispatch time (the yaml could not be read or parsed, no entry
+  // matched an environment, no code repo configured). Absent when a graph was
+  // created; the matrix shows it on the cells that have no graph.
+  dispatchError?: string
 }
 
 export interface RunCell {

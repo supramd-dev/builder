@@ -22,6 +22,12 @@ commit 行还带 **graph** 链接:该 commit 任务管线
 (clone → build → 单元/回归)的依赖图,GitHub Actions 风格 —— 点击阶段
 节点跳转到运行详情或实时任务日志(见 [Runner 与任务](#/docs/runner-strategy))。
 
+当某个 commit **完全没有图**、原因是派发失败时 —— `md-builder.yaml`
+读不到、内容非法、没有任何条目匹配到环境、没有配置代码仓库 —— graph
+列不再显示链接,而是一个警告三角:悬停显示原因,点击打开完整文本。
+该消息存放在 commit 行上(`dispatchError`,派发时写入,之后某次成功的
+派发会清空它),因此不会随 webhook 响应一起消失。
+
 手动派发的图在单元格上带一个小的 **M** 徽标,在任务页面上显示
 "manual" 标签。被重跑过的手动派发行(同一提交存在更新的尝试)会保留
 但置灰并带 **superseded**(已过期)标签 —— 同一提交只有最新一次尝试
@@ -49,7 +55,8 @@ commit 行还带 **graph** 链接:该 commit 任务管线
 
 每个阶段要么携带已记录的 `runId`(打开运行详情),要么在运行尚未落库时
 携带任务图的实时 `taskId`(`status` 为 `pending`/`running`/`failed`/
-`done` 之一)。`taskIds` 将环境映射到根任务 ID,用于图链接。
+`done` 之一)。`taskIds` 将环境映射到根任务 ID,用于图链接;
+`commit.dispatchError` 在派发完全没有产出图时携带记录下来的原因。
 
 ## 报告结果
 

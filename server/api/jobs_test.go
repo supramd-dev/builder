@@ -190,6 +190,99 @@ func TestWebhookDispatchErrorSurfaces(t *testing.T) {
 	if res["commitId"] == nil || res["commitId"].(float64) <= 0 {
 		t.Fatalf("commit should be recorded: %v", res)
 	}
+
+	// ... and so is the error, on the commit row: the response is gone by the
+	// time someone looks at the dashboard, which has to explain the empty
+	// columns on its own.
+	commitID := int64(res["commitId"].(float64))
+	commit, err := s.GetCommitByID(commitID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(commit.DispatchError, "repo unreachable") {
+		t.Fatalf("stored dispatch error = %q", commit.DispatchError)
+	}
+
+	// The matrix exposes it: the frontend shows it on the cells that have no
+	// graph (the graph column of the full view).
+	seedUser(t, s, "matrix-viewer", "matrix@example.com", "s3cret12")
+	mux2 := http.NewServeMux()
+	apiServer.Register(mux2)
+	session := loginAndGetCookie(t, mux2, "matrix-viewer", "s3cret12")
+	rec = doJSON(t, mux2, http.MethodGet, "/api/dashboard/full", "",
+		&http.Cookie{Name: sessionCookie, Value: session})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full dashboard: %d, body %s", rec.Code, rec.Body.String())
+	}
+	var dash fullDashboardJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if len(dash.Rows) != 1 {
+		t.Fatalf("dashboard rows: %d, want the one commit", len(dash.Rows))
+	}
+	if !strings.Contains(dash.Rows[0].Commit.DispatchError, "repo unreachable") {
+		t.Fatalf("dashboard dispatch error = %q", dash.Rows[0].Commit.DispatchError)
+	}
+	// No graph was created, so the row has no task to link either — this is
+	// the state the graph column renders as an error icon.
+	if len(dash.Rows[0].TaskIDs) != 0 {
+		t.Fatalf("task ids: %v, want none", dash.Rows[0].TaskIDs)
+	}
+}
+
+// TestWebhookRecordsMissingCodeRepo: a push that is not dispatched at all
+// (no code repository configured) records the reason too — the matrix would
+// otherwise show a row of empty cells with nothing to explain it.
+func TestWebhookRecordsMissingCodeRepo(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	// No SaveSiteConfig: the code repository is unset.
+	seedDispatchEnv(t, s, "cpu-node", "cpu", true)
+
+	rec := postWebhook(t, mux, s, pushBody("group/code", "abc"), "X-Gitlab-Event", "Push Hook")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhook should stay 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var res map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := res["jobsCreated"]; ok {
+		t.Fatalf("nothing should be dispatched: %v", res)
+	}
+	if res["dispatchSkipped"] == "" || res["dispatchSkipped"] == nil {
+		t.Fatalf("the skip reason should be surfaced: %v", res)
+	}
+
+	commit, err := s.GetCommitByID(int64(res["commitId"].(float64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(commit.DispatchError, "no code repository set") {
+		t.Fatalf("stored dispatch error = %q", commit.DispatchError)
+	}
+
+	// A push to some *other* repository while a code repo IS configured is
+	// not recorded: that row never reaches the matrix (it is filtered out),
+	// so the message could only ever be stale.
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	rec = postWebhook(t, mux, s, pushBody("group/other", "def"), "X-Gitlab-Event", "Push Hook")
+	var res2 map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res2); err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.GetCommitByID(int64(res2["commitId"].(float64)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if other.DispatchError != "" {
+		t.Fatalf("other-repo dispatch error = %q, want empty", other.DispatchError)
+	}
 }
 
 func TestJobsAPIListAndTrigger(t *testing.T) {

@@ -58,6 +58,11 @@ type commitJSON struct {
 	Event      string `json:"event,omitempty"` // what created the row: push | tag_push | merge_request | manual | manual_yaml
 	PushedAt   string `json:"pushedAt"`
 	Superseded bool   `json:"superseded,omitempty"` // a newer attempt of the same SHA exists (manual re-dispatch)
+	// Why the dispatch of this commit produced no task graph — the webhook's
+	// dispatchError, stored at dispatch time (fetch/parse failure, no entry
+	// matching an environment, no code repo configured). Empty when a graph
+	// was created. The matrix shows it on the cells that have no graph.
+	DispatchError string `json:"dispatchError,omitempty"`
 }
 
 // runCellJSON is one cell of the matrix: a run's summary, aligned with an
@@ -1086,16 +1091,17 @@ func shortSHA(sha string) string {
 
 func (s *Server) toCommitJSON(c *store.Commit) commitJSON {
 	return commitJSON{
-		ID:       c.ID,
-		SHA:      c.SHA,
-		ShortSHA: shortSHA(c.SHA),
-		Repo:     c.Repo,
-		RepoURL:  s.repoWebURL(c.Repo),
-		Ref:      c.Ref,
-		Author:   c.Author,
-		Message:  c.Message,
-		Event:    c.Event,
-		PushedAt: c.PushedAt.UTC().Format(time.RFC3339),
+		ID:            c.ID,
+		SHA:           c.SHA,
+		ShortSHA:      shortSHA(c.SHA),
+		Repo:          c.Repo,
+		RepoURL:       s.repoWebURL(c.Repo),
+		Ref:           c.Ref,
+		Author:        c.Author,
+		Message:       c.Message,
+		Event:         c.Event,
+		PushedAt:      c.PushedAt.UTC().Format(time.RFC3339),
+		DispatchError: c.DispatchError,
 	}
 }
 

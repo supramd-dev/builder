@@ -840,6 +840,24 @@ a.dash-full-graph:hover {
   color: var(--link-hover);
 }
 
+/* The graph column of a commit whose dispatch failed: a warning triangle in
+   place of the graph link — there is no graph to open. Hovering shows the
+   recorded message, clicking opens it in a dialog. */
+.dash-dispatch-error {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--danger);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.dash-dispatch-error:hover {
+  color: var(--link-hover);
+}
+
 /* Run detail: the one-paragraph conclusion reported by the worker. */
 .dash-run-summary {
   margin: 0 0 0.75rem 0;

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -45,7 +46,8 @@ type ManualDispatch struct {
 // code repository, entries are matched to enabled environments by tags and
 // one graph is created per entry. When the fetch or parse fails
 // (unreachable repo, bad YAML), the commit stays recorded but no tasks are
-// created; the error is surfaced to the caller.
+// created; the error is surfaced to the caller and stored on the commit row
+// (see recordDispatchOutcome).
 func (s *Service) DispatchForCommit(commit *store.Commit) DispatchResult {
 	return s.dispatchYAML(commit, store.TaskTriggerWebhook)
 }
@@ -97,6 +99,10 @@ func (s *Service) DispatchForRef(ctx context.Context, ref string) (store.Commit,
 // one graph per entry, with the given trigger source.
 func (s *Service) dispatchYAML(commit *store.Commit, trigger int) DispatchResult {
 	res := DispatchResult{}
+	// Whatever the outcome, it lands on the commit row: the dashboard has no
+	// other way to say why a commit's columns are empty, and a re-dispatch
+	// that succeeds must clear the message a previous attempt left.
+	defer s.recordDispatchOutcome(commit, &res)
 
 	cfg, err := s.Store.GetSiteConfig()
 	if err != nil {
@@ -142,12 +148,59 @@ func (s *Service) dispatchYAML(commit *store.Commit, trigger int) DispatchResult
 	return res
 }
 
+// recordDispatchOutcome stores the dispatch result on the commit row: the
+// error when one occurred, the reason when the yaml matched nothing, and an
+// empty message when graphs were created (clearing an earlier attempt's).
+// Storing is bookkeeping — a failure to store is logged, not returned: the
+// dispatch result already carries the real error, and losing the note must
+// not turn into a second failure.
+func (s *Service) recordDispatchOutcome(commit *store.Commit, res *DispatchResult) {
+	if commit == nil || commit.ID == 0 {
+		return
+	}
+	msg := ""
+	switch {
+	case res.Err != nil:
+		msg = res.Err.Error()
+	case res.TasksCreated == 0 && res.EntriesSkipped > 0:
+		// Not a failure — the yaml is fine — but it leaves the same empty
+		// cells, and "no entry matched" is the answer to "why?".
+		msg = fmt.Sprintf("md-builder.yaml: no entry matched an enabled environment "+
+			"(all %d %s skipped)", res.EntriesSkipped, plural(res.EntriesSkipped, "entry", "entries"))
+	}
+	if err := s.Store.SetCommitDispatchError(commit.ID, msg); err != nil {
+		log.Printf("runner: commit %d: record dispatch outcome: %v", commit.ID, err)
+		return
+	}
+	commit.DispatchError = msg
+}
+
+// plural picks the singular or plural form of a word for n.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
 // DispatchManual creates one task graph per requested environment for a
 // user-submitted test: the repository is resolved to a commit (recorded in
 // the commits table like a webhook push) and the manual stage commands are
 // stored as the entry snapshot. Roots are marked TaskTriggerManual. The
 // returned roots are ordered like the requested environments.
-func (s *Service) DispatchManual(in ManualDispatch) ([]*store.Task, error) {
+//
+// A failure part-way through (environment 3 of 4 disabled, a graph that
+// cannot be built) leaves the graphs already created and is recorded on the
+// commit row, like the yaml path's errors: the environments that got no
+// graph are exactly the ones the matrix cannot otherwise explain.
+func (s *Service) DispatchManual(in ManualDispatch) (roots []*store.Task, err error) {
+	// The commit is nil until one is recorded, so the failures before that
+	// (no repository, unresolvable ref) leave nothing to annotate.
+	var commit *store.Commit
+	defer func() {
+		s.recordDispatchOutcome(commit, &DispatchResult{Err: err, TasksCreated: len(roots)})
+	}()
+
 	cfg, err := s.Store.GetSiteConfig()
 	if err != nil {
 		return nil, err
@@ -174,7 +227,7 @@ func (s *Service) DispatchManual(in ManualDispatch) ([]*store.Task, error) {
 	// row, so re-running the same SHA shows each attempt. The message
 	// carries the time so same-SHA rows are distinguishable.
 	now := time.Now()
-	commit := &store.Commit{
+	commit = &store.Commit{
 		Repo:     store.RepoPath(repo),
 		SHA:      sha,
 		Ref:      strings.TrimSpace(in.Ref),
@@ -187,7 +240,7 @@ func (s *Service) DispatchManual(in ManualDispatch) ([]*store.Task, error) {
 		return nil, err
 	}
 
-	roots := make([]*store.Task, 0, len(in.EnvironmentIDs))
+	roots = make([]*store.Task, 0, len(in.EnvironmentIDs))
 	for _, envID := range in.EnvironmentIDs {
 		env, err := s.Store.GetEnvironmentAny(envID)
 		if err != nil {

@@ -404,7 +404,10 @@ the download endpoints stay the same either way.
 
 Invalid YAML fails dispatch: the push is recorded and
 `dispatchError` surfaces in the webhook response (see
-[Webhooks](#/docs/webhooks)), but no tasks are created.
+[Webhooks](#/docs/webhooks)), but no tasks are created. The same message
+is stored on the commit row, so the dashboard shows it in the commit's
+**graph** column (a warning triangle: hover or click for the text) —
+which is also what an entry matching no enabled environment reports.
 
 ## What the runner does
 
