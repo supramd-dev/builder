@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -48,6 +49,15 @@ type codeHost struct {
 	// TokenScheme prefixes the token inside TokenHeader ("Bearer"); empty
 	// means the header holds the bare token.
 	TokenScheme string
+
+	// MissingMarker is the text the platform puts in a 404 body when the file
+	// is not in the repository, as opposed to a project the token cannot see.
+	// A 404 carrying it is the one failure with nothing for a clone to find, so
+	// the fallback is skipped. A platform that does not distinguish the two
+	// leaves this empty and always falls back — which is also what happens if
+	// the platform ever rewords it, so a wrong marker costs a clone, never a
+	// wrong answer.
+	MissingMarker string
 }
 
 // codeHosts is the platform table. Only the platforms actually verified to
@@ -65,6 +75,9 @@ var codeHosts = map[string]codeHost{
 		// scope on top of it.
 		URLTemplate: "{base}/api/v4/projects/{project}/repository/files/{path}/raw?ref={ref}",
 		TokenHeader: "PRIVATE-TOKEN",
+		// "404 File Not Found" is GitLab's word for a missing file; a project
+		// the token cannot read answers "404 Project Not Found" instead.
+		MissingMarker: "404 File Not Found",
 	},
 }
 
@@ -167,6 +180,13 @@ func fileClient() *http.Client {
 	}
 }
 
+// errFileAbsent marks the one failure that needs no fallback: the code host
+// says, in its own words, that the file is not in the repository at that ref.
+// A clone would spend seconds reaching the same conclusion — and this is the
+// most common dispatch failure there is, since it is what every push to a
+// repository whose md-builder.yaml is not committed yet runs into.
+var errFileAbsent = errors.New("file absent from the repository")
+
 // newYAMLFetcher composes the two paths, with the client and the fallback
 // injected so tests can see which one ran.
 func newYAMLFetcher(client *http.Client, fallback YAMLFetcher) YAMLFetcher {
@@ -175,9 +195,13 @@ func newYAMLFetcher(client *http.Client, fallback YAMLFetcher) YAMLFetcher {
 		if err == nil {
 			return content, nil
 		}
-		// The fallback answers for the file too: a clone reports "file not
-		// found at this commit" precisely, where a failed HTTP route often
-		// cannot say whether the project or the file was the problem.
+		if errors.Is(err, errFileAbsent) {
+			return nil, fileNotFoundErr(sha, codeRepoURL)
+		}
+		// Everything else — an unreadable project, a host that answers with a
+		// sign-in page, a location the template cannot be built from — is
+		// handed to the clone, which sees the repository itself and so reports
+		// the real reason.
 		log.Printf("runner: yaml fetch: %v — falling back to a full clone", err)
 		return fallback(ctx, codeRepoURL, sha, creds)
 	}
@@ -213,10 +237,14 @@ func fetchFile(ctx context.Context, client *http.Client, codeRepoURL, ref string
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		// GitLab's API names the reason in the body ("404 File Not Found" vs
-		// "404 Project Not Found"), which a bare status cannot — and that
-		// distinction is exactly what an operator needs.
-		return nil, redactErr(fmt.Errorf("%s file %s: %s%s", h.Name, u, resp.Status, bodyHint(resp.Body)), creds.Token())
+		body, _ := readCapped(resp.Body, maxErrorBytes)
+		if resp.StatusCode == http.StatusNotFound && h.MissingMarker != "" &&
+			strings.Contains(string(body), h.MissingMarker) {
+			return nil, fmt.Errorf("%w (%s says %q)", errFileAbsent, h.Name, h.MissingMarker)
+		}
+		// Otherwise the body still earns its place in the log: GitLab names the
+		// reason there ("404 Project Not Found"), which a bare status cannot.
+		return nil, redactErr(fmt.Errorf("%s file %s: %s%s", h.Name, u, resp.Status, bodyHint(body)), creds.Token())
 	}
 	// A 200 that is not the file is the trap this route sets: when the token
 	// is not accepted, the host redirects to its sign-in page and the client
@@ -243,12 +271,15 @@ func isHTML(contentType string) bool {
 	return ct == "text/html" || ct == "application/xhtml+xml"
 }
 
+// maxErrorBytes caps how much of an error body is read: enough for a platform's
+// message, not enough for an error page.
+const maxErrorBytes = 512
+
 // bodyHint returns the platform's short error message for the log, collapsed
 // to one line and capped: it is remote text and must not be able to fill the
 // log with a page of HTML.
-func bodyHint(r io.Reader) string {
-	b, err := io.ReadAll(io.LimitReader(r, 200))
-	if err != nil || len(b) == 0 {
+func bodyHint(b []byte) string {
+	if len(b) == 0 {
 		return ""
 	}
 	return " — " + strings.Join(strings.Fields(string(b)), " ")

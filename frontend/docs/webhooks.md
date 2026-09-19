@@ -69,13 +69,19 @@ PRIVATE-TOKEN: <the Project Access Token>
 One small request, the same cost whether the repository holds ten commits
 or a hundred thousand.
 
-When that route cannot serve the file the server logs why and falls back
-to a full clone, which is slower and *can* exceed the ten seconds:
+When the file is not there at that commit — the usual case, when the YAML
+has not been committed yet — the host says so, the dispatch ends with
+`file not found — commit the md-builder.yaml to the repository root`, and
+nothing else runs. That failure is the common one, so it is the one worth
+keeping cheap.
 
-- the file is not there at that commit — the usual case, when the YAML has
-  not been committed yet;
+Anything else the server cannot settle over that route falls back to a full
+clone, which is slower and *can* exceed the ten seconds:
+
 - the project is not readable with the configured token;
-- the repository location has no usable https form (a bare `group/code`).
+- the repository location has no usable https form (a bare `group/code`);
+- the host answered with a page rather than the file (a sign-in redirect,
+  say) — the server refuses to hand that to the YAML parser.
 
 Nothing is lost either way: the commit is recorded before the fetch
 starts, so the dashboard column appears immediately and its cells fill in

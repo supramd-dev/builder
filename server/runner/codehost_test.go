@@ -100,11 +100,13 @@ func TestFileFetchFallsBackOnFailure(t *testing.T) {
 		status int
 		body   string
 	}{
-		{"not found", http.StatusNotFound, `{"message":"404 File Not Found"}`},
 		{"unauthorized", http.StatusUnauthorized, `{"message":"401 Unauthorized"}`},
 		{"forbidden", http.StatusForbidden, `{"error":"insufficient_scope"}`},
 		{"server error", http.StatusInternalServerError, "boom"},
 		{"bad gateway", http.StatusBadGateway, "boom"},
+		// A 404 that does NOT name the file: the project is what is
+		// unreadable, and the clone is the only thing that can say so.
+		{"project not found", http.StatusNotFound, `{"message":"404 Project Not Found"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,11 +215,12 @@ func TestFileFetchFallsBackOnUnusableRepoURL(t *testing.T) {
 }
 
 // The fallback is silent to the caller but not to the operator: the log has to
-// say why a dispatch was slow — and the token must not be in it.
+// say why a dispatch was slow — and the token must not be in it. (The body here
+// is the *non*-definitive 404, since a missing file never reaches the log.)
 func TestFileFetchLogsFallbackWithoutToken(t *testing.T) {
 	fetch, repo, _, _ := newFileFetchFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"message":"404 File Not Found"}`))
+		_, _ = w.Write([]byte(`{"message":"404 Project Not Found"}`))
 	})
 
 	var buf bytes.Buffer
@@ -235,9 +238,9 @@ func TestFileFetchLogsFallbackWithoutToken(t *testing.T) {
 	if !strings.Contains(out, "404") {
 		t.Errorf("log = %q, want the status that caused it", out)
 	}
-	// GitLab's own wording is worth keeping: it separates a missing file from
-	// an unreadable project, which the status alone does not.
-	if !strings.Contains(out, "404 File Not Found") {
+	// GitLab's own wording is worth keeping: it separates an unreadable project
+	// from a missing file, which the status alone does not.
+	if !strings.Contains(out, "404 Project Not Found") {
 		t.Errorf("log = %q, want the host's message", out)
 	}
 	if strings.Contains(out, "glpat-secret") {
@@ -313,5 +316,81 @@ func TestFileURL(t *testing.T) {
 				t.Fatalf("url = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// The most common dispatch failure of all — a push to a repository whose
+// md-builder.yaml is not committed yet — must not pay for a clone. The code
+// host says which of the two 404s this is, and a clone would spend seconds
+// reaching the same conclusion.
+func TestFileFetchMissingFileSkipsClone(t *testing.T) {
+	fetch, repo, fallbackCalls, _ := newFileFetchFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"404 File Not Found"}`))
+	})
+
+	_, err := fetch(context.Background(), repo, "abc", &GitCredentials{AccessToken: "glpat-secret"})
+	if err == nil {
+		t.Fatal("fetch: want an error")
+	}
+	if *fallbackCalls != 0 {
+		t.Fatalf("clone fallback ran %d time(s); a missing file needs no clone", *fallbackCalls)
+	}
+	// The message is the one the clone used to produce, verbatim: the
+	// dashboard shows it, and it has to stay as actionable as it was.
+	for _, want := range []string{"abc:" + YAMLPath, "file not found", "commit the md-builder.yaml", repo} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+// The other 404 is not definitive, and must still reach the clone: a project
+// the token cannot read is not a missing file, and only the clone can tell an
+// operator which of the two they are looking at.
+func TestFileFetchUnreadableProjectStillClones(t *testing.T) {
+	fetch, repo, fallbackCalls, _ := newFileFetchFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"404 Project Not Found"}`))
+	})
+
+	content, err := fetch(context.Background(), repo, "abc", &GitCredentials{AccessToken: "glpat-secret"})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if string(content) != "from clone" {
+		t.Fatalf("content = %q, want the clone's", content)
+	}
+	if *fallbackCalls != 1 {
+		t.Fatalf("clone fallback ran %d time(s), want 1", *fallbackCalls)
+	}
+}
+
+// A platform that does not distinguish the two 404s — MissingMarker unset —
+// must keep falling back. This is also what a reworded marker degrades to, and
+// the reason a wrong marker can only ever cost a clone, never a wrong verdict.
+func TestFileFetchWithoutMissingMarkerAlwaysClones(t *testing.T) {
+	// Tests in this package do not run in parallel, so blanking the table entry
+	// for the duration of the test is safe.
+	original := codeHosts["gitlab"]
+	blanked := original
+	blanked.MissingMarker = ""
+	codeHosts["gitlab"] = blanked
+	t.Cleanup(func() { codeHosts["gitlab"] = original })
+
+	fetch, repo, fallbackCalls, _ := newFileFetchFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"404 File Not Found"}`))
+	})
+
+	content, err := fetch(context.Background(), repo, "abc", nil)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if string(content) != "from clone" {
+		t.Fatalf("content = %q, want the clone's", content)
+	}
+	if *fallbackCalls != 1 {
+		t.Fatalf("clone fallback ran %d time(s), want 1", *fallbackCalls)
 	}
 }

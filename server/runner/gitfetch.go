@@ -21,6 +21,15 @@ type YAMLFetcher func(ctx context.Context, codeRepoURL, sha string, creds *GitCr
 // YAMLPath is the test-matrix file read from the code repository.
 const YAMLPath = "md-builder.yaml"
 
+// fileNotFoundErr is what both fetch paths report when md-builder.yaml is not
+// in the repository at that commit. It is the most common dispatch failure —
+// every push before the yaml is committed runs into it — so it is spelled out
+// for the dashboard, and shared so the two paths cannot drift apart.
+func fileNotFoundErr(sha, codeRepoURL string) error {
+	return fmt.Errorf("%s:%s: file not found — commit the md-builder.yaml to the repository root (site config code repo %s)",
+		sha, YAMLPath, codeRepoURL)
+}
+
 // GitYAMLFetcher fetches md-builder.yaml at the given commit of the code
 // repository: a full but checkout-less clone into a temp directory (the
 // pushed commit is not necessarily the remote HEAD, so the history must be
@@ -67,9 +76,7 @@ func GitYAMLFetcher(ctx context.Context, codeRepoURL, sha string, creds *GitCred
 	entry, err := tree.File(YAMLPath)
 	if err != nil {
 		if errors.Is(err, object.ErrFileNotFound) {
-			// The most common dispatch failure: the yaml is simply absent at
-			// that commit. Spell out where it was looked for and what to do.
-			return nil, fmt.Errorf("%s:%s: file not found — commit the md-builder.yaml to the repository root (site config code repo %s)", sha, YAMLPath, codeRepoURL)
+			return nil, fileNotFoundErr(sha, codeRepoURL)
 		}
 		return nil, fmt.Errorf("%s:%s: %w", sha, YAMLPath, err)
 	}
