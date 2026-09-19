@@ -94,10 +94,7 @@ func TestWebhookDispatchesTasks(t *testing.T) {
 	seedDispatchEnv(t, s, "disabled-node", "cpu,mpi", false) // not eligible
 
 	post := func(body string) map[string]any {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab", strings.NewReader(body))
-		req.Header.Set("X-Gitlab-Event", "Push Hook")
-		mux.ServeHTTP(rec, req)
+		rec := postWebhook(t, mux, s, body, "X-Gitlab-Event", "Push Hook")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("webhook: expected 200, got %d, body %s", rec.Code, rec.Body.String())
 		}
@@ -178,11 +175,7 @@ func TestWebhookDispatchErrorSurfaces(t *testing.T) {
 	}
 	seedDispatchEnv(t, s, "cpu-node2", "cpu", true)
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab",
-		strings.NewReader(pushBody("group/code", "abc")))
-	req.Header.Set("X-Gitlab-Event", "Push Hook")
-	mux.ServeHTTP(rec, req)
+	rec := postWebhook(t, mux, s, pushBody("group/code", "abc"), "X-Gitlab-Event", "Push Hook")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("webhook should stay 200, got %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -748,7 +741,7 @@ func TestManualTrigger(t *testing.T) {
 	if _, err := s.GetOrCreateCommit(commitWH); err != nil {
 		t.Fatal(err)
 	}
-	rec = authed(http.MethodPost, "/api/webhooks/gitlab", pushBody("group/code", "ffff01"))
+	rec = postWebhook(t, mux, s, pushBody("group/code", "ffff01"), "X-Gitlab-Event", "Push Hook")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("webhook: %d %s", rec.Code, rec.Body.String())
 	}

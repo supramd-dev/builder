@@ -9,10 +9,14 @@
 #
 # Environment variables:
 #   BASE_URL   server base URL          (default http://localhost:8080)
-#   USERNAME   test user                (default smoke-user)
+#   USERNAME   test user                (default smoke-user; created as an
+#              administrator, see §1 and §8)
 #   PASSWORD   test user password       (default smoke-pass-123)
 #   EMAIL      test user email          (default smoke@example.com)
 #   SKIP_SETUP set to 1 to skip user creation (user must already exist)
+#   WEBHOOK_TOKEN  the site's webhook secret, for runs against an account
+#              that is not an administrator (it is read from
+#              /api/site-config otherwise; see §8)
 #   MD_BUILDER_BIN prebuilt server binary for adduser (default: go run)
 #   DSN        SQLite/Postgres DSN the server uses, for user creation.
 #              Must match the DATABASE THE RUNNING SERVER IS ON, or every
@@ -96,7 +100,11 @@ if [ "${SKIP_SETUP:-0}" != "1" ]; then
   # The server module lives in server/; -dsn pins the same database the
   # running server uses (relative DSNs resolve against the CWD), so adduser
   # needs no config file here.
-  if ! (cd "$ROOT/server" && "${ADDUSER[@]}" -dsn "$DSN" \
+  #
+  # -admin: the webhook checks in §8 need the site's webhook token, which
+  # the server only shows to an administrator (pass WEBHOOK_TOKEN to run
+  # against a regular account instead).
+  if ! (cd "$ROOT/server" && "${ADDUSER[@]}" -dsn "$DSN" -admin \
       -username "$USERNAME" -email "$EMAIL" -password "$PASSWORD") >/dev/null 2>&1; then
     # "already exists" is fine — the user may be left over from a previous run.
     echo "note: adduser failed; assuming user $USERNAME already exists" >&2
@@ -327,11 +335,39 @@ check "config re-read persists" \
 # ---------------------------------------------------------------------------
 echo "== gitlab webhook =="
 
+# The endpoint authenticates with X-Gitlab-Token, and the token is only
+# shown to an administrator — which is why §1 creates the smoke user as one.
+# Pass WEBHOOK_TOKEN (Settings → Webhook) to run against a regular account.
+WEBHOOK_TOKEN="${WEBHOOK_TOKEN:-$(req GET /api/site-config | head -n1 | jq -r '.webhookToken // ""')}"
+if [ -z "$WEBHOOK_TOKEN" ]; then
+  # Everything below builds on the commit this push records, so a skip is
+  # not an option: stop with the reason instead of failing ten checks later.
+  echo "error: no webhook token. $USERNAME is not an administrator, so the" >&2
+  echo "       server does not show it to them; the dashboard checks below" >&2
+  echo "       need the commit this section pushes. Run as an administrator," >&2
+  echo "       or pass WEBHOOK_TOKEN=<token from Settings → Webhook>." >&2
+  exit 1
+fi
+
+# An event without the token is rejected before its payload is parsed.
+body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -H 'X-Gitlab-Event: Push Hook' \
+  -d '{"object_kind":"push","project":{"path_with_namespace":"group/code"}}' \
+  "$BASE_URL/api/webhooks/gitlab")
+check "webhook without token 401" "$(tail -n1 <<<"$body_code")" "401"
+
+body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -H 'X-Gitlab-Token: wrong-token' \
+  -d '{"object_kind":"push","project":{"path_with_namespace":"group/code"}}' \
+  "$BASE_URL/api/webhooks/gitlab")
+check "webhook wrong token 401" "$(tail -n1 <<<"$body_code")" "401"
+
 # NOTE: the project path matches the site-config codeRepo above
 # (group/code) so the push shows up as a dashboard column under the
 # repository filter.
 body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
   -H 'X-Gitlab-Event: Push Hook' \
+  -H "X-Gitlab-Token: $WEBHOOK_TOKEN" \
   -d '{"object_kind":"push","project":{"path_with_namespace":"group/code"},"ref":"refs/heads/main","after":"abc123","user_name":"smoke","commits":[{"id":"abc123","message":"smoke push"}]}' \
   "$BASE_URL/api/webhooks/gitlab")
 check "webhook push 200" "$(tail -n1 <<<"$body_code")" "200"
@@ -346,6 +382,7 @@ COMMIT_ID=$(head -n1 <<<"$body_code" | jq -r .commitId)
 # A repeat of the same push is idempotent (same commit, created=false).
 body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
   -H 'X-Gitlab-Event: Push Hook' \
+  -H "X-Gitlab-Token: $WEBHOOK_TOKEN" \
   -d '{"object_kind":"push","project":{"path_with_namespace":"group/code"},"ref":"refs/heads/main","after":"abc123","user_name":"smoke","commits":[{"id":"abc123","message":"smoke push"}]}' \
   "$BASE_URL/api/webhooks/gitlab")
 check "webhook repeat created=false" \
@@ -354,11 +391,13 @@ check "webhook repeat same commitId" \
   "$(head -n1 <<<"$body_code" | jq -r .commitId)" "$COMMIT_ID"
 
 body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -H "X-Gitlab-Token: $WEBHOOK_TOKEN" \
   -d '{"object_kind":"pipeline"}' "$BASE_URL/api/webhooks/gitlab")
 check "webhook other event ignored" \
   "$(head -n1 <<<"$body_code" | jq -r .status)" "ignored"
 
 body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -H "X-Gitlab-Token: $WEBHOOK_TOKEN" \
   -d '{not-json' "$BASE_URL/api/webhooks/gitlab")
 check "webhook bad json 400" "$(tail -n1 <<<"$body_code")" "400"
 
@@ -372,10 +411,30 @@ check "webhook GET 405" "$(tail -n1 <<<"$body_code")" "405"
 # include the dispatch error (idempotent).
 body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
   -H 'X-Gitlab-Event: Push Hook' \
+  -H "X-Gitlab-Token: $WEBHOOK_TOKEN" \
   -d '{"object_kind":"push","project":{"path_with_namespace":"group/code"},"ref":"refs/heads/main","after":"abc123","user_name":"smoke","commits":[{"id":"abc123","message":"smoke push"}]}' \
   "$BASE_URL/api/webhooks/gitlab")
 check "webhook dispatch error surfaced" \
   "$(head -n1 <<<"$body_code" | jq 'has("dispatchError")')" "true"
+
+# Rotating the webhook secret (administrators only; the smoke user is one)
+# issues a new value and retires the old one on the spot. This runs last so
+# the checks above keep using the token the site started with.
+body_code=$(req POST /api/site-config/webhook-token)
+check "webhook token rotate 200" "$(tail -n1 <<<"$body_code")" "200"
+ROTATED_TOKEN=$(head -n1 <<<"$body_code" | jq -r .webhookToken)
+check "webhook token rotated" \
+  "$([ -n "$ROTATED_TOKEN" ] && [ "$ROTATED_TOKEN" != "$WEBHOOK_TOKEN" ] && echo changed)" "changed"
+
+body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -H "X-Gitlab-Token: $WEBHOOK_TOKEN" \
+  -d '{"object_kind":"pipeline"}' "$BASE_URL/api/webhooks/gitlab")
+check "old token retired 401" "$(tail -n1 <<<"$body_code")" "401"
+
+body_code=$(curl -s -w '\n%{http_code}' -H 'Content-Type: application/json' \
+  -H "X-Gitlab-Token: $ROTATED_TOKEN" \
+  -d '{"object_kind":"pipeline"}' "$BASE_URL/api/webhooks/gitlab")
+check "rotated token accepted 200" "$(tail -n1 <<<"$body_code")" "200"
 
 # ---------------------------------------------------------------------------
 # 8b. Test dashboard: result reporting, matrix, run detail
@@ -409,7 +468,7 @@ check "report derives counts" "$(jq -r '"\(.passed)/\(.total)"' <<<"$body")" "1/
 body_code=$(req POST /api/test-runs "$(jq -n --argjson env "$ENV_ID" --argjson commit "$COMMIT_ID" '{environmentId: $env, commitId: $commit, kind: "perf"}')")
 check "report bad kind 400" "$(tail -n1 <<<"$body_code")" "400"
 
-body_code=$(req POST /api/test-runs "$(jq -n --argjson env "$ENV_ID" --argjson commit "$COMMIT_ID" '{environmentId: $env, commitId: $commit, kind: "regression", cases: [{name: "a", status: "skipped"}]}')")
+body_code=$(req POST /api/test-runs "$(jq -n --argjson env "$ENV_ID" --argjson commit "$COMMIT_ID" '{environmentId: $env, commitId: $commit, kind: "regression", cases: [{name: "a", status: "bogus"}]}')")
 check "report bad case status 400" "$(tail -n1 <<<"$body_code")" "400"
 
 body_code=$(req POST /api/test-runs '{"environmentId":1,"kind":"regression"}')
@@ -491,7 +550,10 @@ body="$(head -n1 <<<"$body_code")"
 check "detail environment name" "$(jq -r .environmentName <<<"$body")" "smoke-node-2"
 check "detail commit shortSha" "$(jq -r .commitShortSha <<<"$body")" "abc123"
 check "detail case count" "$(jq '.cases | length' <<<"$body")" "2"
-check "detail case error value" "$(jq -r '.cases[0].errorValue == 1.2e-07' <<<"$body")" "true"
+# The reported case details come back in the case list (the runner keeps
+# name/status/message/duration; a numeric error value is the reporter's own
+# business and is not part of the API).
+check "detail case message" "$(jq -r '.cases[0].message' <<<"$body")" "max rel err"
 
 body_code=$(req GET /api/test-runs/9999)
 check "run detail unknown 404" "$(tail -n1 <<<"$body_code")" "404"

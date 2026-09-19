@@ -233,7 +233,7 @@ func TestSiteConfigAccessToken(t *testing.T) {
 }
 
 func TestGitLabWebhook(t *testing.T) {
-	apiServer, _ := newTestServer(t)
+	apiServer, s := newTestServer(t)
 
 	mux := http.NewServeMux()
 	apiServer.Register(mux)
@@ -247,6 +247,9 @@ func TestGitLabWebhook(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		return rec
 	}
+	authedPost := func(body string) *httptest.ResponseRecorder {
+		return postWebhook(t, mux, s, body, "X-Gitlab-Event", "Push Hook")
+	}
 
 	// Non-POST is rejected.
 	rec := httptest.NewRecorder()
@@ -255,8 +258,41 @@ func TestGitLabWebhook(t *testing.T) {
 		t.Fatalf("GET webhook: expected 405, got %d", rec.Code)
 	}
 
-	// Malformed JSON is rejected.
-	rec = post(nil, `{not-json`)
+	// The token is generated with the site config, so it is there from the
+	// first event onward.
+	cfg, err := s.GetSiteConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WebhookToken == "" {
+		t.Fatal("webhook token should be generated with the site config")
+	}
+
+	// No token at all, and a wrong one: both rejected before the body is
+	// even parsed (the payload here is valid, so a 400 would mean the order
+	// is wrong).
+	for _, tc := range []struct {
+		name   string
+		header map[string]string
+	}{
+		{"missing", nil},
+		{"empty", map[string]string{"X-Gitlab-Token": ""}},
+		{"wrong", map[string]string{"X-Gitlab-Token": cfg.WebhookToken + "x"}},
+		{"prefix", map[string]string{"X-Gitlab-Token": cfg.WebhookToken[:8]}},
+		{"secret-token-is-not-the-webhook-token", map[string]string{"X-Gitlab-Token": "MD_SECRET_TOKEN"}},
+	} {
+		rec = post(tc.header, `{"object_kind": "push", "project": {"path_with_namespace": "group/md-code"}}`)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s token: expected 401, got %d, body %s", tc.name, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), cfg.WebhookToken) {
+			t.Fatalf("%s token: the token leaked in the response: %s", tc.name, rec.Body.String())
+		}
+	}
+
+	// Malformed JSON is rejected (with a valid token, so the parser is what
+	// rejects it).
+	rec = authedPost(`{not-json`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad payload: expected 400, got %d", rec.Code)
 	}
@@ -271,7 +307,7 @@ func TestGitLabWebhook(t *testing.T) {
 		"user_name": "alice",
 		"commits": [{"id": "9c8b7a6d5e4f", "message": "Fix integrator drift\n\nLonger body."}]
 	}`
-	rec = post(map[string]string{"X-Gitlab-Event": "Push Hook"}, push)
+	rec = authedPost(push)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("push webhook: expected 200, got %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -306,7 +342,7 @@ func TestGitLabWebhook(t *testing.T) {
 	}
 
 	// The same push again is idempotent: same commit, created=false.
-	rec = post(map[string]string{"X-Gitlab-Event": "Push Hook"}, push)
+	rec = authedPost(push)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("repeat push: expected 200, got %d", rec.Code)
 	}
@@ -321,8 +357,7 @@ func TestGitLabWebhook(t *testing.T) {
 	}
 
 	// Other event kinds are accepted but marked ignored.
-	rec = post(map[string]string{"X-Gitlab-Event": "Pipeline Hook"},
-		`{"object_kind":"pipeline"}`)
+	rec = postWebhook(t, mux, s, `{"object_kind":"pipeline"}`, "X-Gitlab-Event", "Pipeline Hook")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pipeline webhook: expected 200, got %d", rec.Code)
 	}
@@ -431,5 +466,129 @@ func TestSiteConfigSecretToken(t *testing.T) {
 	}
 	if stored.SecretToken != "tok" {
 		t.Fatalf("stored secret wrong: %q", stored.SecretToken)
+	}
+}
+
+// TestSiteConfigWebhookToken covers the webhook secret: generated together
+// with the site config, readable and rotatable by administrators only, kept
+// apart from the secret token, and enforced by the webhook endpoint.
+func TestSiteConfigWebhookToken(t *testing.T) {
+	f := newUserFixture(t)
+	adminCookie := f.login(t, "root", "root-pass")
+	userCookie := f.login(t, "alice", "alice-pass")
+
+	read := func(cookie *http.Cookie) map[string]any {
+		t.Helper()
+		rec := doJSON(t, f.mux, http.MethodGet, "/api/site-config", "", cookie)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get site config: %d, body %s", rec.Code, rec.Body.String())
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+			t.Fatalf("decode site config: %v", err)
+		}
+		return cfg
+	}
+
+	// The administrator is shown the generated token; a regular user only
+	// learns the rest of the configuration.
+	adminCfg := read(adminCookie)
+	token, _ := adminCfg["webhookToken"].(string)
+	if len(token) != 64 {
+		t.Fatalf("expected a 64-char generated webhook token, got %q", token)
+	}
+	userCfg := read(userCookie)
+	if v, ok := userCfg["webhookToken"]; ok && v != "" {
+		t.Fatalf("the webhook token must not reach a regular user: %v", v)
+	}
+	// The secret token stays write-only for everyone: the two are separate
+	// secrets and only one of them is readable.
+	if v, ok := userCfg["secretToken"]; ok && v != "" {
+		t.Fatalf("the secret token must stay write-only: %v", v)
+	}
+	if adminCfg["secretToken"] != nil {
+		t.Fatalf("the secret token must stay write-only for administrators too: %v", adminCfg["secretToken"])
+	}
+
+	// Stable across reads: it is generated once, not per request.
+	if again, _ := read(adminCookie)["webhookToken"].(string); again != token {
+		t.Fatalf("webhook token changed between reads: %q -> %q", token, again)
+	}
+
+	// A regular user cannot rotate it — and cannot reach the endpoint at
+	// all (requireAdmin rejects before the handler runs).
+	rec := doJSON(t, f.mux, http.MethodPost, "/api/site-config/webhook-token", "", userCookie)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("regular user rotate: expected 403, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, f.mux, http.MethodPost, "/api/site-config/webhook-token", "", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous rotate: expected 401, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, f.mux, http.MethodGet, "/api/site-config/webhook-token", "", adminCookie)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET rotate: expected 405, got %d", rec.Code)
+	}
+	if after, _ := read(adminCookie)["webhookToken"].(string); after != token {
+		t.Fatalf("denied rotation still changed the token: %q", after)
+	}
+
+	// The endpoint enforces the stored token before anything else.
+	post := func(tok string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab",
+			strings.NewReader(`{"object_kind":"pipeline"}`))
+		req.Header.Set("X-Gitlab-Token", tok)
+		rec := httptest.NewRecorder()
+		f.mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := post(token); code != http.StatusOK {
+		t.Fatalf("webhook with the current token: expected 200, got %d", code)
+	}
+	if code := post("nope"); code != http.StatusUnauthorized {
+		t.Fatalf("webhook with a wrong token: expected 401, got %d", code)
+	}
+
+	// An administrator rotates it: the response carries the new value, the
+	// old one stops working, the new one works.
+	rec = doJSON(t, f.mux, http.MethodPost, "/api/site-config/webhook-token", "", adminCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotate: %d, body %s", rec.Code, rec.Body.String())
+	}
+	var rotated struct {
+		WebhookToken string `json:"webhookToken"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rotated); err != nil {
+		t.Fatal(err)
+	}
+	if rotated.WebhookToken == token || len(rotated.WebhookToken) != 64 {
+		t.Fatalf("rotation should produce a fresh token, got %q", rotated.WebhookToken)
+	}
+	stored, err := f.store.GetSiteConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.WebhookToken != rotated.WebhookToken {
+		t.Fatalf("rotated token not persisted: %q != %q", stored.WebhookToken, rotated.WebhookToken)
+	}
+	if code := post(token); code != http.StatusUnauthorized {
+		t.Fatalf("the old token should be rejected after rotation, got %d", code)
+	}
+	if code := post(rotated.WebhookToken); code != http.StatusOK {
+		t.Fatalf("the new token should be accepted, got %d", code)
+	}
+
+	// A plain config update keeps the token.
+	rec = doJSON(t, f.mux, http.MethodPut, "/api/site-config",
+		`{"codeRepo":"https://gitlab.com/group/other"}`, adminCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plain update: %d", rec.Code)
+	}
+	cfg := read(adminCookie)
+	if cfg["webhookToken"] != rotated.WebhookToken {
+		t.Fatalf("a plain update rotated the token: %v", cfg["webhookToken"])
+	}
+	if cfg["codeRepo"] != "https://gitlab.com/group/other" {
+		t.Fatalf("code repo not updated: %v", cfg["codeRepo"])
 	}
 }

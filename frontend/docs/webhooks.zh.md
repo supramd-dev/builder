@@ -7,8 +7,15 @@ POST https://your-server/api/webhooks/gitlab
 ```
 
 并勾选 **Push events**、**Tag push events** 和 **Merge request events**
-触发器。该端点无需认证(由 GitLab 服务器调用);一旦配置了密钥,
-请通过 `X-Gitlab-Token` 请求头校验。
+触发器。
+
+该端点无法使用会话 cookie(调用方是 GitLab 服务器),因此用站点的
+webhook 密钥认证:把 Settings → Webhook 里 **Secret token** 的值复制到
+GitLab webhook 自己的 **Secret token** 字段。之后 GitLab 会在每个事件
+里通过 `X-Gitlab-Token` 请求头带回该值,缺失或错误的请求会在解析
+请求体之前就被拒绝(401)。这个密钥随站点配置一起生成,全新安装时
+就已经存在;万一泄露,可在同一个标签页里重新生成。见
+[站点配置 → Webhook 密钥](#/docs/site-configuration)。
 
 ## 一个事件会发生什么
 

@@ -13,6 +13,27 @@ import (
 	"md-builder/server/store"
 )
 
+// postWebhook sends a GitLab event the way GitLab does: with the site's
+// current webhook token in X-Gitlab-Token. Extra headers are passed as
+// key/value pairs. The token is read from the store on every call, so a test
+// that has just rotated it (or saved a config without one, which the store
+// heals on load) still sends the value the server expects.
+func postWebhook(t *testing.T, mux *http.ServeMux, s *store.Store, body string, headers ...string) *httptest.ResponseRecorder {
+	t.Helper()
+	cfg, err := s.GetSiteConfig()
+	if err != nil {
+		t.Fatalf("load site config: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab", strings.NewReader(body))
+	req.Header.Set("X-Gitlab-Token", cfg.WebhookToken)
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
 // TestWebhookEventKinds walks the webhook chain for each GitLab event type:
 // push, tag push and merge request events are recorded as commits with the
 // matching event kind, and dispatched to task graphs when the project is the
@@ -30,10 +51,7 @@ func TestWebhookEventKinds(t *testing.T) {
 
 	post := func(t *testing.T, body string) map[string]any {
 		t.Helper()
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab", strings.NewReader(body))
-		req.Header.Set("X-Gitlab-Event", "Push Hook")
-		mux.ServeHTTP(rec, req)
+		rec := postWebhook(t, mux, s, body, "X-Gitlab-Event", "Push Hook")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("webhook: expected 200, got %d, body %s", rec.Code, rec.Body.String())
 		}

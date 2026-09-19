@@ -145,6 +145,14 @@ characters long — `adduser` and the account API apply the same rules. See
 [Site configuration](frontend/docs/site-configuration.md) for what the panel
 does.
 
+The GitLab webhook cannot use a session, so it is authenticated by a
+**webhook secret** instead: generated with the site configuration, shown in
+**Settings → Webhook** (administrators only, rotatable there), and echoed
+back by GitLab in the `X-Gitlab-Token` header. Events without it are
+rejected with 401. It is deliberately not the same secret as the
+`MD_SECRET_TOKEN` handed to build commands — that one is write-only and
+travels the other way. See [Webhooks](frontend/docs/webhooks.md).
+
 The DSN is the `database.dsn` key of the server config file, defaulting to a
 local SQLite file `md-builder.db`; the `MD_BUILDER_DSN` environment variable
 overrides both (SQLite — pure-Go driver, no CGO — and PostgreSQL are

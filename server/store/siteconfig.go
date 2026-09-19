@@ -1,6 +1,11 @@
 package store
 
-import "time"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"strings"
+	"time"
+)
 
 // SiteConfig holds the site-wide repository configuration. There is exactly
 // one row (ID = 1); every logged-in user may read it, and updates replace
@@ -41,34 +46,88 @@ type SiteConfig struct {
 	// variable is unset).
 	SecretToken string
 
+	// WebhookToken is the shared secret the webhook endpoint verifies: GitLab
+	// must echo it back in the X-Gitlab-Token header, and an event without a
+	// matching token is rejected. It is deliberately separate from
+	// SecretToken, which travels the other way — SecretToken is handed to the
+	// build scripts as MD_SECRET_TOKEN, this one only authenticates inbound
+	// webhook calls and is never exported to a stage command.
+	//
+	// Unlike the two tokens above it is readable through the API (to
+	// administrators), because the administrator has to copy it into the
+	// GitLab webhook form. GetSiteConfig generates one whenever the row has
+	// none, so it is set from the moment the site config first exists.
+	WebhookToken string
+
 	UpdatedAt time.Time
 }
 
+// NewWebhookToken returns a fresh webhook shared secret (32 random bytes as
+// hex). It is a separate helper from auth.NewToken so this package does not
+// depend on the auth layer: a session token and a webhook token are the same
+// shape but unrelated.
+func NewWebhookToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // GetSiteConfig loads the singleton configuration row, creating a default
-// one when it does not exist yet.
+// one when it does not exist yet. A row without a webhook token (a fresh
+// install, or one written before the column existed) gets one here, so the
+// webhook endpoint always has something to verify against.
 func (s *Store) GetSiteConfig() (*SiteConfig, error) {
 	var cfg SiteConfig
 	err := s.DB.First(&cfg, 1).Error
 	if err == nil {
-		return &cfg, nil
+		return s.ensureWebhookToken(&cfg)
 	}
 	if err.Error() != "record not found" {
 		return nil, err
 	}
-	// First access: create the empty default row.
-	cfg = SiteConfig{ID: 1}
+	// First access: create the default row, webhook token included.
+	token, err := NewWebhookToken()
+	if err != nil {
+		return nil, err
+	}
+	cfg = SiteConfig{ID: 1, WebhookToken: token}
 	if err := s.DB.Create(&cfg).Error; err != nil {
 		// A concurrent request may have created it first; load then.
 		var existing SiteConfig
 		if lerr := s.DB.First(&existing, 1).Error; lerr == nil {
-			return &existing, nil
+			return s.ensureWebhookToken(&existing)
 		}
 		return nil, err
 	}
 	return &cfg, nil
 }
 
-// SaveSiteConfig upserts the singleton configuration row.
+// ensureWebhookToken fills in a missing webhook token and returns the row. It
+// writes the single column rather than saving the whole row, so a concurrent
+// update of the other fields is not clobbered. Callers that save a
+// SiteConfig built from scratch (with no token) are healed by the next load.
+func (s *Store) ensureWebhookToken(cfg *SiteConfig) (*SiteConfig, error) {
+	if strings.TrimSpace(cfg.WebhookToken) != "" {
+		return cfg, nil
+	}
+	token, err := NewWebhookToken()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.DB.Model(&SiteConfig{}).Where("id = ?", cfg.ID).
+		Update("webhook_token", token).Error; err != nil {
+		return nil, err
+	}
+	cfg.WebhookToken = token
+	return cfg, nil
+}
+
+// SaveSiteConfig upserts the singleton configuration row. It writes every
+// column, so a cfg built from scratch (rather than loaded first) carries no
+// webhook token and clears the stored one — the next GetSiteConfig generates
+// a replacement.
 func (s *Store) SaveSiteConfig(cfg *SiteConfig) error {
 	cfg.ID = 1
 	// GetSiteConfig ensures the row exists; save over it either way.

@@ -251,8 +251,9 @@ script is (it is not a secret).
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
-| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`) |
+| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`, `webhookToken` — administrators only) |
 | PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local) |
+| POST   | `/api/site-config/webhook-token`| Rotate the webhook secret and return the configuration (administrators only) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
 | POST   | `/api/test-runs`                | Report a test run result                      |
@@ -266,7 +267,20 @@ script is (it is not a secret).
 | GET    | `/api/jobs`                     | Recent task graphs (`?limit=`, monitoring; legacy job shape) |
 | GET    | `/api/tasks/{id}`               | One task; a root carries its sub-task list and commit/environment context |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | The task's log chunks after the given sequence (incremental, live-following) |
-| POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session; see [Webhooks](#/docs/webhooks)) |
+| POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session: authenticated by the `X-Gitlab-Token` header, see [Webhooks](#/docs/webhooks)) |
+
+The site-configuration tokens differ in what they reveal. `accessToken` and
+`secretToken` are write-only: the API reports `accessTokenSet` /
+`secretTokenSet` and never the values, and an update keeps the stored token
+unless a value or the matching `clear…` flag is sent. `webhookToken` is the
+one that comes back in full, because it has to be copied into GitLab by
+hand — and only to an administrator: for anybody else the field is empty.
+It is generated with the site configuration, so it is never unset; there is
+no way to clear it, only to rotate it with
+`POST /api/site-config/webhook-token` (administrators only, answers with the
+whole configuration). The webhook endpoint compares `X-Gitlab-Token` against
+it in constant time and answers `401` on a mismatch, before parsing the body.
+See [Site configuration → Webhook secret](#/docs/site-configuration).
 
 The account endpoints are where the two roles differ. `/api/users` requires an
 administrator. `/api/users/{id}` accepts your own account, or any account when

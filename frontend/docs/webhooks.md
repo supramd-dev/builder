@@ -7,8 +7,17 @@ POST https://your-server/api/webhooks/gitlab
 ```
 
 with the **Push events**, **Tag push events** and **Merge request events**
-triggers. The endpoint is unauthenticated (it is called by the GitLab
-server); verify the `X-Gitlab-Token` header once a secret is configured.
+triggers.
+
+The endpoint cannot use a session cookie — the caller is the GitLab
+server — so it authenticates with the site's webhook secret instead: copy
+the value from the **Secret token** field of Settings → Webhook into the
+webhook's own **Secret token** field in GitLab. GitLab then sends it back
+with every event in the `X-Gitlab-Token` header, and an event without it
+is rejected with `401` before the payload is parsed. The secret is
+generated with the site configuration, so it is already there on a fresh
+install; rotate it from the same tab if it leaks. See
+[Site configuration → Webhook secret](#/docs/site-configuration).
 
 ## What an event does
 

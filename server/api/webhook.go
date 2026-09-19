@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log"
@@ -51,13 +52,32 @@ type gitlabEventPayload struct {
 // Push, tag push and merge request events are recorded in the commits table
 // — the dashboard's columns — and dispatched: the md-builder.yaml matrix at
 // the event's commit is read, its entries matched to enabled environments by
-// tags, and one job per entry is created for the worker pool. The endpoint is
-// unauthenticated by design: GitLab servers cannot hold a session cookie.
-// When a webhook secret is configured it should be verified here
-// (X-Gitlab-Token header).
+// tags, and one job per entry is created for the worker pool.
+//
+// It cannot use a session cookie (the caller is the GitLab server), so it is
+// authenticated with the site's webhook token instead: the value shown in
+// Settings → Webhook, echoed back by GitLab in the X-Gitlab-Token header.
+// That token is unrelated to the site's secret token, which is exported to
+// the build scripts as MD_SECRET_TOKEN.
 func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	// Verify before reading the body: a forged event must not be parsed, and
+	// the cheaper the rejection the better.
+	cfg, err := s.Store.GetSiteConfig()
+	if err != nil {
+		log.Printf("gitlab webhook: load site config: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	if !webhookTokenMatches(cfg.WebhookToken, r.Header.Get("X-Gitlab-Token")) {
+		// The token itself is never logged — only that it did not match.
+		log.Printf("gitlab webhook: rejected %s: missing or wrong X-Gitlab-Token "+
+			"(copy the token from Settings → Webhook into the GitLab webhook)", r.RemoteAddr)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid webhook token"})
 		return
 	}
 
@@ -96,6 +116,18 @@ func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 			"message": "event type ignored; push, tag_push and merge_request events are handled",
 		})
 	}
+}
+
+// webhookTokenMatches reports whether the X-Gitlab-Token header carries the
+// site's webhook token. The comparison is constant-time, so a caller cannot
+// recover the token byte by byte from the response times. An empty token on
+// either side never matches: GetSiteConfig generates one, so an empty stored
+// token means the row was emptied by hand.
+func webhookTokenMatches(want, got string) bool {
+	if want == "" || got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
 }
 
 // recordPush stores a push or tag push event as a dashboard commit column.

@@ -57,6 +57,9 @@ func (s *Server) Register(mux *http.ServeMux) {
 
 	// Site configuration (requires an authenticated user).
 	mux.HandleFunc("/api/site-config", s.requireAuth(s.handleSiteConfig))
+	// Rotating the webhook secret: administrators only, since the value it
+	// replaces is shown to them alone.
+	mux.HandleFunc("/api/site-config/webhook-token", s.requireAdmin(s.handleWebhookTokenRotate))
 
 	// Accounts. The list is administrators-only; editing is permitted per
 	// target (yourself, or anybody for an administrator), so the item route

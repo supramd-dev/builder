@@ -225,8 +225,9 @@ source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。�
 | PUT    | `/api/environments/{id}/enabled`| 启用/停用(`{"enabled": bool}`)               |
 | POST   | `/api/environments/{id}/exec`   | 运行 shell 命令(`{"command": string}`)       |
 | POST   | `/api/environments/{id}/script` | 运行脚本(`{"language", "script"}`)           |
-| GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`accessTokenSet`、`timezone`) |
+| GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`accessTokenSet`、`timezone`、`webhookToken` 仅管理员) |
 | PUT    | `/api/site-config`              | 更新站点配置(access token:留空保留,`clearAccessToken` 删除;`timezone`:IANA 名称,空 = 浏览器本地) |
+| POST   | `/api/site-config/webhook-token`| 轮换 webhook 密钥并返回配置(仅管理员) |
 | GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
 | POST   | `/api/test-runs`                | 报告测试运行结果                              |
@@ -240,7 +241,17 @@ source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。�
 | GET    | `/api/jobs`                     | 最近的任务图(`?limit=`;监控;旧 job 形状)    |
 | GET    | `/api/tasks/{id}`               | 单个任务;root 附带子任务列表与提交/环境上下文 |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | 给定序号之后的任务日志块(增量,实时跟随)   |
-| POST   | `/api/webhooks/gitlab`          | GitLab webhook 接收器(无需会话;见 [Webhooks](#/docs/webhooks)) |
+| POST   | `/api/webhooks/gitlab`          | GitLab webhook 接收器(无需会话:由 `X-Gitlab-Token` 请求头认证,见 [Webhooks](#/docs/webhooks)) |
+
+站点配置里的几个 token 在“是否可读”上不同。`accessToken` 和
+`secretToken` 是只写的:接口只报告 `accessTokenSet` / `secretTokenSet`,
+永不返回值本身,更新时若不传值也不传对应的 `clear…` 标志就保留原值。
+`webhookToken` 是唯一的例外,会完整返回 —— 因为它需要被手工复制进
+GitLab —— 且只对管理员返回,其他人拿到的该字段为空。它随站点配置一起
+生成,因此永远不会为空;不能清空,只能用
+`POST /api/site-config/webhook-token` 轮换(仅管理员,返回完整配置)。
+webhook 端点用常量时间比较 `X-Gitlab-Token`,不匹配时在解析请求体之前
+就返回 401。见 [站点配置 → Webhook 密钥](#/docs/site-configuration)。
 
 账号相关端点正是两种角色差别所在。`/api/users` 需要管理员身份;
 `/api/users/{id}` 允许改自己的账号,管理员则可以改任意账号。请求体包含

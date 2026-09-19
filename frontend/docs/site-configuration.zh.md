@@ -45,6 +45,29 @@ build:
 都替换为 `REDACTED`。用法见
 [测试矩阵 → Secret token](#/docs/test-matrix)。
 
+## Webhook 密钥
+
+**Settings → Webhook** 标签页显示 webhook 端点用于校验的共享密钥。
+它在站点配置第一次被读取时自动生成 —— 无需任何手工步骤 —— GitLab
+投递的每个事件都必须通过 `X-Gitlab-Token` 请求头把它带回。缺失或
+错误的请求会在解析请求体之前被拒绝(401),因此伪造的 push 既不能
+写入 commit,也不能触发构建。
+
+把该值粘贴到 GitLab 侧 webhook 的 **Secret token** 字段。**Regenerate**
+会用新的随机值替换它;在新值保存到 GitLab 之前,webhook 会一直失败,
+所以当旧值可能泄露时(截图、共享终端、GitLab 导出)才需要轮换。
+
+这个密钥与上面的 secret token 是两回事,方向正好相反:
+
+| | 方向 | 用途 | 界面可见性 |
+|---|---|---|---|
+| **Webhook 密钥**(本标签页) | 入站 | 认证 GitLab 对 md-builder 的调用 | 可见,仅管理员 |
+| **Secret token**(Repository 标签页) | 出站 | 以 `MD_SECRET_TOKEN` 认证构建命令访问内部服务 | 永不可见 |
+
+读取或轮换 webhook 密钥都需要管理员账号;普通用户打开该标签页只能
+看到 webhook URL 和一句提示(请管理员提供密钥)。两种角色见
+[用户账号](#/docs/site-configuration)。
+
 ## 显示时区
 
 **Settings → Display** 标签页设置所有时间戳(仪表板、任务与运行页面)

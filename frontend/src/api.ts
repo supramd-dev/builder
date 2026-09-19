@@ -176,6 +176,11 @@ export interface SiteConfig {
   // browser-local zone.
   timezone: string
   secretTokenSet: boolean
+  // The webhook shared secret GitLab must send back in X-Gitlab-Token.
+  // Unlike the two tokens above it is readable — it has to be copied into
+  // GitLab by hand — but only for an administrator: the API leaves it empty
+  // for everybody else.
+  webhookToken: string
   updatedAt: string
 }
 
@@ -214,6 +219,17 @@ export async function updateSiteConfig(
   const cfg = await api<SiteConfig>('/api/site-config', {
     method: 'PUT',
     body: JSON.stringify(input),
+  })
+  siteConfigCache = cfg
+  return cfg
+}
+
+// rotateWebhookToken replaces the webhook shared secret (administrators
+// only) and returns the updated configuration. It is its own call so the
+// rotation cannot carry — and so cannot overwrite — the other settings.
+export async function rotateWebhookToken(): Promise<SiteConfig> {
+  const cfg = await api<SiteConfig>('/api/site-config/webhook-token', {
+    method: 'POST',
   })
   siteConfigCache = cfg
   return cfg

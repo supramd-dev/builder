@@ -52,6 +52,34 @@ reported. If a command echoes the value into its output (`env`,
 `REDACTED` in the task log before storing it. See
 [Test matrix → Secret token](#/docs/test-matrix) for usage.
 
+## Webhook secret
+
+The **Settings → Webhook** tab shows the shared secret the webhook
+endpoint verifies. It is generated automatically the first time the site
+configuration is read — no setup step — and every webhook event GitLab
+delivers has to carry it back in the `X-Gitlab-Token` header. An event
+with a missing or wrong token is rejected with `401` before its body is
+parsed, so a forged push cannot record a commit or start a build.
+
+Paste the value into the webhook's **Secret token** field on the GitLab
+side. **Regenerate** replaces it with a fresh random value; the GitLab
+webhook keeps failing until the new value is saved there, so rotate it
+when the old one may have leaked (a screenshot, a shared terminal, a
+GitLab export).
+
+This secret and the secret token above are two different things, going in
+opposite directions:
+
+| | Direction | Purpose | Visible in the UI |
+|---|---|---|---|
+| **Webhook secret** (this tab) | inbound | authenticates GitLab's calls to md-builder | yes, to administrators |
+| **Secret token** (Repository tab) | outbound | authenticates your build commands against internal services, as `MD_SECRET_TOKEN` | never |
+
+Reading or rotating the webhook secret requires an administrator account;
+a regular user opening the tab sees the webhook URL and a note to ask an
+administrator for the token. See
+[User accounts](#/docs/site-configuration) for the two roles.
+
 ## Display timezone
 
 The **Settings → Display** tab sets the timezone every timestamp is
