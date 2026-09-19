@@ -30,6 +30,17 @@ A refused write is `403` with a message naming the reason; a row you do not
 own shows as read-only instead of offering buttons that would fail. The
 owner is the account that created the environment, and it never changes.
 
+Seeing is not the same as being offered: the list and the dashboard show the
+whole pool, but the pickers on the **Run command** page only offer what you
+may run on.
+
+| Entry point | Environments it draws on |
+|---|---|
+| Environment list (Runner Envs), dashboard matrix | every environment on the site |
+| **Test**, **Run command** (exec / script tab) | the ones you may use — your own, plus every one for an administrator |
+| *Manual test* tab — **manual dispatch** (custom stage commands) | the ones you may use (same rule) |
+| *Manual test* tab — **yaml matrix trigger**, webhook push | every enabled environment, matched by tags — ownership plays no part |
+
 Administrators can therefore clean up an environment nobody maintains — for
 instance the demo rows left behind by `md-builder seed` (user `demo`), which
 a normal user could neither disable nor delete.

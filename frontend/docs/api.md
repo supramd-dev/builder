@@ -200,6 +200,12 @@ or a list of paths — a run can produce several artifact files.
 - Graphs are marked `trigger: 1` (manual); every dispatch records a
   fresh commit row, so re-running the same ref adds a new matrix row and
   supersedes the older ones.
+- `environmentIds` names the environments explicitly — there is no tag
+  matching here — and any **enabled** environment id is accepted: the
+  pool is site-wide and the endpoint does not check that the caller owns
+  the row. The Run page's picker is stricter and only offers the
+  environments the account may use (its own, or every one for an
+  administrator).
 
 ### YAML matrix dispatch
 
@@ -230,6 +236,10 @@ matching environment created:
   ref requeues the **same** graphs (keyed by commit+environment) with
   fresh snapshots — yaml or environment-tag changes are picked up, and
   no extra matrix row appears.
+- There is no environment list in the request: each yaml entry is matched
+  by tags against **every enabled environment on the site**, whoever
+  registered it — the same matching a webhook push does, so a run may
+  land on another account's machine.
 - Errors (unresolvable ref, bad YAML, no matching environment) come back
   as 422 with a `dispatchError` field, mirroring the webhook response;
   the commit row stays recorded when one was resolved.
@@ -254,21 +264,6 @@ there too, with `adduser -admin`.
 | GET    | `/api/environments/{id}`        | Get one environment (any signed-in user)      |
 | PUT    | `/api/environments/{id}`        | Update one environment (owner or administrator) |
 | DELETE | `/api/environments/{id}`        | Delete one environment (owner or administrator; also its test runs) |
-
-The list is **not** owner-scoped: dispatch matches a yaml entry against every
-enabled environment, so the pool is site-wide and every row is visible to
-everyone. Each row carries `owner` (the managing account's username) and
-`canEdit` (true for the owner and for administrators), which is what the UI
-uses to render a foreign row read-only. Mutating a row you do not own is
-`403`; an id that does not exist is `404`.
-
-Environment create/update bodies carry `name`, `host`, `username`,
-`privateKey`, `tags`, `description`, `enabled` and `envScript` (the
-environment setup script sourced before every stage — see
-[Test environments](#/docs/environments)). Unlike the private key (empty
-on update = keep), an omitted/empty `envScript` clears the script.
-Both fields round-trip: the private key is never echoed back, the env
-script is (it is not a secret).
 | POST   | `/api/environments/{id}/test`   | SSH connectivity check                        |
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
@@ -290,6 +285,22 @@ script is (it is not a secret).
 | GET    | `/api/tasks/{id}`               | One task; a root carries its sub-task list and commit/environment context |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | The task's log chunks after the given sequence (incremental, live-following) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session: authenticated by the `X-Gitlab-Token` header, see [Webhooks](#/docs/webhooks)) |
+
+The environment list is **not** owner-scoped: dispatch matches a yaml entry
+against every enabled environment, so the pool is site-wide and every row is
+visible to everyone. Each row carries `owner` (the managing account's
+username) and `canEdit` (true for the owner and for administrators), which is
+what the UI uses to render a foreign row read-only. Mutating a row you do not
+own is `403`; an id that does not exist is `404`. See
+[Test environments](#/docs/environments).
+
+Environment create/update bodies carry `name`, `host`, `username`,
+`privateKey`, `tags`, `description`, `enabled` and `envScript` (the
+environment setup script sourced before every stage — see
+[Test environments](#/docs/environments)). Unlike the private key (empty
+on update = keep), an omitted/empty `envScript` clears the script.
+Both fields round-trip: the private key is never echoed back, the env
+script is (it is not a secret).
 
 The site-configuration tokens differ in what they reveal. `accessToken` and
 `secretToken` are write-only: the API reports `accessTokenSet` /

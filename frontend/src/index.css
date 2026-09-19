@@ -457,6 +457,23 @@ textarea.form-control:focus {
   min-width: 12rem;
 }
 
+/* Which environments an entry point draws on (Run page). The three differ —
+   a yaml matrix is matched site-wide by tags, while the two pickers only
+   offer what the account may run on — so each panel states its own scope. */
+.env-scope {
+  padding: 0.5rem 0.625rem;
+  margin: 0 0 1rem;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--muted);
+  background: var(--bg-alt);
+  border-left: 3px solid var(--border);
+}
+
+.env-scope strong {
+  color: var(--text);
+}
+
 /* Run page, manual test tab: the yaml-matrix trigger (ref input + button) */
 .yaml-trigger {
   margin-bottom: 1rem;

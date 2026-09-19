@@ -409,6 +409,10 @@ is stored on the commit row, so the dashboard shows it in the commit's
 **graph** column (a warning triangle: hover or click for the text) —
 which is also what an entry matching no enabled environment reports.
 
+Because matching is site-wide, a column may be a machine someone else
+registered: each environment column of the dashboard names its owner under
+the environment name (see [Test environments](#/docs/environments)).
+
 ## What the runner does
 
 Each matched entry becomes a task graph (see
