@@ -21,7 +21,7 @@ import (
 func newDispatchTestServer(t *testing.T, yaml string) (*Server, *store.Store) {
 	t.Helper()
 	apiServer, s := newTestServer(t)
-	fetcher := func(repoURL, sha string, creds *runner.GitCredentials) ([]byte, error) {
+	fetcher := func(ctx context.Context, repoURL, sha string, creds *runner.GitCredentials) ([]byte, error) {
 		if yaml == "" {
 			return nil, fmt.Errorf("repo unreachable")
 		}

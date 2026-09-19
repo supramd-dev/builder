@@ -262,3 +262,53 @@ func TestWebhookManualCommitEvents(t *testing.T) {
 		t.Fatalf("manual-yaml commit event: want manual_yaml, got %q", c.Event)
 	}
 }
+
+// TestWebhookReadsYAMLWithoutCloning is the end-to-end form of the webhook
+// timeout fix: the handler runs against the real yaml fetcher, pointed at a
+// fake code host, and must dispatch from a single small request. A fallback
+// clone here would be talking to a host that serves no git at all, so the
+// test fails loudly if the fast path is not the one that ran.
+func TestWebhookReadsYAMLWithoutCloning(t *testing.T) {
+	const sha = "21c8dc33c771d5002df19de1cc71bb5a0c87568e"
+	var requests int
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if want := "/api/v4/projects/group%2Fcode/repository/files/md-builder.yaml/raw"; r.URL.EscapedPath() != want {
+			t.Errorf("requested %q, want %q", r.URL.EscapedPath(), want)
+		}
+		if want := "ref=" + sha; r.URL.RawQuery != want {
+			t.Errorf("query = %q, want %q", r.URL.RawQuery, want)
+		}
+		_, _ = w.Write([]byte(dispatchYAML))
+	}))
+	defer host.Close()
+
+	apiServer, s := newTestServer(t)
+	apiServer.SetRunner(&runner.Service{Store: s, FetchYAML: runner.NewYAMLFetcher()})
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: host.URL + "/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	seedDispatchEnv(t, s, "cpu-rawfetch", "cpu", true)
+
+	rec := postWebhook(t, mux, s, pushBody("group/code", sha), "X-Gitlab-Event", "Push Hook")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhook: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var res map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res["dispatchError"] != nil {
+		t.Fatalf("dispatchError: %v", res["dispatchError"])
+	}
+	if got := res["jobsCreated"].(float64); got != 1 {
+		t.Fatalf("jobsCreated: want 1, got %v", got)
+	}
+	if requests != 1 {
+		t.Fatalf("the code host was asked %d time(s), want exactly 1", requests)
+	}
+}

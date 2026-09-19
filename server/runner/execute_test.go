@@ -125,7 +125,7 @@ func newExecuteFixture(t *testing.T, yaml string) (*Service, *store.Store, *fake
 	svc := &Service{Store: s, SSH: exec, Clone: cloner}
 
 	// Dispatch through the real path (fake fetcher) to build the graph.
-	svc.FetchYAML = func(codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
+	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
 		return []byte(yaml), nil
 	}
 	res := svc.DispatchForCommit(commit)

@@ -48,8 +48,14 @@ type ManualDispatch struct {
 // (unreachable repo, bad YAML), the commit stays recorded but no tasks are
 // created; the error is surfaced to the caller and stored on the commit row
 // (see recordDispatchOutcome).
+//
+// The work runs on its own context, not the request's: the caller here is a
+// GitLab webhook, and GitLab gives up on the HTTP response after ten seconds.
+// A dispatch that outlives that must still finish — the commit's columns would
+// otherwise stay empty for a run that did nothing wrong. Only the fetch is
+// bounded (Service.FetchTimeout).
 func (s *Service) DispatchForCommit(commit *store.Commit) DispatchResult {
-	return s.dispatchYAML(commit, store.TaskTriggerWebhook)
+	return s.dispatchYAML(context.Background(), commit, store.TaskTriggerWebhook)
 }
 
 // DispatchForRef is the manual yaml-matrix trigger ("run the webhook flow
@@ -89,7 +95,7 @@ func (s *Service) DispatchForRef(ctx context.Context, ref string) (store.Commit,
 	if err != nil {
 		return commit, DispatchResult{Err: err}
 	}
-	res := s.dispatchYAML(&commit, store.TaskTriggerManualYAML)
+	res := s.dispatchYAML(ctx, &commit, store.TaskTriggerManualYAML)
 	res.CommitCreated = created
 	return commit, res
 }
@@ -97,7 +103,7 @@ func (s *Service) DispatchForRef(ctx context.Context, ref string) (store.Commit,
 // dispatchYAML is the shared yaml-matrix dispatch: fetch md-builder.yaml at
 // the commit, parse it, match entries to enabled environments and create
 // one graph per entry, with the given trigger source.
-func (s *Service) dispatchYAML(commit *store.Commit, trigger int) DispatchResult {
+func (s *Service) dispatchYAML(ctx context.Context, commit *store.Commit, trigger int) DispatchResult {
 	res := DispatchResult{}
 	// Whatever the outcome, it lands on the commit row: the dashboard has no
 	// other way to say why a commit's columns are empty, and a re-dispatch
@@ -114,8 +120,15 @@ func (s *Service) dispatchYAML(commit *store.Commit, trigger int) DispatchResult
 		return res
 	}
 
+	// The fetch is the only network call in this path. Bound it so an
+	// unreachable repository server fails with a recorded reason instead of
+	// holding the dispatching goroutine indefinitely; a caller that already
+	// has an earlier deadline keeps it.
+	ctx, cancel := context.WithTimeout(ctx, s.fetchTimeout())
+	defer cancel()
+
 	creds := &GitCredentials{AccessToken: cfg.AccessToken}
-	yamlBytes, err := s.FetchYAML(cfg.CodeRepo, commit.SHA, creds)
+	yamlBytes, err := s.FetchYAML(ctx, cfg.CodeRepo, commit.SHA, creds)
 	if err != nil {
 		res.Err = err
 		return res

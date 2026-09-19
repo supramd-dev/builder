@@ -18,10 +18,11 @@ git@gitlab.example.com:group/code.git
 
 私有仓库需配置一个 **Project Access Token(项目访问令牌)** —— 在
 GitLab 的 *Settings → Access Tokens* 下创建,勾选 `read_repository`
-权限。令牌**仅在服务端使用**:读取代码仓库中的测试矩阵,以及在把源码
-上传到测试环境之前克隆该仓库(测试环境本身不需要任何仓库访问权限
-—— 见 [Runner 与任务](#/docs/runner-strategy))。以 SSH 形式给出的
-仓库地址(ssh:// 或 git@host:group/repo)会转为 https 形式并携带令牌
+权限。这一个权限就覆盖了服务端使用令牌的两件事:读取代码仓库中的
+测试矩阵(见 [GitLab webhooks](#/docs/webhooks)),以及在把源码上传
+到测试环境之前克隆该仓库(测试环境本身不需要任何仓库访问权限 —— 见
+[Runner 与任务](#/docs/runner-strategy))。以 SSH 形式给出的仓库地址
+(ssh:// 或 git@host:group/repo)会转为 https 形式并携带令牌读取与
 克隆。公开仓库令牌留空即可。
 
 令牌为只写:表单只显示是否已配置,绝不显示其值;留空表示保留已存的

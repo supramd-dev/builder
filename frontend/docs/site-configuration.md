@@ -20,12 +20,14 @@ git@gitlab.example.com:group/code.git
 
 For private repositories configure a **Project Access Token** — created in
 GitLab under *Settings → Access Tokens* with the `read_repository` scope.
-The token is used by the **server only**: to read the test matrix from the
-code repository and to clone it before uploading it to the test
-environments (the environments themselves need no repository access —
-see [Runner and tasks](#/docs/runner-strategy)). Repository locations
-given in SSH form (ssh:// or git@host:group/repo) are cloned over https
-with the token. For public repositories leave the token empty.
+That one scope covers both things the server does with the token: read the
+test matrix from the code repository (see
+[GitLab webhooks](#/docs/webhooks)) and clone it before uploading it to
+the test environments (the environments themselves need no repository
+access — see [Runner and tasks](#/docs/runner-strategy)). Repository
+locations given in SSH form (ssh:// or git@host:group/repo) are read and
+cloned over https with the token. For public repositories leave the token
+empty.
 
 The token is write-only: the form shows whether one is configured, never
 the value itself; leave the field blank to keep the stored token, tick

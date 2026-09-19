@@ -20,7 +20,11 @@ how repeated triggers are recorded.
   the dispatch via `POST /api/jobs` after changing environment tags or
   the YAML — requeues the existing graph: sub-tasks and logs are rebuilt
   from the fresh snapshot, and test runs of stages the new graph no
-  longer contains are dropped.
+  longer contains are dropped. The YAML read itself is one request for
+  one file through the code host, with the full clone as a fallback, and
+  is capped by a timeout — so a dispatch never scales with the repository,
+  and a silent repository server cannot hold it open (see
+  [Webhooks](#/docs/webhooks)).
 - **Manual yaml dispatch** (the **Run command** page's *Manual test*
   tab, first section — one ref input and one button — or
   `POST /api/jobs/manual-yaml`): the webhook flow, started by hand for a

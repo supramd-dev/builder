@@ -13,9 +13,10 @@ import (
 )
 
 // YAMLFetcher returns the md-builder.yaml contents at a specific commit of the
-// code repository. The default implementation uses go-git to read a single
-// blob. Credentials may be nil (public repositories only).
-type YAMLFetcher func(codeRepoURL, sha string, creds *GitCredentials) ([]byte, error)
+// code repository. Production uses NewYAMLFetcher (the code host's file
+// route, with this file's clone as the fallback); credentials may be nil
+// (public repositories only). The context bounds the network work.
+type YAMLFetcher func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error)
 
 // YAMLPath is the test-matrix file read from the code repository.
 const YAMLPath = "md-builder.yaml"
@@ -27,14 +28,17 @@ const YAMLPath = "md-builder.yaml"
 // temporary clone is removed afterwards. Requires network reachability to
 // the repository from the server; the token (when configured) travels as
 // HTTPS Basic auth ("oauth2":<token>).
-func GitYAMLFetcher(codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
+//
+// It downloads the whole repository to read one file, so it is the fallback
+// rather than the default: see codehost.go.
+func GitYAMLFetcher(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
 	dir, err := os.MkdirTemp("", "md-builder-yaml-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(dir)
 
-	repo, err := git.PlainCloneContext(context.Background(), dir, false, &git.CloneOptions{
+	repo, err := git.PlainCloneContext(ctx, dir, false, &git.CloneOptions{
 		URL:        HTTPURL(codeRepoURL),
 		Auth:       gitAuth(creds),
 		NoCheckout: true,

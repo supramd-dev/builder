@@ -57,6 +57,37 @@ that repository (matched by path), dispatching kicks in automatically:
    so the dashboard explains the commit's empty columns long after the
    response is gone — see below.
 
+**GitLab gives a webhook ten seconds to answer**, so the read in step 1
+must not scale with the repository. It does not: the server asks the code
+host for that one file over its API — the same request `curl` would make:
+
+```
+GET /api/v4/projects/group%2Fcode/repository/files/md-builder.yaml/raw?ref=<sha>
+PRIVATE-TOKEN: <the Project Access Token>
+```
+
+One small request, the same cost whether the repository holds ten commits
+or a hundred thousand.
+
+When that route cannot serve the file the server logs why and falls back
+to a full clone, which is slower and *can* exceed the ten seconds:
+
+- the file is not there at that commit — the usual case, when the YAML has
+  not been committed yet;
+- the project is not readable with the configured token;
+- the repository location has no usable https form (a bare `group/code`).
+
+Nothing is lost either way: the commit is recorded before the fetch
+starts, so the dashboard column appears immediately and its cells fill in
+when the dispatch finishes. The fetch itself is capped (60 seconds by
+default), so an unreachable repository server ends as a recorded
+`dispatchError` rather than a request that never returns.
+
+Note that GitLab's *web* route for a file — the `/-/raw/<ref>/<path>` URL a
+browser opens — is not usable here: it authenticates through the browser
+session only and ignores the token, answering with a redirect to the
+sign-in page. The API route above is what accepts the token.
+
 Nothing is dropped silently: every step between the event and the task
 graphs leaves a record. A push that fails to dispatch (unreadable or
 invalid `md-builder.yaml`, an entry matching no enabled environment)

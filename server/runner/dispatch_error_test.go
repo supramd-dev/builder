@@ -57,7 +57,7 @@ func TestDispatchRecordsErrorOnCommit(t *testing.T) {
 	s, svc := dispatchFixture(t, "cpu")
 	commit := commitFor(t, s, "aaaa1111")
 
-	svc.FetchYAML = func(codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
+	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
 		return nil, errors.New("md-builder.yaml: file not found")
 	}
 	res := svc.DispatchForCommit(commit)
@@ -81,7 +81,7 @@ func TestDispatchRecordsErrorOnCommit(t *testing.T) {
 
 	// A later dispatch that works clears it again — otherwise the row would
 	// keep claiming a failure that has since been fixed.
-	svc.FetchYAML = func(codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
+	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
 		return []byte("version: 2\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
 	}
 	if res := svc.DispatchForCommit(commit); res.Err != nil {
@@ -99,7 +99,7 @@ func TestDispatchRecordsNoMatchingEntry(t *testing.T) {
 	s, svc := dispatchFixture(t, "gpu") // the yaml asks for cpu
 	commit := commitFor(t, s, "bbbb2222")
 
-	svc.FetchYAML = func(codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
+	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
 		return []byte("version: 2\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
 	}
 	res := svc.DispatchForCommit(commit)
@@ -146,6 +146,65 @@ func TestRecordDispatchOutcomeMessages(t *testing.T) {
 	// A nil commit (the failure happened before the row existed) is a no-op.
 	svc.recordDispatchOutcome(nil, &DispatchResult{Err: errors.New("boom")})
 	svc.recordDispatchOutcome(&store.Commit{}, &DispatchResult{Err: errors.New("boom")})
+}
+
+// TestDispatchFetchTimeout: the fetch is the only network call in a dispatch,
+// and a repository server that never answers must not hold the goroutine
+// forever — the deadline turns the hang into a recorded failure.
+func TestDispatchFetchTimeout(t *testing.T) {
+	s, svc := dispatchFixture(t, "cpu")
+	commit := commitFor(t, s, "eeee5555")
+	svc.FetchTimeout = 50 * time.Millisecond
+	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	done := make(chan DispatchResult, 1)
+	go func() { done <- svc.DispatchForCommit(commit) }()
+	select {
+	case res := <-done:
+		if !errors.Is(res.Err, context.DeadlineExceeded) {
+			t.Fatalf("dispatch error = %v, want a deadline", res.Err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("dispatch hung; the fetch deadline did not apply")
+	}
+
+	if stored, _ := s.GetCommitByID(commit.ID); !strings.Contains(stored.DispatchError, "deadline exceeded") {
+		t.Fatalf("stored dispatch error = %q, want the timeout", stored.DispatchError)
+	}
+}
+
+// TestDispatchFetchHonoursCallerDeadline: a manual dispatch runs on the
+// caller's context (the HTTP request), so a deadline already there is the one
+// that applies — the service default must not extend it.
+func TestDispatchFetchHonoursCallerDeadline(t *testing.T) {
+	_, svc := dispatchFixture(t, "cpu")
+	svc.FetchTimeout = time.Hour
+	svc.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) {
+		return "ffff6666", nil
+	}
+	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	ctx, cancel := context.WithTimeout(testContext(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan DispatchResult, 1)
+	go func() {
+		_, res := svc.DispatchForRef(ctx, "main")
+		done <- res
+	}()
+	select {
+	case res := <-done:
+		if !errors.Is(res.Err, context.DeadlineExceeded) {
+			t.Fatalf("dispatch error = %v, want the caller's deadline", res.Err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("dispatch hung; the caller's deadline did not apply")
+	}
 }
 
 // TestDispatchForRefWithoutRepoRecordsNothing: the failure happens before a
