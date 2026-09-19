@@ -4,8 +4,10 @@ import {
   cachedSiteConfig,
   getSiteConfig,
   updateSiteConfig,
+  type Me,
   type SiteConfig,
 } from './api'
+import AccountPanel from './AccountPanel'
 import {
   allTimezones,
   applySiteTimezone,
@@ -16,15 +18,20 @@ import {
 } from './timezone'
 
 interface SettingsPageProps {
+  me: Me
+  onMeChange: (me: Me) => void
   onError: (message: string) => void
 }
 
 // SettingsPage organizes the site-wide configuration into tabs: the code
-// repository (and its credentials), the display settings (timezone), and
-// the GitLab webhook reference. Test inputs live inside the code repository
-// itself, so there is no separate test-input tab.
-export default function SettingsPage({ onError }: SettingsPageProps) {
-  const [tab, setTab] = useState<'repo' | 'display' | 'webhook'>('repo')
+// repository (and its credentials), the display settings (timezone), the
+// GitLab webhook reference, and the account tab — everyone edits their own
+// account there, and an administrator also manages the other accounts. Test
+// inputs live inside the code repository itself, so there is no separate
+// test-input tab.
+export default function SettingsPage({ me, onMeChange, onError }: SettingsPageProps) {
+  const [tab, setTab] = useState<'repo' | 'display' | 'webhook' | 'account'>('repo')
+  const isAdmin = me.role === 'admin'
 
   return (
     <div>
@@ -57,13 +64,26 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
         >
           Webhook
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'account'}
+          className={tab === 'account' ? 'tab active' : 'tab'}
+          onClick={() => setTab('account')}
+        >
+          {/* The same tab, named for what it holds: only an administrator
+              gets the account list, so only an administrator sees "Users". */}
+          {isAdmin ? 'Users' : 'Account'}
+        </button>
       </div>
       {tab === 'repo' ? (
         <RepositoryTab onError={onError} />
       ) : tab === 'display' ? (
         <DisplayTab onError={onError} />
-      ) : (
+      ) : tab === 'webhook' ? (
         <WebhookTab />
+      ) : (
+        <AccountPanel me={me} onMeChange={onMeChange} onError={onError} />
       )}
     </div>
   )

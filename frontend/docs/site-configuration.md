@@ -61,6 +61,33 @@ in their own zone. The setting is display-only — stored data and logs keep
 their original timestamps, and the browser caches the choice locally so
 pages render immediately after a reload.
 
+## User accounts
+
+Accounts come in two kinds. A **regular user** signs in and uses md-builder.
+An **administrator** additionally manages the accounts, in the
+**Settings → Users** tab: every account with its username, email, role, status
+and creation date, an **Edit** action (username, email, password) and a
+**Disable**/**Enable** action. A regular user sees the same tab under the name
+**Account**, holding their own details and nothing else.
+
+Administrators are created on the server, and nowhere else:
+
+```sh
+md-builder adduser -admin -username root -email root@example.com
+```
+
+No request the web UI can make creates or promotes an administrator — a role
+is not part of any account form — so the panel is not a way to acquire one.
+
+**Disabling** an account signs it out at once and refuses further logins
+("this account has been disabled"). The account and everything it configured
+stay in place; **Enable** restores access. You cannot disable your own account
+or another administrator's, so a site cannot be left with no way in.
+
+Changing a password signs that account out everywhere except the browser that
+made the change — which is what makes a reset a reset. Passwords must be at
+least 8 characters; usernames and email addresses must be unique.
+
 ## Object storage
 
 The settings above live in the database and are edited in the browser.

@@ -73,7 +73,14 @@ func seedSubcommand() int {
 			fmt.Fprintf(os.Stderr, "error: hash password: %v\n", err)
 			return 1
 		}
-		user = store.User{Username: username, Email: "demo@example.com", PasswordHash: hash}
+		// A regular user, deliberately: the demo password is in this source
+		// file, so it must not be an administrator credential.
+		user = store.User{
+			Username:     username,
+			Email:        "demo@example.com",
+			PasswordHash: hash,
+			Role:         store.RoleUser,
+		}
 		if err := s.CreateUser(&user); err != nil {
 			fmt.Fprintf(os.Stderr, "error: create user: %v\n", err)
 			return 1

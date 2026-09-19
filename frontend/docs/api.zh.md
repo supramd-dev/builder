@@ -199,14 +199,17 @@ ref 被解析(与手动派发相同的 `git ls-remote`)后,提交行按 **webhoo
 ## API 端点
 
 除非另行说明,所有端点都需要会话(cookie)。用户通过 `adduser` CLI
-创建(见[快速上手](#/docs/getting-started))。
+创建(见[快速上手](#/docs/getting-started));管理员同样在那里创建,用
+`adduser -admin`。
 
 | 方法   | 路径                            | 说明                                          |
 |--------|---------------------------------|-----------------------------------------------|
 | GET    | `/api/health`                   | 健康检查(无需会话)                          |
 | POST   | `/api/login`                    | 认证,设置会话 cookie                         |
 | POST   | `/api/logout`                   | 销毁当前会话                                  |
-| GET    | `/api/me`                       | 当前用户                                      |
+| GET    | `/api/me`                       | 当前用户(`id`、`username`、`email`、`role`) |
+| GET    | `/api/users`                    | 列出全部账号(仅管理员)                      |
+| PUT    | `/api/users/{id}`               | 修改账号:自己的,或管理员修改任意账号      |
 | GET    | `/api/environments`             | 列出用户的测试环境                            |
 | POST   | `/api/environments`             | 创建测试环境                                  |
 | GET    | `/api/environments/{id}`        | 获取单个环境                                  |
@@ -238,3 +241,11 @@ source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。�
 | GET    | `/api/tasks/{id}`               | 单个任务;root 附带子任务列表与提交/环境上下文 |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | 给定序号之后的任务日志块(增量,实时跟随)   |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook 接收器(无需会话;见 [Webhooks](#/docs/webhooks)) |
+
+账号相关端点正是两种角色差别所在。`/api/users` 需要管理员身份;
+`/api/users/{id}` 允许改自己的账号,管理员则可以改任意账号。请求体包含
+`username`、`email`、`password`(为空表示保留原密码)和 `disabled` ——
+最后一项仅管理员可用,且对管理员账号和自己都会被拒绝。`role` 不属于
+请求体,传了也不会生效:只有 `adduser -admin` 能创建管理员。改密码会
+登出该账号的其他会话,禁用则登出全部。见
+[站点配置 → 用户账号](#/docs/site-configuration)。

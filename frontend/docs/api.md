@@ -223,14 +223,17 @@ matching environment created:
 
 All endpoints require a session (cookie) unless noted. Users are
 created with the `adduser` CLI (see
-[Getting started](#/docs/getting-started)).
+[Getting started](#/docs/getting-started)); administrators are created
+there too, with `adduser -admin`.
 
 | Method | Path                            | Description                                   |
 |--------|---------------------------------|-----------------------------------------------|
 | GET    | `/api/health`                   | Health check (no session)                     |
 | POST   | `/api/login`                    | Authenticate, sets session cookie             |
 | POST   | `/api/logout`                   | Destroy the current session                   |
-| GET    | `/api/me`                       | Current user                                  |
+| GET    | `/api/me`                       | Current user (`id`, `username`, `email`, `role`) |
+| GET    | `/api/users`                    | List every account (administrator only)       |
+| PUT    | `/api/users/{id}`               | Edit an account: your own, or anyone's as an administrator |
 | GET    | `/api/environments`             | List the user's test environments             |
 | POST   | `/api/environments`             | Create a test environment                     |
 | GET    | `/api/environments/{id}`        | Get one environment                           |
@@ -264,3 +267,13 @@ script is (it is not a secret).
 | GET    | `/api/tasks/{id}`               | One task; a root carries its sub-task list and commit/environment context |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | The task's log chunks after the given sequence (incremental, live-following) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session; see [Webhooks](#/docs/webhooks)) |
+
+The account endpoints are where the two roles differ. `/api/users` requires an
+administrator. `/api/users/{id}` accepts your own account, or any account when
+you are an administrator; its body carries `username`, `email`, `password`
+(empty = keep the stored one) and `disabled` — the last is administrator-only,
+and is refused on an administrator's account and on your own. `role` is not
+part of the body, and sending one changes nothing: only `adduser -admin`
+creates an administrator. A new password ends that account's other sessions;
+disabling ends all of them. See
+[Site configuration → User accounts](#/docs/site-configuration).

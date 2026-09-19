@@ -58,6 +58,12 @@ func (s *Server) Register(mux *http.ServeMux) {
 	// Site configuration (requires an authenticated user).
 	mux.HandleFunc("/api/site-config", s.requireAuth(s.handleSiteConfig))
 
+	// Accounts. The list is administrators-only; editing is permitted per
+	// target (yourself, or anybody for an administrator), so the item route
+	// authenticates and decides inside the handler.
+	mux.HandleFunc("/api/users", s.requireAdmin(s.handleUsers))
+	mux.HandleFunc("/api/users/", s.requireAuth(s.handleUserItem))
+
 	// GitLab webhook receiver (unauthenticated: called by the GitLab server).
 	mux.HandleFunc("/api/webhooks/gitlab", s.handleGitLabWebhook)
 
@@ -122,6 +128,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
+	// A disabled account is refused with its own message: the password was
+	// right, so the user needs to be told why they still cannot get in.
+	if user.Disabled {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "this account has been disabled"})
+		return
+	}
 
 	token, err := auth.NewToken()
 	if err != nil {
@@ -152,8 +164,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   int(sessionTTL.Seconds()),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
+		"id":       user.ID,
 		"username": user.Username,
 		"email":    user.Email,
+		"role":     user.Role,
 	})
 }
 
@@ -182,19 +196,23 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"id":       user.ID,
 		"username": user.Username,
 		"email":    user.Email,
+		"role":     user.Role,
 	})
 }
 
 // currentUser resolves the authenticated user from the session cookie, if any.
+// A disabled account has no valid session: disabling deletes the stored
+// sessions, and this check covers the row that slipped through.
 func (s *Server) currentUser(r *http.Request) (*store.User, bool) {
 	cookie, err := r.Cookie(sessionCookie)
 	if err != nil || cookie.Value == "" {
 		return nil, false
 	}
 	_, user, err := s.Store.GetSessionByToken(cookie.Value)
-	if err != nil {
+	if err != nil || user.Disabled {
 		return nil, false
 	}
 	return user, true
@@ -222,6 +240,19 @@ func (s *Server) requireAuth(next func(http.ResponseWriter, *http.Request, *stor
 		}
 		next(w, r.WithContext(context.WithValue(r.Context(), userContextKey{}, user)), user)
 	}
+}
+
+// requireAdmin wraps a handler that only an administrator may call. Hiding
+// the panel in the UI is presentation; this is the permission.
+func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, *store.User)) http.HandlerFunc {
+	return s.requireAuth(func(w http.ResponseWriter, r *http.Request, user *store.User) {
+		if !user.IsAdmin() {
+			log.Printf("admin required: %q (id %d) denied %s %s", user.Username, user.ID, r.Method, r.URL.Path)
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "administrator permission required"})
+			return
+		}
+		next(w, r, user)
+	})
 }
 
 // userFromRequest extracts the authenticated user injected by requireAuth.

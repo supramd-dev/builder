@@ -17,9 +17,50 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
+// Role is read-only everywhere in the UI: an administrator account is created
+// with `md-builder adduser -admin`, and no request can change a role.
+export type Role = 'admin' | 'user'
+
 export interface Me {
+  id: number
   username: string
   email: string
+  role: Role
+}
+
+// Account is one row of the administrator's account list. The password hash
+// never leaves the server.
+export interface Account {
+  id: number
+  username: string
+  email: string
+  role: Role
+  disabled: boolean
+  createdAt: string
+}
+
+// AccountUpdate is the PUT body. An empty password keeps the stored one; an
+// omitted disabled keeps the current state. `role` is deliberately absent.
+export interface AccountUpdate {
+  username: string
+  email: string
+  password?: string
+  disabled?: boolean
+}
+
+export async function listAccounts(): Promise<Account[]> {
+  const res = await api<{ users: Account[] }>('/api/users')
+  return res.users
+}
+
+export async function updateAccount(
+  id: number,
+  input: AccountUpdate,
+): Promise<Account> {
+  return api<Account>(`/api/users/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
 }
 
 export interface TestEnvironment {
