@@ -22,13 +22,15 @@ md-builder/
 │   ├── store/             # GORM models + queries (users, sessions,
 │   │                      #   environments, site config, commits, test runs)
 │   ├── auth/               # bcrypt hashing + session tokens
-│   ├── api/                # HTTP handlers (auth, environments, dashboard)
+│   ├── api/                # HTTP handlers (auth, first-run setup,
+│   │                      #   environments, dashboard)
 │   ├── sshcheck/           # SSH connectivity test package
 │   └── go.mod
 ├── frontend/              # Vite + React + TS frontend
 │   ├── docs/              # user documentation (.md), embedded via ?raw
 │   ├── src/App.tsx        # shell: login + page routing (incl. dashboard)
 │   ├── src/LoginPage.tsx  # static login page
+│   ├── src/SetupPage.tsx  # first-run guide page (empty database only)
 │   ├── src/DashboardPage.tsx    # test result matrix (regression / unit)
 │   ├── src/TestRunDetailPage.tsx # per-run detail: case list (child runs), parsed results
 │   ├── src/UserCenter.tsx # environment management dashboard
@@ -92,6 +94,10 @@ docker compose up -d                  # or: podman compose up -d
 docker compose --profile tools run --rm cli adduser -username alice -email alice@example.com
 ```
 
+The `adduser` line is only needed for the accounts **after** the first one: an
+empty database opens on a setup page (see [First start](#first-start)) that
+creates the first administrator and stores the code repository.
+
 The `chown` is the one step that fails quietly if you skip it: a bind mount
 takes its ownership from the host directory, so the container's uid 10001
 cannot create the SQLite file and the server exits at startup with
@@ -113,12 +119,28 @@ bundle at build time.
 A fully commented example of the md-builder.yaml test matrix (schema
 version 2) lives at [md-builder.example.yaml](md-builder.example.yaml).
 
+## First start
+
+A database with **no account at all** opens on a setup page instead of the
+login form — three blocks: the code repository (plus an optional access
+token), the first administrator account, and where the GitLab webhook goes.
+Confirming stores the repository and the account in one transaction and signs
+the new administrator in.
+
+The page appears exactly once: the server offers it only while no account
+exists, and closes it as soon as one does — created there, by `adduser` or by
+`seed`. Since an administrator needs an administrator to create one, this is
+the only way to make the first account. The endpoints behind it are
+unauthenticated, so a **fresh, empty** database should not be left reachable
+from the internet: the first visitor to the setup page claims the
+administrator account.
+
 ## Authentication
 
-There is **no registration UI**. Users are created via the `adduser` CLI
-subcommand; the web UI only handles login. Passwords are hashed with
-bcrypt (cost 12); sessions are random 64-char hex tokens stored in the
-database and expire after 7 days.
+Apart from that first administrator there is **no registration UI**. Users are
+created via the `adduser` CLI subcommand; the web UI only handles login.
+Passwords are hashed with bcrypt (cost 12); sessions are random 64-char hex
+tokens stored in the database and expire after 7 days.
 
 There are two roles. A regular user signs in and uses md-builder; an
 **administrator** additionally manages the accounts from **Settings → Users**
@@ -176,7 +198,9 @@ smoke user (`make adduser USER=smoke-user EMAIL=smoke@example.com`).
 ## API smoke test
 
 [scripts/api-smoke.sh](scripts/api-smoke.sh) exercises the full API surface
-against a running server: auth gates, login/logout, environment CRUD
+against a running server: auth gates, first-run setup (the guide page's
+endpoints, exercised when the database is still empty), login/logout,
+environment CRUD
 (incl. tags), connectivity test, command exec, script execution
 (bash/python), enable/disable gating, webhook push recording (incl. job
 dispatch error surfacing), job trigger/list endpoints, test-run

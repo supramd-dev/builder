@@ -10,7 +10,8 @@
 # Environment variables:
 #   BASE_URL   server base URL          (default http://localhost:8080)
 #   USERNAME   test user                (default smoke-user; created as an
-#              administrator, see §1 and §8)
+#              administrator — by the first-run setup when the database is
+#              empty, see §0b, otherwise by adduser in §1)
 #   PASSWORD   test user password       (default smoke-pass-123)
 #   EMAIL      test user email          (default smoke@example.com)
 #   SKIP_SETUP set to 1 to skip user creation (user must already exist)
@@ -85,6 +86,58 @@ check "me without session 401" "$(tail -n1 <<<"$body_code")" "401"
 
 body_code=$(curl -s -w '\n%{http_code}' "$BASE_URL/api/environments")
 check "environments without session 401" "$(tail -n1 <<<"$body_code")" "401"
+
+# ---------------------------------------------------------------------------
+# 0b. First-run setup (the guide page, on a database with no account)
+# ---------------------------------------------------------------------------
+echo "== first-run setup =="
+
+# The state endpoint is unauthenticated — the page it feeds is what a browser
+# without a session sees — and reports whether the site has any account yet.
+body_code=$(curl -s -w '\n%{http_code}' "$BASE_URL/api/setup")
+check "setup state 200" "$(tail -n1 <<<"$body_code")" "200"
+check "setup state is a boolean" \
+  "$(head -n1 <<<"$body_code" | jq '.required | type == "boolean"')" "true"
+SETUP_REQUIRED="$(head -n1 <<<"$body_code" | jq -r '.required')"
+
+if [ "$SETUP_REQUIRED" = "true" ]; then
+  # Empty database: the guide page creates the first administrator — this
+  # run's $USERNAME, so §1 finds the account already there — and stores the
+  # code repository in the same request. No access token: §7 asserts the
+  # token starts unset.
+  body_code=$(curl -s -c "$CJAR" -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg repo "https://gitlab.example.com/smoke/code" \
+        --arg u "$USERNAME" --arg e "$EMAIL" --arg p "$PASSWORD" \
+        '{codeRepo: $repo, username: $u, email: $e, password: $p}')" \
+    -w '\n%{http_code}' "$BASE_URL/api/setup")
+  check "setup creates the first administrator 201" "$(tail -n1 <<<"$body_code")" "201"
+  check "setup account is an administrator" \
+    "$(head -n1 <<<"$body_code" | jq -r .role)" "admin"
+  check "setup returns the account" \
+    "$(head -n1 <<<"$body_code" | jq -r .username)" "$USERNAME"
+  if grep -q "$PASSWORD" <<<"$(head -n1 <<<"$body_code")"; then
+    check "setup does not echo the password" "leaked" "clean"
+  else
+    check "setup does not echo the password" "clean" "clean"
+  fi
+  check "setup stored the repository" \
+    "$(req GET /api/site-config | head -n1 | jq -r .codeRepo)" \
+    "https://gitlab.example.com/smoke/code"
+  # The new administrator is signed in: the response set a working session.
+  check "setup session works" \
+    "$(curl -s -b "$CJAR" -o /dev/null -w '%{http_code}' "$BASE_URL/api/me")" "200"
+  check "setup no longer required" \
+    "$(curl -s "$BASE_URL/api/setup" | jq -r .required)" "false"
+else
+  echo "note: the database already has an account; only the closed door is checked" >&2
+fi
+
+# Whether or not this run started from an empty database, a second setup is
+# refused: the endpoint stops doing anything the moment an account exists.
+body_code=$(curl -s -H 'Content-Type: application/json' \
+  -d '{"codeRepo":"https://gitlab.example.com/other/code","username":"late-admin","email":"late@example.com","password":"late-pass-123"}' \
+  -w '\n%{http_code}' "$BASE_URL/api/setup")
+check "setup on a configured site 409" "$(tail -n1 <<<"$body_code")" "409"
 
 # ---------------------------------------------------------------------------
 # 1. User setup + login flow

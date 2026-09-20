@@ -215,15 +215,49 @@ ref 被解析(与手动派发相同的 `git ls-remote`)后,提交行按 **webhoo
   `dispatchError` 字段,与 webhook 响应一致;若提交已解析成功,该行
   仍会被记录。
 
+## 首次启动引导
+
+一个账号都没有的数据库没有任何可登录的东西,因此接口返回的是首次启动
+引导页(见[快速上手](#/docs/getting-started))。两个端点都是**未认证**的
+—— 此时还没有会话可用,也没有管理员能创建会话 —— 且只要有账号存在就
+什么都不做:
+
+```
+GET /api/setup
+{"required": true}
+```
+
+```
+POST /api/setup
+{
+  "codeRepo": "https://gitlab.example.com/group/code",
+  "accessToken": "glpat-…",       // 可选:留空表示公开仓库
+  "username": "root",             // 站点的第一个管理员
+  "email": "root@example.com",
+  "password": "…"                 // 至少 8 个字符
+}
+```
+
+- 账号与仓库**在同一个事务中**写入:任一字段被拒绝(`400`,规则与 `adduser`
+  及账号接口一致)则什么都不写;站点已初始化后再请求同样什么都不写
+  (`409`)。
+- 创建的账号是**管理员**,也是该端点唯一能创建的账号:角色在这里是固定的,
+  这是唯一一处角色不由 CLI 决定的地方。
+- 响应与 `/api/login` 同形,会话 cookie 也以同样方式设置 —— 引导页会直接
+  把新管理员登录进去。
+- `accessToken` 与其他地方一样是只写的:会存储、不回显、不写日志。
+
 ## API 端点
 
-除非另行说明,所有端点都需要会话(cookie)。用户通过 `adduser` CLI
-创建(见[快速上手](#/docs/getting-started));管理员同样在那里创建,用
-`adduser -admin`。
+除非另行说明,所有端点都需要会话(cookie)。除上面引导页创建的第一个
+管理员之外,用户通过 `adduser` CLI 创建(见[快速上手](#/docs/getting-started));
+后续管理员同样在那里创建,用 `adduser -admin`。
 
 | 方法   | 路径                            | 说明                                          |
 |--------|---------------------------------|-----------------------------------------------|
 | GET    | `/api/health`                   | 健康检查(无需会话)                          |
+| GET    | `/api/setup`                    | 站点是否仍需要首次启动引导(无需会话)        |
+| POST   | `/api/setup`                    | 创建第一个管理员并保存代码仓库,然后登录(无需会话;已初始化则 409) |
 | POST   | `/api/login`                    | 认证,设置会话 cookie                         |
 | POST   | `/api/logout`                   | 销毁当前会话                                  |
 | GET    | `/api/me`                       | 当前用户(`id`、`username`、`email`、`role`) |

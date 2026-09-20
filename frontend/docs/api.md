@@ -244,16 +244,55 @@ matching environment created:
   as 422 with a `dispatchError` field, mirroring the webhook response;
   the commit row stays recorded when one was resolved.
 
+## First-run setup
+
+A database with no account at all has nothing to log in with, so the API
+answers the first-run guide page instead (see
+[Getting started](#/docs/getting-started)). Both endpoints are
+**unauthenticated** — there is no session to use yet, and no administrator to
+create one — and both stop doing anything as soon as an account exists:
+
+```
+GET /api/setup
+{"required": true}
+```
+
+```
+POST /api/setup
+{
+  "codeRepo": "https://gitlab.example.com/group/code",
+  "accessToken": "glpat-…",       // optional: empty = public repository
+  "username": "root",             // the site's first administrator
+  "email": "root@example.com",
+  "password": "…"                 // at least 8 characters
+}
+```
+
+- The account and the repository are stored **in one transaction**: a
+  rejected field (`400`, using the same rules as `adduser` and the account
+  API) writes nothing, and so does a request that arrives after the site is
+  set up (`409`).
+- The created account is an **administrator**, and it is the only account
+  this endpoint can create: the role is fixed here, which is the one place a
+  role is not decided by the CLI.
+- The response is the same shape `/api/login` returns, and the session
+  cookie is set the same way — the guide page signs the new administrator
+  straight in.
+- `accessToken` is write-only like everywhere else: it is stored, never
+  echoed, and never logged.
+
 ## API endpoints
 
-All endpoints require a session (cookie) unless noted. Users are
-created with the `adduser` CLI (see
-[Getting started](#/docs/getting-started)); administrators are created
-there too, with `adduser -admin`.
+All endpoints require a session (cookie) unless noted. Apart from the first
+administrator, created by the setup page above, users are created with the
+`adduser` CLI (see [Getting started](#/docs/getting-started)); further
+administrators are created there too, with `adduser -admin`.
 
 | Method | Path                            | Description                                   |
 |--------|---------------------------------|-----------------------------------------------|
 | GET    | `/api/health`                   | Health check (no session)                     |
+| GET    | `/api/setup`                    | Whether the site still needs its first-run setup (no session) |
+| POST   | `/api/setup`                    | Create the first administrator and store the code repository, then sign it in (no session; `409` once set up) |
 | POST   | `/api/login`                    | Authenticate, sets session cookie             |
 | POST   | `/api/logout`                   | Destroy the current session                   |
 | GET    | `/api/me`                       | Current user (`id`, `username`, `email`, `role`) |

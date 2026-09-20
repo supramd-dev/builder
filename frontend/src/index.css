@@ -347,6 +347,39 @@ textarea.form-control:focus {
   flex: 0 0 auto;
 }
 
+/* --- First-run setup page --- */
+
+/* Narrow enough to read as a form, wide enough for the repository URL and the
+   webhook URL without wrapping. */
+.setup {
+  max-width: 40rem;
+}
+
+/* One block of the three: a rule above each section after the first, so the
+   page reads as three steps with a single confirm at the end. */
+.setup-step {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-light);
+}
+
+.setup-step h4 {
+  margin: 0 0 0.25rem;
+}
+
+.setup-step > p.text-muted {
+  margin-top: 0;
+}
+
+/* The confirm button and the note about the single transaction. */
+.setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
 /* --- Buttons --- */
 
 .btn {
