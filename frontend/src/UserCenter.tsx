@@ -149,126 +149,133 @@ export default function UserCenter() {
           </p>
         </div>
       ) : (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Owner</th>
-              <th>Host</th>
-              <th>User</th>
-              <th>Tags</th>
-              <th>Description</th>
-              <th>Enabled</th>
-              <th>Updated</th>
-              <th>Status</th>
-              <th className="text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {envs.map((env) => {
-              const res = testResults[env.id]
-              const isTesting = testing.has(env.id)
-              return (
-                <tr key={env.id}>
-                  <td>{env.name}</td>
-                  <td className={env.canEdit ? 'text-muted' : undefined}>
-                    {env.owner || <span className="text-muted">—</span>}
-                    {!env.canEdit && <span className="text-muted"> (read-only)</span>}
-                  </td>
-                  <td>
-                    <code>{env.host}</code>
-                  </td>
-                  <td>{env.username}</td>
-                  <td>
-                    {env.tags && env.tags.length > 0 ? (
-                      <span className="env-tags">
-                        {env.tags.map((tag) => (
-                          <span key={tag} className="env-tag">
-                            {tag}
-                          </span>
-                        ))}
-                      </span>
-                    ) : (
-                      <span className="text-muted">—</span>
-                    )}
-                  </td>
-                  <td className="text-muted">{env.description}</td>
-                  <td>
-                    {env.canEdit ? (
-                      <button
-                        type="button"
-                        className="btn btn-sm"
-                        disabled={toggling.has(env.id)}
-                        onClick={() => handleToggleEnabled(env)}
-                        style={{
-                          background: env.enabled ? 'var(--success)' : 'var(--btn-default-bg)',
-                          color: env.enabled ? '#fff' : 'var(--muted)',
-                          borderColor: env.enabled ? 'var(--success)' : 'var(--border)',
-                        }}
-                        title={env.enabled ? 'Disable this environment' : 'Enable this environment'}
-                      >
-                        {toggling.has(env.id) ? '…' : env.enabled ? 'Enabled' : 'Disabled'}
-                      </button>
-                    ) : (
-                      // Someone else's environment: the state is shown, not
-                      // offered — a toggle here would 403.
-                      <span
-                        className={env.enabled ? 'text-success' : 'text-muted'}
-                        title="only the owner or an administrator can change this"
-                      >
-                        {env.enabled ? 'Enabled' : 'Disabled'}
-                      </span>
-                    )}
-                  </td>
-                  <td className="text-muted">
-                    {formatTime(env.updatedAt)}
-                  </td>
-                  <td>
-                    {res ? (
-                      res.success ? (
-                        <span className="text-success">✓ reachable</span>
+        <div className="table-scroll">
+          <table className="table table-stack">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Owner</th>
+                <th>Host</th>
+                <th>User</th>
+                <th>Tags</th>
+                <th>Description</th>
+                <th>Enabled</th>
+                <th>Updated</th>
+                <th>Status</th>
+                <th className="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {envs.map((env) => {
+                const res = testResults[env.id]
+                const isTesting = testing.has(env.id)
+                return (
+                  <tr key={env.id}>
+                    <td data-label="Name">{env.name}</td>
+                    <td
+                      data-label="Owner"
+                      className={env.canEdit ? 'text-muted' : undefined}
+                    >
+                      {env.owner || <span className="text-muted">—</span>}
+                      {!env.canEdit && <span className="text-muted"> (read-only)</span>}
+                    </td>
+                    <td data-label="Host">
+                      <code>{env.host}</code>
+                    </td>
+                    <td data-label="User">{env.username}</td>
+                    <td data-label="Tags">
+                      {env.tags && env.tags.length > 0 ? (
+                        <span className="env-tags">
+                          {env.tags.map((tag) => (
+                            <span key={tag} className="env-tag">
+                              {tag}
+                            </span>
+                          ))}
+                        </span>
                       ) : (
-                        <span className="text-danger">✗ unreachable</span>
-                      )
-                    ) : (
-                      <span className="text-muted">—</span>
-                    )}
-                  </td>
-                  <td className="text-right">
-                    {env.canEdit ? (
-                      <div style={{ display: 'flex', gap: '0.25rem', justifyContent: 'flex-end' }}>
+                        <span className="text-muted">—</span>
+                      )}
+                    </td>
+                    <td data-label="Description" className="text-muted">
+                      {env.description}
+                    </td>
+                    <td data-label="Enabled">
+                      {env.canEdit ? (
                         <button
                           type="button"
-                          className="btn btn-default btn-sm"
-                          disabled={isTesting}
-                          onClick={() => handleTest(env)}
+                          className="btn btn-sm"
+                          disabled={toggling.has(env.id)}
+                          onClick={() => handleToggleEnabled(env)}
+                          style={{
+                            background: env.enabled ? 'var(--success)' : 'var(--btn-default-bg)',
+                            color: env.enabled ? '#fff' : 'var(--muted)',
+                            borderColor: env.enabled ? 'var(--success)' : 'var(--border)',
+                          }}
+                          title={env.enabled ? 'Disable this environment' : 'Enable this environment'}
                         >
-                          {isTesting ? 'Testing…' : 'Test'}
+                          {toggling.has(env.id) ? '…' : env.enabled ? 'Enabled' : 'Disabled'}
                         </button>
-                        <button
-                          type="button"
-                          className="btn btn-primary btn-sm"
-                          onClick={() => setEditing({ mode: 'edit', env })}
+                      ) : (
+                        // Someone else's environment: the state is shown, not
+                        // offered — a toggle here would 403.
+                        <span
+                          className={env.enabled ? 'text-success' : 'text-muted'}
+                          title="only the owner or an administrator can change this"
                         >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-danger btn-sm"
-                          onClick={() => handleDelete(env)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    ) : (
-                      <span className="text-muted">read-only</span>
-                    )}
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+                          {env.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      )}
+                    </td>
+                    <td data-label="Updated" className="text-muted">
+                      {formatTime(env.updatedAt)}
+                    </td>
+                    <td data-label="Status">
+                      {res ? (
+                        res.success ? (
+                          <span className="text-success">✓ reachable</span>
+                        ) : (
+                          <span className="text-danger">✗ unreachable</span>
+                        )
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
+                    </td>
+                    <td className="text-right row-actions">
+                      {env.canEdit ? (
+                        <div className="row-action-buttons">
+                          <button
+                            type="button"
+                            className="btn btn-default btn-sm"
+                            disabled={isTesting}
+                            onClick={() => handleTest(env)}
+                          >
+                            {isTesting ? 'Testing…' : 'Test'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            onClick={() => setEditing({ mode: 'edit', env })}
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-danger btn-sm"
+                            onClick={() => handleDelete(env)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-muted">read-only</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
 
       {envs !== null && envs.length > 0 && (

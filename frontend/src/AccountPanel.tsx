@@ -271,91 +271,97 @@ function AccountsTable({
         </div>
       )}
 
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Username</th>
-            <th>Email</th>
-            <th>Source</th>
-            <th>Role</th>
-            <th>Status</th>
-            <th>Created</th>
-            <th />
-          </tr>
-        </thead>
-        <tbody>
-          {accounts.map((a) => {
-            const isSelf = a.id === me.id
-            // The server refuses all of these; not offering the button keeps
-            // the reason out of the user's way.
-            const canDisable = !isSelf && a.role !== 'admin'
-            const canApprove = canDisable && !a.approved
-            return (
-              <tr key={a.id}>
-                <td>
-                  {a.username}
-                  {isSelf && <span className="text-muted"> (you)</span>}
-                </td>
-                <td>{a.email}</td>
-                <td>
-                  {a.source === 'gitlab' ? (
-                    // The GitLab user id is worth showing: it is what ties the
-                    // account to the instance, and two GitLab accounts can
-                    // share a username (the second one gets a suffix).
-                    <span title={a.gitlabId ? `GitLab user id ${a.gitlabId}` : undefined}>
-                      GitLab
-                    </span>
-                  ) : (
-                    <span className="text-muted">Local</span>
-                  )}
-                </td>
-                <td>{a.role === 'admin' ? 'Administrator' : 'User'}</td>
-                <td>
-                  {a.disabled ? (
-                    <span className="text-danger">Disabled</span>
-                  ) : !a.approved ? (
-                    <span className="text-warn">Pending approval</span>
-                  ) : (
-                    <span className="text-muted">Active</span>
-                  )}
-                </td>
-                <td className="text-muted">{formatTime(a.createdAt)}</td>
-                <td className="text-right">
-                  {canApprove && (
-                    <>
+      <div className="table-scroll">
+        <table className="table table-stack">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Email</th>
+              <th>Source</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Created</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {accounts.map((a) => {
+              const isSelf = a.id === me.id
+              // The server refuses all of these; not offering the button keeps
+              // the reason out of the user's way.
+              const canDisable = !isSelf && a.role !== 'admin'
+              const canApprove = canDisable && !a.approved
+              return (
+                <tr key={a.id}>
+                  <td data-label="Username">
+                    {a.username}
+                    {isSelf && <span className="text-muted"> (you)</span>}
+                  </td>
+                  <td data-label="Email">{a.email}</td>
+                  <td data-label="Source">
+                    {a.source === 'gitlab' ? (
+                      // The GitLab user id is worth showing: it is what ties the
+                      // account to the instance, and two GitLab accounts can
+                      // share a username (the second one gets a suffix).
+                      <span title={a.gitlabId ? `GitLab user id ${a.gitlabId}` : undefined}>
+                        GitLab
+                      </span>
+                    ) : (
+                      <span className="text-muted">Local</span>
+                    )}
+                  </td>
+                  <td data-label="Role">
+                    {a.role === 'admin' ? 'Administrator' : 'User'}
+                  </td>
+                  <td data-label="Status">
+                    {a.disabled ? (
+                      <span className="text-danger">Disabled</span>
+                    ) : !a.approved ? (
+                      <span className="text-warn">Pending approval</span>
+                    ) : (
+                      <span className="text-muted">Active</span>
+                    )}
+                  </td>
+                  <td data-label="Created" className="text-muted">
+                    {formatTime(a.createdAt)}
+                  </td>
+                  <td className="text-right row-actions">
+                    <div className="row-action-buttons">
+                      {canApprove && (
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-primary"
+                          disabled={busyID === a.id}
+                          onClick={() => approve(a)}
+                        >
+                          Approve
+                        </button>
+                      )}
                       <button
                         type="button"
-                        className="btn btn-sm btn-primary"
-                        disabled={busyID === a.id}
-                        onClick={() => approve(a)}
+                        className="btn btn-sm"
+                        onClick={() => setEditing(a)}
                       >
-                        Approve
-                      </button>{' '}
-                    </>
-                  )}
-                  <button
-                    type="button"
-                    className="btn btn-sm"
-                    onClick={() => setEditing(a)}
-                  >
-                    Edit
-                  </button>{' '}
-                  {canDisable && (
-                    <button
-                      type="button"
-                      className={a.disabled ? 'btn btn-sm btn-default' : 'btn btn-sm btn-danger'}
-                      disabled={busyID === a.id}
-                      onClick={() => toggleDisabled(a)}
-                    >
-                      {a.disabled ? 'Enable' : 'Disable'}
-                    </button>
-                  )}
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+                        Edit
+                      </button>
+                      {canDisable && (
+                        <button
+                          type="button"
+                          className={a.disabled ? 'btn btn-sm btn-default' : 'btn btn-sm btn-danger'}
+                          disabled={busyID === a.id}
+                          onClick={() => toggleDisabled(a)}
+                        >
+                          {a.disabled ? 'Enable' : 'Disable'}
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
 
       {editing && (
         <EditAccountDialog
