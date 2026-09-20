@@ -1443,8 +1443,12 @@ code {
   color: var(--fg, inherit);
 }
 
+/* The Monaco editors the dialogs host ask for height="100%", so this box has
+   to have a real height. It must be `flex-basis: auto`, not the `flex: 1`
+   shorthand: `flex: 1` means `flex-basis: 0%`, which wins over `height` on the
+   main axis and collapses the body — and with it the editor — to nothing. */
 .dialog-body {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
   height: 60vh;
 }
