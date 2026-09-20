@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate } from 'react-router'
 import Editor, { type OnMount } from '@monaco-editor/react'
 import { defineMonacoTheme } from './monacoTheme'
@@ -40,6 +40,14 @@ print(platform.platform())
 const INTERPRETERS: Record<ScriptLanguage, string[]> = {
   bash: ['#!/usr/bin/env bash', '#!/bin/bash', '# bash'],
   python: ['#!/usr/bin/env python3', '#!/usr/bin/env python', '# python3'],
+}
+
+// EnvScopeNote states which environments an entry point draws on. The three
+// entry points of this page differ — a yaml matrix is matched site-wide by
+// tags, while the two pickers only offer what this account may run on — and
+// the difference cannot be read off the form itself, so each says it.
+function EnvScopeNote({ children }: { children: ReactNode }) {
+  return <p className="env-scope">{children}</p>
 }
 
 // RunPage offers two ways to exercise a test environment, side by side as
@@ -97,7 +105,10 @@ function ExecTab({ onError }: RunPageProps) {
     listEnvironments()
       .then((envs) => {
         if (cancelled) return
-        const enabled = envs.filter((e) => e.enabled)
+        // Running a command here logs in with the environment's private key,
+        // and the list is site-wide: only offer the ones this account may
+        // actually use.
+        const enabled = envs.filter((e) => e.enabled && e.canEdit)
         setEnvironments(enabled)
         if (enabled.length > 0) {
           setEnvId((current) =>
@@ -173,12 +184,22 @@ function ExecTab({ onError }: RunPageProps) {
         (e.g. <code>#!/usr/bin/env python3</code>).
       </p>
 
+      <EnvScopeNote>
+        <strong>Environments: the ones you may run on.</strong> A command or
+        script logs in with the environment's stored private key, so the picker
+        offers your own environments — and every environment, if you are an
+        administrator. The environment list itself is site-wide: you can see
+        every row on the Runner Envs page, but not run on someone else's. (A
+        yaml matrix dispatch, on the Manual test tab, is matched site-wide and
+        may still land on another account's machine.)
+      </EnvScopeNote>
+
       {loading ? (
         <p>Loading environments…</p>
       ) : environments.length === 0 ? (
         <div className="alert alert-danger">
-          No enabled environments available. Enable one in the
-          Runner Envs page first.
+          No environment you may run on is enabled. Enable one of your own in
+          the Runner Envs page — an administrator can use every environment.
         </div>
       ) : (
         <>
@@ -385,6 +406,15 @@ function YAMLTriggerSection({
         </small>
       </fieldset>
 
+      <EnvScopeNote>
+        <strong>Environments: the whole site, chosen by tags.</strong> Nothing
+        is selected here: each entry of the matrix is matched against{' '}
+        <em>every</em> enabled environment, whoever registered it — so a run
+        may land on a machine belonging to another account, and your machines
+        are candidates for anybody's push. A disabled environment takes no
+        part in the matching.
+      </EnvScopeNote>
+
       {error && <div className="alert alert-danger">{error}</div>}
 
       {result && !error && (
@@ -424,7 +454,12 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
     Promise.all([listEnvironments(), cachedSiteConfig()])
       .then(([envs, cfg]) => {
         if (cancelled) return
-        const enabled = envs.filter((e) => e.enabled)
+        // A manual dispatch is a deliberate run on a named machine, so it
+        // offers the environments this account may use — its own, plus every
+        // one when it is an administrator. (A yaml/webhook dispatch is
+        // site-wide and may still land on the others; see the Runner Envs
+        // page.)
+        const enabled = envs.filter((e) => e.enabled && e.canEdit)
         setEnvironments(enabled)
         setSelected(new Set(enabled.map((e) => e.id))) // default: all
         if (cfg) setRepo(cfg.codeRepo)
@@ -496,12 +531,20 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
         )}
       </p>
 
+      <EnvScopeNote>
+        <strong>Environments: the ones you may dispatch to.</strong> Unlike the
+        yaml matrix above, a manual dispatch is a deliberate run on a machine
+        you name, so the list below offers your own environments — and every
+        environment, if you are an administrator. The Runner Envs page still
+        lists the whole site, and a yaml or webhook push may run on any of it.
+      </EnvScopeNote>
+
       {loading ? (
         <p>Loading environments…</p>
       ) : environments.length === 0 ? (
         <div className="alert alert-danger">
-          No enabled environments available. Enable one in the
-          Runner Envs page first.
+          No environment you may dispatch to is enabled. Enable one of your own
+          in the Runner Envs page — an administrator can use every environment.
         </div>
       ) : (
         <form
@@ -603,7 +646,7 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
           </fieldset>
 
           <fieldset className="form-group">
-            <label>Environments (all enabled selected by default)</label>
+            <label>Environments (all available selected by default)</label>
             <div className="manual-envs">
               {environments.map((env) => (
                 <label key={env.id} className="run-lang-option">

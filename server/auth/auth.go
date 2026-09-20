@@ -1,4 +1,5 @@
-// Package auth contains helpers for password hashing and session tokens.
+// Package auth contains helpers for account field validation, password
+// hashing and session tokens.
 package auth
 
 import (

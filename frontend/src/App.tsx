@@ -108,7 +108,7 @@ function App() {
           {loadingMe ? (
             <p className="text-muted">Loading…</p>
           ) : me ? (
-            <PageRoutes />
+            <PageRoutes me={me} onMeChange={setMe} />
           ) : (
             <LoginPage onLogin={setMe} />
           )}
@@ -139,8 +139,9 @@ function App() {
 
 // PageRoutes is the signed-in route table. Lazy routes share one Suspense
 // fallback; the eager pages (dashboard, pipeline, run detail) render without
-// it.
-function PageRoutes() {
+// it. The signed-in account is passed to the one page that edits it, so a
+// change there (a new username, say) reaches the navbar immediately.
+function PageRoutes({ me, onMeChange }: { me: Me; onMeChange: (me: Me) => void }) {
   return (
     <Routes>
       <Route path="/" element={<DashboardPage onError={console.warn} />} />
@@ -164,7 +165,7 @@ function PageRoutes() {
         path="/settings"
         element={
           <Suspense fallback={<p className="text-muted">Loading…</p>}>
-            <SettingsPage onError={console.warn} />
+            <SettingsPage me={me} onMeChange={onMeChange} onError={console.warn} />
           </Suspense>
         }
       />

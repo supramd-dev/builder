@@ -136,6 +136,14 @@ docker compose --profile tools run --rm cli adduser -username alice -email alice
 密码会以交互方式读取(也可以用 `-password` 传入,但那样密码会留在
 shell 历史里)。需要演示数据时,`seed` 走同一条路。
 
+加上 `-admin` 创建的是**管理员** —— 可以在 **Settings → Users** 里管理
+其他账号的账号(见[站点配置 → 用户账号](#/docs/site-configuration))。
+命令行是创建管理员的唯一途径,所以在服务端执行:
+
+```sh
+docker compose --profile tools run --rm cli adduser -admin -username root -email root@example.com
+```
+
 不用 compose 也可以,直接构建镜像即可 —— 镜像里是一个静态二进制
 文件加上构建好的前端,运行在 Alpine 上,全部配置也可以来自环境变量:
 

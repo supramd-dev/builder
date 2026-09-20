@@ -29,8 +29,8 @@ func TestEnvironmentCRUD(t *testing.T) {
 		t.Fatal("expected ID set after create")
 	}
 
-	// List (owner-scoped).
-	envs, err := s.ListEnvironments(u.ID)
+	// List (site-wide: the pool is shared, the API layer decides who may edit).
+	envs, err := s.ListAllEnvironments()
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -38,53 +38,92 @@ func TestEnvironmentCRUD(t *testing.T) {
 		t.Fatalf("unexpected list: %+v", envs)
 	}
 
-	// Another user sees nothing.
+	// Another user's row shows up in the same list: the store does not filter
+	// by owner, and the environment carries the owner the API layer checks.
 	other := &User{Username: "other", Email: "other@example.com", PasswordHash: "hash"}
 	if err := s.CreateUser(other); err != nil {
 		t.Fatalf("create other user: %v", err)
 	}
-	envs, err = s.ListEnvironments(other.ID)
-	if err != nil {
-		t.Fatalf("list other: %v", err)
+	foreign := &TestEnvironment{
+		OwnerID: other.ID, Name: "gpu-a100", Host: "h", Username: "u", PrivateKey: "k",
 	}
-	if len(envs) != 0 {
-		t.Fatalf("expected empty list for other owner, got %d", len(envs))
+	if err := s.CreateEnvironment(foreign); err != nil {
+		t.Fatalf("create foreign: %v", err)
+	}
+	envs, err = s.ListAllEnvironments()
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	if len(envs) != 2 {
+		t.Fatalf("expected both owners' environments, got %d", len(envs))
 	}
 
-	// Get (own + foreign).
-	got, err := s.GetEnvironment(u.ID, env.ID)
+	// Get.
+	got, err := s.GetEnvironment(env.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if got.Host != "192.168.1.10" || got.Username != "runner" {
+	if got.Host != "192.168.1.10" || got.Username != "runner" || got.OwnerID != u.ID {
 		t.Fatalf("unexpected env: %+v", got)
-	}
-	if _, err := s.GetEnvironment(other.ID, env.ID); !errors.Is(err, gorm.ErrRecordNotFound) {
-		t.Fatalf("expected not found for foreign owner, got %v", err)
 	}
 
 	// Update.
-	got.Name = "gpu-a100"
+	got.Name = "renamed-node"
 	got.Host = "gpu.example.com:22"
 	if err := s.UpdateEnvironment(got); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	got2, err := s.GetEnvironment(u.ID, env.ID)
+	got2, err := s.GetEnvironment(env.ID)
 	if err != nil {
 		t.Fatalf("get after update: %v", err)
 	}
-	if got2.Name != "gpu-a100" || got2.Host != "gpu.example.com:22" {
+	if got2.Name != "renamed-node" || got2.Host != "gpu.example.com:22" {
 		t.Fatalf("update not persisted: %+v", got2)
 	}
 
-	// Delete.
-	if err := s.DeleteEnvironment(u.ID, env.ID); err != nil {
+	// Delete removes only the addressed row.
+	if err := s.DeleteEnvironment(env.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if _, err := s.GetEnvironment(u.ID, env.ID); !errors.Is(err, gorm.ErrRecordNotFound) {
+	if _, err := s.GetEnvironment(env.ID); !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("expected not found after delete, got %v", err)
 	}
-	// Foreign delete is a no-op that reports no error, but record remains for owner.
+	if _, err := s.GetEnvironment(foreign.ID); err != nil {
+		t.Fatalf("delete removed another environment: %v", err)
+	}
+}
+
+// TestUsernamesByID covers the one-query owner-name lookup the environment
+// list and the dashboard columns are labelled with.
+func TestUsernamesByID(t *testing.T) {
+	s := newTestStore(t)
+	alice := &User{Username: "alice", Email: "a@example.com", PasswordHash: "hash"}
+	bob := &User{Username: "bob", Email: "b@example.com", PasswordHash: "hash"}
+	for _, u := range []*User{alice, bob} {
+		if err := s.CreateUser(u); err != nil {
+			t.Fatalf("create user: %v", err)
+		}
+	}
+
+	names, err := s.UsernamesByID([]int64{alice.ID, bob.ID, 9999})
+	if err != nil {
+		t.Fatalf("usernames: %v", err)
+	}
+	if names[alice.ID] != "alice" || names[bob.ID] != "bob" {
+		t.Fatalf("unexpected names: %+v", names)
+	}
+	if _, ok := names[9999]; ok {
+		t.Fatalf("unknown id must be absent, got %+v", names)
+	}
+
+	// No ids: no query, empty result.
+	empty, err := s.UsernamesByID(nil)
+	if err != nil {
+		t.Fatalf("empty usernames: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("expected empty map, got %+v", empty)
+	}
 }
 
 func TestEnvironmentBeforeSaveRequiresOwner(t *testing.T) {
@@ -112,7 +151,7 @@ func TestSetEnvironmentEnabled(t *testing.T) {
 	}
 
 	// Disable.
-	got, err := s.SetEnvironmentEnabled(u.ID, env.ID, false)
+	got, err := s.SetEnvironmentEnabled(env.ID, false)
 	if err != nil {
 		t.Fatalf("disable: %v", err)
 	}
@@ -120,7 +159,7 @@ func TestSetEnvironmentEnabled(t *testing.T) {
 		t.Fatal("expected disabled after toggle")
 	}
 	// Persisted.
-	got, err = s.GetEnvironment(u.ID, env.ID)
+	got, err = s.GetEnvironment(env.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -129,7 +168,7 @@ func TestSetEnvironmentEnabled(t *testing.T) {
 	}
 
 	// Re-enable.
-	got, err = s.SetEnvironmentEnabled(u.ID, env.ID, true)
+	got, err = s.SetEnvironmentEnabled(env.ID, true)
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
@@ -137,12 +176,8 @@ func TestSetEnvironmentEnabled(t *testing.T) {
 		t.Fatal("expected enabled after re-toggle")
 	}
 
-	// Foreign owner cannot toggle.
-	other := &User{Username: "toggler", Email: "toggler@example.com", PasswordHash: "hash"}
-	if err := s.CreateUser(other); err != nil {
-		t.Fatalf("create other: %v", err)
-	}
-	if _, err := s.SetEnvironmentEnabled(other.ID, env.ID, false); !errors.Is(err, gorm.ErrRecordNotFound) {
-		t.Fatalf("expected not found for foreign owner, got %v", err)
+	// An unknown id is a lookup failure, not a silent no-op.
+	if _, err := s.SetEnvironmentEnabled(env.ID+999, false); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected not found for unknown environment, got %v", err)
 	}
 }

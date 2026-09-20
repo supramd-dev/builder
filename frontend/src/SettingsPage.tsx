@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Check, Copy, ExternalLink } from 'lucide-react'
+import { Check, Copy, ExternalLink, RefreshCw } from 'lucide-react'
 import {
   cachedSiteConfig,
   getSiteConfig,
+  rotateWebhookToken,
   updateSiteConfig,
+  type Me,
   type SiteConfig,
 } from './api'
+import AccountPanel from './AccountPanel'
 import {
   allTimezones,
   applySiteTimezone,
@@ -16,15 +19,20 @@ import {
 } from './timezone'
 
 interface SettingsPageProps {
+  me: Me
+  onMeChange: (me: Me) => void
   onError: (message: string) => void
 }
 
 // SettingsPage organizes the site-wide configuration into tabs: the code
-// repository (and its credentials), the display settings (timezone), and
-// the GitLab webhook reference. Test inputs live inside the code repository
-// itself, so there is no separate test-input tab.
-export default function SettingsPage({ onError }: SettingsPageProps) {
-  const [tab, setTab] = useState<'repo' | 'display' | 'webhook'>('repo')
+// repository (and its credentials), the display settings (timezone), the
+// GitLab webhook reference, and the account tab — everyone edits their own
+// account there, and an administrator also manages the other accounts. Test
+// inputs live inside the code repository itself, so there is no separate
+// test-input tab.
+export default function SettingsPage({ me, onMeChange, onError }: SettingsPageProps) {
+  const [tab, setTab] = useState<'repo' | 'display' | 'webhook' | 'account'>('repo')
+  const isAdmin = me.role === 'admin'
 
   return (
     <div>
@@ -57,13 +65,26 @@ export default function SettingsPage({ onError }: SettingsPageProps) {
         >
           Webhook
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'account'}
+          className={tab === 'account' ? 'tab active' : 'tab'}
+          onClick={() => setTab('account')}
+        >
+          {/* The same tab, named for what it holds: only an administrator
+              gets the account list, so only an administrator sees "Users". */}
+          {isAdmin ? 'Users' : 'Account'}
+        </button>
       </div>
       {tab === 'repo' ? (
         <RepositoryTab onError={onError} />
       ) : tab === 'display' ? (
         <DisplayTab onError={onError} />
+      ) : tab === 'webhook' ? (
+        <WebhookTab me={me} />
       ) : (
-        <WebhookTab />
+        <AccountPanel me={me} onMeChange={onMeChange} onError={onError} />
       )}
     </div>
   )
@@ -460,15 +481,22 @@ function gitlabWebhooksURL(codeRepo: string): string {
   return `${url}/-/hooks`
 }
 
-// WebhookTab shows the webhook endpoint as a copy-ready absolute URL and a
-// link straight into the GitLab project's webhook settings (the configured
-// code repository, when it is an http(s) GitLab URL). The endpoint itself is
-// unauthenticated; GitLab should be pointed at it with the Push events, Tag
-// push events and Merge request events triggers.
-function WebhookTab() {
-  const [codeRepo, setCodeRepo] = useState('')
+// WebhookTab shows the webhook endpoint as a copy-ready absolute URL, the
+// shared secret GitLab has to send back with every event, and a link
+// straight into the GitLab project's webhook settings (the configured code
+// repository, when it is an http(s) GitLab URL). GitLab should be pointed at
+// it with the Push events, Tag push events and Merge request events
+// triggers.
+//
+// The secret is generated with the site configuration and can be rotated
+// here; both reading and rotating it are administrator-only, so a regular
+// user sees just the URL and a note to ask one.
+function WebhookTab({ me }: { me: Me }) {
+  const [cfg, setCfg] = useState<SiteConfig | null>(null)
   const [origin, setOrigin] = useState('')
-  const [copied, setCopied] = useState(false)
+  const [copied, setCopied] = useState<'url' | 'token' | ''>('')
+  const [rotating, setRotating] = useState(false)
+  const [error, setError] = useState('')
 
   useEffect(() => {
     // The origin is stable for a page load; capture it once the tab mounts
@@ -476,8 +504,8 @@ function WebhookTab() {
     setOrigin(window.location.origin)
     let cancelled = false
     cachedSiteConfig()
-      .then((cfg) => {
-        if (!cancelled && cfg) setCodeRepo(cfg.codeRepo)
+      .then((loaded) => {
+        if (!cancelled && loaded) setCfg(loaded)
       })
       .catch(() => {
         // The tab degrades to the path-only URL without the repo link.
@@ -488,16 +516,38 @@ function WebhookTab() {
   }, [])
 
   const webhookURL = origin ? `${origin}/api/webhooks/gitlab` : '/api/webhooks/gitlab'
-  const gitlabURL = gitlabWebhooksURL(codeRepo)
+  const gitlabURL = gitlabWebhooksURL(cfg?.codeRepo ?? '')
+  const isAdmin = me.role === 'admin'
+  const token = cfg?.webhookToken ?? ''
 
-  const copy = async () => {
+  const copy = async (what: 'url' | 'token', value: string) => {
     try {
-      await navigator.clipboard.writeText(webhookURL)
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 2000)
+      await navigator.clipboard.writeText(value)
+      setCopied(what)
+      window.setTimeout(() => setCopied(''), 2000)
     } catch {
       // Clipboard API unavailable (insecure context): select-then-copy is
-      // the fallback users can do by hand; keep the field read-selectable.
+      // the fallback users can do by hand; keep the fields read-selectable.
+    }
+  }
+
+  const rotate = async () => {
+    if (
+      !window.confirm(
+        'Generate a new webhook token? The GitLab webhook keeps failing until ' +
+          'you paste the new token into its Secret token field.',
+      )
+    ) {
+      return
+    }
+    setRotating(true)
+    setError('')
+    try {
+      setCfg(await rotateWebhookToken())
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setRotating(false)
     }
   }
 
@@ -520,17 +570,70 @@ function WebhookTab() {
             value={webhookURL}
             onFocus={(e) => e.target.select()}
           />
-          <button type="button" className="btn" onClick={copy} title="Copy to clipboard">
-            {copied ? <Check size={14} /> : <Copy size={14} />}
-            {copied ? 'Copied' : 'Copy'}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => copy('url', webhookURL)}
+            title="Copy to clipboard"
+          >
+            {copied === 'url' ? <Check size={14} /> : <Copy size={14} />}
+            {copied === 'url' ? 'Copied' : 'Copy'}
           </button>
         </div>
         <small className="text-muted">
-          The endpoint is unauthenticated (called by the GitLab server, which
-          cannot hold a session); verify the <code>X-Gitlab-Token</code>{' '}
-          header once a secret token is configured.
+          GitLab posts to it over the network, so it cannot use a session
+          cookie: it authenticates with the token below instead.
         </small>
       </div>
+
+      {isAdmin ? (
+        <div className="form-group">
+          <label>Secret token</label>
+          <div className="webhook-copy-row">
+            <input
+              type="text"
+              readOnly
+              value={token}
+              onFocus={(e) => e.target.select()}
+            />
+            <button
+              type="button"
+              className="btn"
+              onClick={() => copy('token', token)}
+              title="Copy to clipboard"
+            >
+              {copied === 'token' ? <Check size={14} /> : <Copy size={14} />}
+              {copied === 'token' ? 'Copied' : 'Copy'}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              onClick={rotate}
+              disabled={rotating}
+              title="Generate a new token"
+            >
+              <RefreshCw size={14} />
+              {rotating ? 'Generating…' : 'Regenerate'}
+            </button>
+          </div>
+          <small className="text-muted">
+            Paste this into the webhook's <em>Secret token</em> field in
+            GitLab; every event must carry it back in{' '}
+            <code>X-Gitlab-Token</code>, and events without it are rejected.
+            This is not the secret token of the Repository tab: that one is
+            handed to your build scripts as <code>MD_SECRET_TOKEN</code> and
+            is never shown here. Regenerating breaks the GitLab webhook until
+            the new value is saved there.
+          </small>
+          {error && <div className="alert alert-danger">{error}</div>}
+        </div>
+      ) : (
+        <p className="text-muted">
+          The webhook secret is shown to administrators only. Ask an
+          administrator to copy it into the GitLab webhook's{' '}
+          <em>Secret token</em> field.
+        </p>
+      )}
 
       {gitlabURL ? (
         <p>

@@ -90,27 +90,11 @@ func (s *Store) CreateEnvironment(env *TestEnvironment) error {
 	return s.DB.Create(env).Error
 }
 
-// ListEnvironments returns all environments owned by the given user, newest first.
-func (s *Store) ListEnvironments(ownerID int64) ([]TestEnvironment, error) {
-	var envs []TestEnvironment
-	if err := s.DB.Where("owner_id = ?", ownerID).Order("updated_at DESC").Find(&envs).Error; err != nil {
-		return nil, err
-	}
-	return envs, nil
-}
-
-// GetEnvironment loads a single environment, ensuring it belongs to ownerID.
-func (s *Store) GetEnvironment(ownerID, id int64) (*TestEnvironment, error) {
-	var env TestEnvironment
-	if err := s.DB.Where("id = ? AND owner_id = ?", id, ownerID).First(&env).Error; err != nil {
-		return nil, err
-	}
-	return &env, nil
-}
-
-// GetEnvironmentAny loads an environment by id regardless of ownership —
-// used by site-wide views (dashboard) and result reporting.
-func (s *Store) GetEnvironmentAny(id int64) (*TestEnvironment, error) {
+// GetEnvironment loads an environment by id. Reads are not owner-scoped:
+// every signed-in user sees the whole site-wide pool (the environment list is
+// read-only for environments they do not own), and dispatch draws on it.
+// Whether the caller may *change* what it read is the API layer's call.
+func (s *Store) GetEnvironment(id int64) (*TestEnvironment, error) {
 	var env TestEnvironment
 	if err := s.DB.First(&env, id).Error; err != nil {
 		return nil, err
@@ -118,15 +102,15 @@ func (s *Store) GetEnvironmentAny(id int64) (*TestEnvironment, error) {
 	return &env, nil
 }
 
-// UpdateEnvironment saves changes to an existing environment owned by ownerID.
+// UpdateEnvironment saves changes to an existing environment.
 func (s *Store) UpdateEnvironment(env *TestEnvironment) error {
 	return s.DB.Save(env).Error
 }
 
-// SetEnvironmentEnabled flips the enabled flag of an environment owned by
-// ownerID and returns the updated record.
-func (s *Store) SetEnvironmentEnabled(ownerID, id int64, enabled bool) (*TestEnvironment, error) {
-	env, err := s.GetEnvironment(ownerID, id)
+// SetEnvironmentEnabled flips the enabled flag of an environment and returns
+// the updated record.
+func (s *Store) SetEnvironmentEnabled(id int64, enabled bool) (*TestEnvironment, error) {
+	env, err := s.GetEnvironment(id)
 	if err != nil {
 		return nil, err
 	}
@@ -137,10 +121,10 @@ func (s *Store) SetEnvironmentEnabled(ownerID, id int64, enabled bool) (*TestEnv
 	return env, nil
 }
 
-// DeleteEnvironment removes an environment owned by ownerID, together with
-// its test runs, case results and tasks (the dashboard shows site-wide
-// history, so dangling rows would otherwise survive the environment).
-func (s *Store) DeleteEnvironment(ownerID, id int64) error {
+// DeleteEnvironment removes an environment, together with its test runs, case
+// results and tasks (the dashboard shows site-wide history, so dangling rows
+// would otherwise survive the environment).
+func (s *Store) DeleteEnvironment(id int64) error {
 	return s.DB.Transaction(func(tx *gorm.DB) error {
 		var runIDs []int64
 		if err := tx.Model(&TestRun{}).Where("environment_id = ?", id).
@@ -168,12 +152,14 @@ func (s *Store) DeleteEnvironment(ownerID, id int64) error {
 				return err
 			}
 		}
-		return tx.Where("id = ? AND owner_id = ?", id, ownerID).Delete(&TestEnvironment{}).Error
+		return tx.Where("id = ?", id).Delete(&TestEnvironment{}).Error
 	})
 }
 
 // ListAllEnvironments returns every environment on the site, name-ordered.
-// The dashboard matrix is a site-wide view, so it is not owner-scoped.
+// The environment list and the dashboard matrix are site-wide views: an
+// environment is a machine the site's tests may run on, not a private row, so
+// neither is owner-scoped.
 func (s *Store) ListAllEnvironments() ([]TestEnvironment, error) {
 	var envs []TestEnvironment
 	if err := s.DB.Order("name ASC, id ASC").Find(&envs).Error; err != nil {

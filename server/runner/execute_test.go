@@ -125,7 +125,7 @@ func newExecuteFixture(t *testing.T, yaml string) (*Service, *store.Store, *fake
 	svc := &Service{Store: s, SSH: exec, Clone: cloner}
 
 	// Dispatch through the real path (fake fetcher) to build the graph.
-	svc.FetchYAML = func(codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
+	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
 		return []byte(yaml), nil
 	}
 	res := svc.DispatchForCommit(commit)
@@ -987,7 +987,7 @@ func TestExecuteCaseFailureMarksRunFailed(t *testing.T) {
 func TestExecuteEnvScriptWrittenAndSourced(t *testing.T) {
 	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
 	// Configure an env script on the environment.
-	env, err := s.GetEnvironmentAny(cloneTask.EnvironmentID)
+	env, err := s.GetEnvironment(cloneTask.EnvironmentID)
 	if err != nil {
 		t.Fatal(err)
 	}

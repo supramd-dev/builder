@@ -25,6 +25,11 @@ const (
 	pollInterval   = 2 * time.Second
 )
 
+// defaultFetchTimeout bounds the md-builder.yaml read when Service.FetchTimeout
+// is unset: long enough for a slow repository server, short enough that a hung
+// one fails instead of holding the dispatching goroutine.
+const defaultFetchTimeout = 60 * time.Second
+
 // Service is the runner component: task dispatch (creation), scheduling
 // (execution pool) and sub-task execution. Construct with NewService; call
 // Start once from main to launch the scheduling pool.
@@ -38,6 +43,17 @@ type Service struct {
 	// Workers is the scheduling pool size (0 = defaultWorkers). main sets
 	// it from the configuration's worker section.
 	Workers int
+
+	// FetchTimeout caps the md-builder.yaml read (0 = defaultFetchTimeout).
+	FetchTimeout time.Duration
+}
+
+// fetchTimeout is the effective deadline for reading the test matrix.
+func (s *Service) fetchTimeout() time.Duration {
+	if s.FetchTimeout > 0 {
+		return s.FetchTimeout
+	}
+	return defaultFetchTimeout
 }
 
 // resolveRef resolves the Service's ref resolver, defaulting to the real
@@ -49,15 +65,15 @@ func (s *Service) resolveRef(ctx context.Context, repoURL, ref string, creds *Gi
 	return ResolveRef(ctx, repoURL, ref, creds)
 }
 
-// NewService returns a Service wired to the real SSH transport and git
-// cloner. Workers starts at 0, the default pool size; main sets it from the
-// configuration.
+// NewService returns a Service wired to the real SSH transport, git cloner and
+// yaml fetcher. Workers starts at 0, the default pool size; main sets it from
+// the configuration.
 func NewService(s *store.Store) *Service {
 	return &Service{
 		Store:     s,
 		SSH:       SSHExecer{},
 		Clone:     SSHExecer{},
-		FetchYAML: GitYAMLFetcher,
+		FetchYAML: NewYAMLFetcher(),
 	}
 }
 

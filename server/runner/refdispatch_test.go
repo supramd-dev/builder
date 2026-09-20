@@ -49,7 +49,7 @@ func TestDispatchForRef(t *testing.T) {
 		return sha, nil
 	}
 	yamlFetches := 0
-	svc.FetchYAML = func(codeRepoURL, atSHA string, creds *GitCredentials) ([]byte, error) {
+	svc.FetchYAML = func(ctx context.Context, codeRepoURL, atSHA string, creds *GitCredentials) ([]byte, error) {
 		yamlFetches++
 		if atSHA != sha {
 			t.Errorf("fetch yaml at %q, want %q", atSHA, sha)
@@ -158,7 +158,7 @@ func TestDispatchStoresDescriptions(t *testing.T) {
 	svc.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) {
 		return sha, nil
 	}
-	svc.FetchYAML = func(codeRepoURL, atSHA string, creds *GitCredentials) ([]byte, error) {
+	svc.FetchYAML = func(ctx context.Context, codeRepoURL, atSHA string, creds *GitCredentials) ([]byte, error) {
 		return []byte(`version: 2
 defaults:
   build:

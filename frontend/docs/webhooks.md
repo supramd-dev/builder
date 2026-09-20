@@ -7,8 +7,17 @@ POST https://your-server/api/webhooks/gitlab
 ```
 
 with the **Push events**, **Tag push events** and **Merge request events**
-triggers. The endpoint is unauthenticated (it is called by the GitLab
-server); verify the `X-Gitlab-Token` header once a secret is configured.
+triggers.
+
+The endpoint cannot use a session cookie — the caller is the GitLab
+server — so it authenticates with the site's webhook secret instead: copy
+the value from the **Secret token** field of Settings → Webhook into the
+webhook's own **Secret token** field in GitLab. GitLab then sends it back
+with every event in the `X-Gitlab-Token` header, and an event without it
+is rejected with `401` before the payload is parsed. The secret is
+generated with the site configuration, so it is already there on a fresh
+install; rotate it from the same tab if it leaks. See
+[Site configuration → Webhook secret](#/docs/site-configuration).
 
 ## What an event does
 
@@ -43,7 +52,57 @@ that repository (matched by path), dispatching kicks in automatically:
    [The test matrix](#/docs/test-matrix)).
 3. The response carries `jobsCreated` / `entriesSkipped`, plus a
    `dispatchError` when the YAML cannot be fetched or parsed — the
-   commit is still recorded either way.
+   commit is still recorded either way. The response is for the caller
+   (GitLab's webhook log); the same message is stored on the commit row,
+   so the dashboard explains the commit's empty columns long after the
+   response is gone — see below.
+
+**GitLab gives a webhook ten seconds to answer**, so the read in step 1
+must not scale with the repository. It does not: the server asks the code
+host for that one file over its API — the same request `curl` would make:
+
+```
+GET /api/v4/projects/group%2Fcode/repository/files/md-builder.yaml/raw?ref=<sha>
+PRIVATE-TOKEN: <the Project Access Token>
+```
+
+One small request, the same cost whether the repository holds ten commits
+or a hundred thousand.
+
+When the file is not there at that commit — the usual case, when the YAML
+has not been committed yet — the host says so, the dispatch ends with
+`file not found — commit the md-builder.yaml to the repository root`, and
+nothing else runs. That failure is the common one, so it is the one worth
+keeping cheap.
+
+Anything else the server cannot settle over that route falls back to a full
+clone, which is slower and *can* exceed the ten seconds:
+
+- the project is not readable with the configured token;
+- the repository location has no usable https form (a bare `group/code`);
+- the host answered with a page rather than the file (a sign-in redirect,
+  say) — the server refuses to hand that to the YAML parser.
+
+Nothing is lost either way: the commit is recorded before the fetch
+starts, so the dashboard column appears immediately and its cells fill in
+when the dispatch finishes. The fetch itself is capped (60 seconds by
+default), so an unreachable repository server ends as a recorded
+`dispatchError` rather than a request that never returns.
+
+Note that GitLab's *web* route for a file — the `/-/raw/<ref>/<path>` URL a
+browser opens — is not usable here: it authenticates through the browser
+session only and ignores the token, answering with a redirect to the
+sign-in page. The API route above is what accepts the token.
+
+Nothing is dropped silently: every step between the event and the task
+graphs leaves a record. A push that fails to dispatch (unreadable or
+invalid `md-builder.yaml`, an entry matching no enabled environment)
+shows a warning triangle in the **graph** column of the full dashboard —
+hover for the reason, click for the full text. A push that is not
+dispatched at all because the site has no code repository configured
+says so on its row too. Failures *after* dispatch — the clone, the
+build, the tests — are recorded on the tasks and runs themselves and
+show up as the usual stage statuses.
 
 Private repositories are handled with the Project Access Token
 configured in the site settings (see

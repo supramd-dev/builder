@@ -4,8 +4,11 @@
 /server/md-builder
 *.exe
 
-# Local SQLite databases (created at runtime by the server or adduser).
+# Local SQLite databases (created at runtime by the server or adduser), plus
+# the -wal/-shm sidecars SQLite leaves next to a database in WAL mode.
 *.db
+*.db-wal
+*.db-shm
 
 # Server configuration holding object-storage credentials. Commit
 # md-builder-server.example.yaml instead.

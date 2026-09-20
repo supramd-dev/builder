@@ -22,6 +22,12 @@ commit 行还带 **graph** 链接:该 commit 任务管线
 (clone → build → 单元/回归)的依赖图,GitHub Actions 风格 —— 点击阶段
 节点跳转到运行详情或实时任务日志(见 [Runner 与任务](#/docs/runner-strategy))。
 
+当某个 commit **完全没有图**、原因是派发失败时 —— `md-builder.yaml`
+读不到、内容非法、没有任何条目匹配到环境、没有配置代码仓库 —— graph
+列不再显示链接,而是一个警告三角:悬停显示原因,点击打开完整文本。
+该消息存放在 commit 行上(`dispatchError`,派发时写入,之后某次成功的
+派发会清空它),因此不会随 webhook 响应一起消失。
+
 手动派发的图在单元格上带一个小的 **M** 徽标,在任务页面上显示
 "manual" 标签。被重跑过的手动派发行(同一提交存在更新的尝试)会保留
 但置灰并带 **superseded**(已过期)标签 —— 同一提交只有最新一次尝试
@@ -49,7 +55,8 @@ commit 行还带 **graph** 链接:该 commit 任务管线
 
 每个阶段要么携带已记录的 `runId`(打开运行详情),要么在运行尚未落库时
 携带任务图的实时 `taskId`(`status` 为 `pending`/`running`/`failed`/
-`done` 之一)。`taskIds` 将环境映射到根任务 ID,用于图链接。
+`done` 之一)。`taskIds` 将环境映射到根任务 ID,用于图链接;
+`commit.dispatchError` 在派发完全没有产出图时携带记录下来的原因。
 
 ## 报告结果
 
@@ -135,6 +142,11 @@ Artifact 归属产出它的运行:单元测试运行的结果文件挂在单元�
 仅接受 bash、sh、python 和 python3。命令 60 秒超时,脚本 10 分钟。
 停用的环境拒绝两者。
 
+这两个端点都用环境存储的私钥登录,因此 —— 与
+`POST /api/environments/{id}/test` 以及对环境的任何写操作一样 ——
+仅限该环境的 owner 和管理员(否则 `403`)。读取列表则不受限制,见
+[测试环境](#/docs/environments)。
+
 ## 手动测试派发
 
 **Run command** 页面还可以把用户自定义的测试作为受调度的任务图派发
@@ -165,6 +177,10 @@ POST /api/jobs/manual
   root 任务,顺序与请求一致。
 - 图会标记 `trigger: 1`(手动);每次派发都记录一条新的 commit 行,
   因此重跑同一 ref 会新增矩阵行,旧行标记为 superseded。
+- `environmentIds` 是显式指定环境 —— 这里不做标签匹配 —— 且接受任意
+  **已启用**的环境 id:资源池是全站的,该端点不检查调用方是否拥有这一行。
+  Run 页面的选择框更严格,只给出该账号有权使用的环境(自己的,管理员
+  则是全部)。
 
 ### YAML 矩阵派发
 
@@ -192,6 +208,9 @@ ref 被解析(与手动派发相同的 `git ls-remote`)后,提交行按 **webhoo
 - 图标记 `trigger: 2`(手动 yaml)。重复触发同一 ref 会**复用同一批**
   图(按 commit+environment 定位)并以最新快照重建 —— yaml 或环境标签
   的修改会被采纳,矩阵不会多出新行。
+- 请求里没有环境列表:每个 yaml 条目按 tags 与**全站所有已启用环境**
+  匹配,不管环境是哪个账号注册的 —— 与 webhook 推送的匹配完全一致,
+  因此一次运行可能落在别的账号的机器上。
 - 出错(ref 无法解析、yaml 非法、无匹配环境)时返回 422,响应体带
   `dispatchError` 字段,与 webhook 响应一致;若提交已解析成功,该行
   仍会被记录。
@@ -199,31 +218,29 @@ ref 被解析(与手动派发相同的 `git ls-remote`)后,提交行按 **webhoo
 ## API 端点
 
 除非另行说明,所有端点都需要会话(cookie)。用户通过 `adduser` CLI
-创建(见[快速上手](#/docs/getting-started))。
+创建(见[快速上手](#/docs/getting-started));管理员同样在那里创建,用
+`adduser -admin`。
 
 | 方法   | 路径                            | 说明                                          |
 |--------|---------------------------------|-----------------------------------------------|
 | GET    | `/api/health`                   | 健康检查(无需会话)                          |
 | POST   | `/api/login`                    | 认证,设置会话 cookie                         |
 | POST   | `/api/logout`                   | 销毁当前会话                                  |
-| GET    | `/api/me`                       | 当前用户                                      |
-| GET    | `/api/environments`             | 列出用户的测试环境                            |
-| POST   | `/api/environments`             | 创建测试环境                                  |
-| GET    | `/api/environments/{id}`        | 获取单个环境                                  |
-| PUT    | `/api/environments/{id}`        | 更新单个环境                                  |
-| DELETE | `/api/environments/{id}`        | 删除单个环境(及其测试运行)                  |
-| POST   | `/api/environments/{id}/test`   | SSH 连通性检查                                |
-
-环境的创建/更新请求体包含 `name`、`host`、`username`、`privateKey`、
-`tags`、`description`、`enabled` 和 `envScript`(在每个阶段之前被
-source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。与私钥
-不同(更新时留空 = 保留原值),`envScript` 省略或留空即清除脚本。两个
-字段的回显行为也不同:私钥永不回显,环境脚本会原样返回(它不是机密)。
+| GET    | `/api/me`                       | 当前用户(`id`、`username`、`email`、`role`) |
+| GET    | `/api/users`                    | 列出全部账号(仅管理员)                      |
+| PUT    | `/api/users/{id}`               | 修改账号:自己的,或管理员修改任意账号      |
+| GET    | `/api/environments`             | 列出站点上的全部环境,每行带 `owner` 与 `canEdit` |
+| POST   | `/api/environments`             | 创建测试环境(创建者即 owner)               |
+| GET    | `/api/environments/{id}`        | 获取单个环境(任意已登录用户)                |
+| PUT    | `/api/environments/{id}`        | 更新单个环境(owner 或管理员)                |
+| DELETE | `/api/environments/{id}`        | 删除单个环境(owner 或管理员;及其测试运行)  |
+| POST   | `/api/environments/{id}/test`   | SSH 连通性检查(owner 或管理员)              |
 | PUT    | `/api/environments/{id}/enabled`| 启用/停用(`{"enabled": bool}`)               |
 | POST   | `/api/environments/{id}/exec`   | 运行 shell 命令(`{"command": string}`)       |
 | POST   | `/api/environments/{id}/script` | 运行脚本(`{"language", "script"}`)           |
-| GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`accessTokenSet`、`timezone`) |
+| GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`accessTokenSet`、`timezone`、`webhookToken` 仅管理员) |
 | PUT    | `/api/site-config`              | 更新站点配置(access token:留空保留,`clearAccessToken` 删除;`timezone`:IANA 名称,空 = 浏览器本地) |
+| POST   | `/api/site-config/webhook-token`| 轮换 webhook 密钥并返回配置(仅管理员) |
 | GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
 | POST   | `/api/test-runs`                | 报告测试运行结果                              |
@@ -237,4 +254,34 @@ source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。�
 | GET    | `/api/jobs`                     | 最近的任务图(`?limit=`;监控;旧 job 形状)    |
 | GET    | `/api/tasks/{id}`               | 单个任务;root 附带子任务列表与提交/环境上下文 |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | 给定序号之后的任务日志块(增量,实时跟随)   |
-| POST   | `/api/webhooks/gitlab`          | GitLab webhook 接收器(无需会话;见 [Webhooks](#/docs/webhooks)) |
+| POST   | `/api/webhooks/gitlab`          | GitLab webhook 接收器(无需会话:由 `X-Gitlab-Token` 请求头认证,见 [Webhooks](#/docs/webhooks)) |
+
+环境列表**不按 owner 过滤**:派发会把 yaml entry 与所有已启用环境逐一匹配,
+因此资源池是全站的,每一行对所有人都可见。每行带 `owner`(管理该环境的账号
+名)和 `canEdit`(owner 与管理员为 true),前端据此把别人的行渲染为只读。
+修改不属于自己的行返回 `403`;不存在的 id 返回 `404`。见
+[测试环境](#/docs/environments)。
+
+环境的创建/更新请求体包含 `name`、`host`、`username`、`privateKey`、
+`tags`、`description`、`enabled` 和 `envScript`(在每个阶段之前被
+source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。与私钥
+不同(更新时留空 = 保留原值),`envScript` 省略或留空即清除脚本。两个
+字段的回显行为也不同:私钥永不回显,环境脚本会原样返回(它不是机密)。
+
+站点配置里的几个 token 在“是否可读”上不同。`accessToken` 和
+`secretToken` 是只写的:接口只报告 `accessTokenSet` / `secretTokenSet`,
+永不返回值本身,更新时若不传值也不传对应的 `clear…` 标志就保留原值。
+`webhookToken` 是唯一的例外,会完整返回 —— 因为它需要被手工复制进
+GitLab —— 且只对管理员返回,其他人拿到的该字段为空。它随站点配置一起
+生成,因此永远不会为空;不能清空,只能用
+`POST /api/site-config/webhook-token` 轮换(仅管理员,返回完整配置)。
+webhook 端点用常量时间比较 `X-Gitlab-Token`,不匹配时在解析请求体之前
+就返回 401。见 [站点配置 → Webhook 密钥](#/docs/site-configuration)。
+
+账号相关端点正是两种角色差别所在。`/api/users` 需要管理员身份;
+`/api/users/{id}` 允许改自己的账号,管理员则可以改任意账号。请求体包含
+`username`、`email`、`password`(为空表示保留原密码)和 `disabled` ——
+最后一项仅管理员可用,且对管理员账号和自己都会被拒绝。`role` 不属于
+请求体,传了也不会生效:只有 `adduser -admin` 能创建管理员。改密码会
+登出该账号的其他会话,禁用则登出全部。见
+[站点配置 → 用户账号](#/docs/site-configuration)。

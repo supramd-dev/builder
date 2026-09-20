@@ -120,9 +120,18 @@ subcommand; the web UI only handles login. Passwords are hashed with
 bcrypt (cost 12); sessions are random 64-char hex tokens stored in the
 database and expire after 7 days.
 
+There are two roles. A regular user signs in and uses md-builder; an
+**administrator** additionally manages the accounts from **Settings → Users**
+(disable a regular user, edit anyone's username, email and password). An
+administrator can only be created here, with `-admin` — no request the web UI
+can make sets a role:
+
 ```sh
 # Interactive password (hidden, read from the terminal):
 go run ./server adduser -username alice -email alice@example.com
+
+# An administrator, who can then manage the other accounts in the web UI:
+go run ./server adduser -admin -username root -email root@example.com
 
 # Or pass the password directly:
 go run ./server adduser -username alice -email alice@example.com -password 's3cret!'
@@ -130,6 +139,19 @@ go run ./server adduser -username alice -email alice@example.com -password 's3cr
 # Select a different database:
 go run ./server adduser -username alice -email alice@example.com -dsn 'postgres://...'
 ```
+
+Usernames and email addresses must be unique and passwords at least 8
+characters long — `adduser` and the account API apply the same rules. See
+[Site configuration](frontend/docs/site-configuration.md) for what the panel
+does.
+
+The GitLab webhook cannot use a session, so it is authenticated by a
+**webhook secret** instead: generated with the site configuration, shown in
+**Settings → Webhook** (administrators only, rotatable there), and echoed
+back by GitLab in the `X-Gitlab-Token` header. Events without it are
+rejected with 401. It is deliberately not the same secret as the
+`MD_SECRET_TOKEN` handed to build commands — that one is write-only and
+travels the other way. See [Webhooks](frontend/docs/webhooks.md).
 
 The DSN is the `database.dsn` key of the server config file, defaulting to a
 local SQLite file `md-builder.db`; the `MD_BUILDER_DSN` environment variable

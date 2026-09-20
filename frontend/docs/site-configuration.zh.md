@@ -18,10 +18,11 @@ git@gitlab.example.com:group/code.git
 
 私有仓库需配置一个 **Project Access Token(项目访问令牌)** —— 在
 GitLab 的 *Settings → Access Tokens* 下创建,勾选 `read_repository`
-权限。令牌**仅在服务端使用**:读取代码仓库中的测试矩阵,以及在把源码
-上传到测试环境之前克隆该仓库(测试环境本身不需要任何仓库访问权限
-—— 见 [Runner 与任务](#/docs/runner-strategy))。以 SSH 形式给出的
-仓库地址(ssh:// 或 git@host:group/repo)会转为 https 形式并携带令牌
+权限。这一个权限就覆盖了服务端使用令牌的两件事:读取代码仓库中的
+测试矩阵(见 [GitLab webhooks](#/docs/webhooks)),以及在把源码上传
+到测试环境之前克隆该仓库(测试环境本身不需要任何仓库访问权限 —— 见
+[Runner 与任务](#/docs/runner-strategy))。以 SSH 形式给出的仓库地址
+(ssh:// 或 git@host:group/repo)会转为 https 形式并携带令牌读取与
 克隆。公开仓库令牌留空即可。
 
 令牌为只写:表单只显示是否已配置,绝不显示其值;留空表示保留已存的
@@ -45,6 +46,29 @@ build:
 都替换为 `REDACTED`。用法见
 [测试矩阵 → Secret token](#/docs/test-matrix)。
 
+## Webhook 密钥
+
+**Settings → Webhook** 标签页显示 webhook 端点用于校验的共享密钥。
+它在站点配置第一次被读取时自动生成 —— 无需任何手工步骤 —— GitLab
+投递的每个事件都必须通过 `X-Gitlab-Token` 请求头把它带回。缺失或
+错误的请求会在解析请求体之前被拒绝(401),因此伪造的 push 既不能
+写入 commit,也不能触发构建。
+
+把该值粘贴到 GitLab 侧 webhook 的 **Secret token** 字段。**Regenerate**
+会用新的随机值替换它;在新值保存到 GitLab 之前,webhook 会一直失败,
+所以当旧值可能泄露时(截图、共享终端、GitLab 导出)才需要轮换。
+
+这个密钥与上面的 secret token 是两回事,方向正好相反:
+
+| | 方向 | 用途 | 界面可见性 |
+|---|---|---|---|
+| **Webhook 密钥**(本标签页) | 入站 | 认证 GitLab 对 md-builder 的调用 | 可见,仅管理员 |
+| **Secret token**(Repository 标签页) | 出站 | 以 `MD_SECRET_TOKEN` 认证构建命令访问内部服务 | 永不可见 |
+
+读取或轮换 webhook 密钥都需要管理员账号;普通用户打开该标签页只能
+看到 webhook URL 和一句提示(请管理员提供密钥)。两种角色见
+[用户账号](#/docs/site-configuration)。
+
 ## 显示时区
 
 **Settings → Display** 标签页设置所有时间戳(仪表板、任务与运行页面)
@@ -52,6 +76,31 @@ build:
 local* 让每个访问者按自己浏览器的时区查看。该设置仅影响显示 —— 存储
 数据与日志保留原始时间戳;浏览器会在本地缓存该选择,刷新页面后时间立
 即按所选时区渲染,无需等待请求。
+
+## 用户账号
+
+账号分为两类。**普通用户**登录后使用 md-builder;**管理员**除此之外还能
+管理账号,入口是 **Settings → Users** 标签页:列出全部账号及其用户名、
+邮箱、角色、状态和创建时间,每行有 **Edit**(改用户名、邮箱、密码)和
+**Disable**/**Enable**。普通用户看到的是同一个标签页,名为 **Account**,
+里面只有自己的资料。
+
+管理员只能在服务端创建:
+
+```sh
+md-builder adduser -admin -username root -email root@example.com
+```
+
+网页端发出的任何请求都无法创建或提升管理员 —— 角色不属于任何账号表单的
+字段 —— 所以这个面板不是获取管理员权限的途径。
+
+**禁用**一个账号会立刻把它登出,并拒绝后续登录(提示 "this account has
+been disabled")。账号本身和它配置的内容都保留,**Enable** 即可恢复访问。
+你不能禁用自己的账号,也不能禁用其他管理员,因此站点不会落到无人能进的
+地步。
+
+修改密码会把这个账号在其他浏览器上的会话全部登出,只保留做出修改的那一
+个 —— 这正是"重置"的意义。密码至少 8 位;用户名和邮箱都必须唯一。
 
 ## 对象存储
 

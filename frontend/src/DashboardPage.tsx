@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
-import { Network } from 'lucide-react'
+import { Network, TriangleAlert } from 'lucide-react'
 import {
   getDashboard,
   getFullDashboard,
@@ -11,6 +11,7 @@ import {
   type FullStage,
   type RunCell,
 } from './api'
+import MessageDialog from './MessageDialog'
 import { StageStatus, commitUrl, truncate } from './StatusViews'
 import { formatTimeShort } from './timezone'
 
@@ -35,6 +36,9 @@ export default function DashboardPage({ onError }: Props) {
   const [full, setFull] = useState<FullDashboard | null>(null)
   const [error, setError] = useState('')
   const [loadedKind, setLoadedKind] = useState<DashboardKind | null>(null)
+  // A commit whose dispatch failed has no graph to link to — the graph cell
+  // carries the reason instead, and clicking it opens the full text here.
+  const [dispatchNote, setDispatchNote] = useState<DispatchNote | null>(null)
 
   // While data for the selected kind is in flight, "loading" is derived —
   // no synchronous setState inside the effect.
@@ -151,6 +155,7 @@ export default function DashboardPage({ onError }: Props) {
           }))}
           onOpenRun={onOpenRun}
           onOpenTask={onOpenTask}
+          onShowDispatchNote={setDispatchNote}
         />
       )}
       {effectiveKind === kind && kind !== 'full' && dash && (
@@ -165,10 +170,24 @@ export default function DashboardPage({ onError }: Props) {
           kind={kind}
           onOpenRun={onOpenRun}
           onOpenTask={onOpenTask}
+          onShowDispatchNote={setDispatchNote}
+        />
+      )}
+      {dispatchNote && (
+        <MessageDialog
+          title={dispatchNote.title}
+          message={dispatchNote.message}
+          onClose={() => setDispatchNote(null)}
         />
       )}
     </div>
   )
+}
+
+// DispatchNote is the long text a graph cell's error icon opens.
+interface DispatchNote {
+  title: string
+  message: string
 }
 
 // Normalized row shape shared by the full and single-kind matrices: one
@@ -195,12 +214,21 @@ function MatrixTable({
   kind,
   onOpenRun,
   onOpenTask,
+  onShowDispatchNote,
 }: {
-  environments: { id: number; name: string; description: string; tags: string; enabled: boolean }[]
+  environments: {
+    id: number
+    name: string
+    description: string
+    tags: string
+    enabled: boolean
+    owner?: string
+  }[]
   rows: MatrixRow[]
   kind?: DashboardKind
   onOpenRun: (runId: number) => void
   onOpenTask: (taskId: number) => void
+  onShowDispatchNote: (note: DispatchNote) => void
 }) {
   if (environments.length === 0) {
     return (
@@ -240,11 +268,17 @@ function MatrixTable({
                 key={env.id}
                 colSpan={isFull ? 4 : 1}
                 className={'dash-env-head' + (env.enabled ? '' : ' dash-row-disabled')}
-                title={env.description}
+                // The matrix is site-wide, so the column names whose machine
+                // it is: a push is dispatched to whichever environment's tags
+                // match, not only to the viewer's own.
+                title={[env.description, env.owner && `owned by ${env.owner}`]
+                  .filter(Boolean)
+                  .join(' — ')}
               >
                 {env.name}
                 {!env.enabled && <span className="text-muted"> (off)</span>}
                 {env.tags && <span className="dash-env-tags">{env.tags}</span>}
+                {env.owner && <span className="dash-env-owner">{env.owner}</span>}
               </th>
             ))}
           </tr>
@@ -326,7 +360,10 @@ function MatrixTable({
                             )}
                           </>
                         ) : (
-                          <span className="text-muted">—</span>
+                          <NoGraphCell
+                            commit={row.commit}
+                            onShow={onShowDispatchNote}
+                          />
                         )}
                       </td>
                     </>
@@ -409,6 +446,41 @@ function CommitCell({ commit }: { commit: DashboardCommit }) {
         </span>
       )}
     </div>
+  )
+}
+
+// NoGraphCell is the graph column of a (commit, environment) pair that has
+// no task graph. Normally that is an em dash — the stage was never requested
+// — but when the commit's dispatch failed, the row carries the reason: the
+// cell then shows a warning triangle, hover reveals the message and clicking
+// opens it in full. Without this the whole row is a wall of dashes and the
+// failure (an unreadable md-builder.yaml, say) is only ever visible in the
+// webhook response, which nobody keeps.
+function NoGraphCell({
+  commit,
+  onShow,
+}: {
+  commit: DashboardCommit
+  onShow: (note: DispatchNote) => void
+}) {
+  const error = commit.dispatchError
+  if (!error) {
+    return (
+      <span className="text-muted dash-no-run" title="No task graph for this commit">
+        —
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      className="dash-dispatch-error"
+      title={error}
+      aria-label="the dispatch of this commit failed"
+      onClick={() => onShow({ title: `No task graph — ${commit.shortSha}`, message: error })}
+    >
+      <TriangleAlert size={14} aria-hidden />
+    </button>
   )
 }
 

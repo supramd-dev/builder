@@ -11,12 +11,16 @@ import (
 
 // siteConfigJSON is the wire representation of the site configuration. The
 // access token and the secret token are write-only secrets: only whether
-// they are set is reported, never the values themselves.
+// they are set is reported, never the values themselves. The webhook token
+// is the one exception — it has to be copied into GitLab by hand, so it is
+// returned in full, and only to an administrator (everybody else just learns
+// that it is set).
 type siteConfigJSON struct {
 	CodeRepo       string `json:"codeRepo"`
 	AccessTokenSet bool   `json:"accessTokenSet"`
 	Timezone       string `json:"timezone"` // IANA name, "" = browser local
 	SecretTokenSet bool   `json:"secretTokenSet"`
+	WebhookToken   string `json:"webhookToken"` // administrators only
 	UpdatedAt      string `json:"updatedAt"`
 }
 
@@ -33,31 +37,65 @@ type siteConfigInput struct {
 }
 
 // handleSiteConfig routes GET/PUT /api/site-config. Any logged-in user may
-// read or update the configuration; the user argument is injected by
-// requireAuth and not otherwise needed.
+// read or update the configuration; rotating the webhook secret has its own
+// administrators-only endpoint, and only administrators are shown its value.
 func (s *Server) handleSiteConfig(w http.ResponseWriter, r *http.Request, user *store.User) {
-	_ = user
 	switch r.Method {
 	case http.MethodGet:
-		s.getSiteConfig(w, r)
+		s.getSiteConfig(w, r, user)
 	case http.MethodPut, http.MethodPatch:
-		s.updateSiteConfig(w, r)
+		s.updateSiteConfig(w, r, user)
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 	}
 }
 
-func (s *Server) getSiteConfig(w http.ResponseWriter, r *http.Request) {
+// handleWebhookTokenRotate replaces the webhook secret (POST
+// /api/site-config/webhook-token) and answers with the whole configuration,
+// the new token included. Rotating is a separate call rather than a flag on
+// the update above: it must not carry — and so cannot clobber — the rest of
+// the configuration, and it has to work on a site whose code repository is
+// not filled in yet. The caller is an administrator: requireAdmin wraps this
+// handler.
+func (s *Server) handleWebhookTokenRotate(w http.ResponseWriter, r *http.Request, user *store.User) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	token, err := store.NewWebhookToken()
+	if err != nil {
+		log.Printf("generate webhook token: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	cfg, err := s.Store.GetSiteConfig()
+	if err != nil {
+		log.Printf("get site config for webhook token rotation: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	cfg.WebhookToken = token
+	if err := s.Store.SaveSiteConfig(cfg); err != nil {
+		log.Printf("save rotated webhook token: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	// Logged by who, never the token itself.
+	log.Printf("webhook token rotated by %q (id %d)", user.Username, user.ID)
+	writeJSON(w, http.StatusOK, toSiteConfigJSON(cfg, user))
+}
+
+func (s *Server) getSiteConfig(w http.ResponseWriter, r *http.Request, user *store.User) {
 	cfg, err := s.Store.GetSiteConfig()
 	if err != nil {
 		log.Printf("get site config: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	writeJSON(w, http.StatusOK, toSiteConfigJSON(cfg))
+	writeJSON(w, http.StatusOK, toSiteConfigJSON(cfg, user))
 }
 
-func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request) {
+func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request, user *store.User) {
 	var in siteConfigInput
 	if err := decodeJSON(r, &in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -93,7 +131,7 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	writeJSON(w, http.StatusOK, toSiteConfigJSON(cfg))
+	writeJSON(w, http.StatusOK, toSiteConfigJSON(cfg, user))
 }
 
 // validateSiteConfigInput returns a human-readable error message, or "".
@@ -111,12 +149,18 @@ func validateSiteConfigInput(in *siteConfigInput) string {
 	return ""
 }
 
-func toSiteConfigJSON(cfg *store.SiteConfig) siteConfigJSON {
-	return siteConfigJSON{
+func toSiteConfigJSON(cfg *store.SiteConfig, user *store.User) siteConfigJSON {
+	out := siteConfigJSON{
 		CodeRepo:       cfg.CodeRepo,
 		AccessTokenSet: strings.TrimSpace(cfg.AccessToken) != "",
 		Timezone:       cfg.Timezone,
 		SecretTokenSet: strings.TrimSpace(cfg.SecretToken) != "",
 		UpdatedAt:      cfg.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
+	// The webhook secret is readable, but only by the administrators who
+	// configure the GitLab side of it.
+	if user.IsAdmin() {
+		out.WebhookToken = cfg.WebhookToken
+	}
+	return out
 }

@@ -27,6 +27,14 @@ task pipeline (clone → build → unit/regression), GitHub-Actions style —
 clicking a stage node jumps to its run detail or the live task log (see
 [Runner and tasks](#/docs/runner-strategy)).
 
+When a commit has **no graph at all** because the dispatch failed — an
+unreadable `md-builder.yaml`, an invalid one, no entry matching an
+environment, no code repository configured — the graph column shows a
+warning triangle in place of the link: hovering it reveals the reason and
+clicking opens the full text. The message is stored on the commit row
+(`dispatchError`, set at dispatch time and cleared by a later dispatch
+that works), so it outlives the webhook response that carried it.
+
 Manually dispatched graphs carry a small **M** badge in their cells and
 a "manual" label on the task pages. Rows of manual dispatches that were
 re-run (a newer attempt of the same commit exists) are kept but greyed
@@ -56,7 +64,8 @@ The full matrix response shape:
 Each stage either carries the recorded `runId` (opens the run detail) or
 the live `taskId` of the task graph while the run has not landed
 (`status` one of `pending`/`running`/`failed`/`done`). `taskIds` maps the
-environment to the root task id for the graph link.
+environment to the root task id for the graph link; `commit.dispatchError`
+carries the recorded reason when the dispatch produced no graph at all.
 
 ## Reporting results
 
@@ -152,6 +161,12 @@ overrides the declared language:
 Only bash, sh, python and python3 are accepted. Commands time out after
 60s, scripts after 10 minutes. Disabled environments reject both.
 
+Both endpoints log in with the environment's stored private key, so — like
+`POST /api/environments/{id}/test` and every write to an environment — they
+are limited to the environment's owner and the administrators (`403`
+otherwise). Reading the list is not limited: see
+[Test environments](#/docs/environments) for the ownership model.
+
 ## Manual test dispatch
 
 The **Run command** page also dispatches user-configured tests as
@@ -185,6 +200,12 @@ or a list of paths — a run can produce several artifact files.
 - Graphs are marked `trigger: 1` (manual); every dispatch records a
   fresh commit row, so re-running the same ref adds a new matrix row and
   supersedes the older ones.
+- `environmentIds` names the environments explicitly — there is no tag
+  matching here — and any **enabled** environment id is accepted: the
+  pool is site-wide and the endpoint does not check that the caller owns
+  the row. The Run page's picker is stricter and only offers the
+  environments the account may use (its own, or every one for an
+  administrator).
 
 ### YAML matrix dispatch
 
@@ -215,6 +236,10 @@ matching environment created:
   ref requeues the **same** graphs (keyed by commit+environment) with
   fresh snapshots — yaml or environment-tag changes are picked up, and
   no extra matrix row appears.
+- There is no environment list in the request: each yaml entry is matched
+  by tags against **every enabled environment on the site**, whoever
+  registered it — the same matching a webhook push does, so a run may
+  land on another account's machine.
 - Errors (unresolvable ref, bad YAML, no matching environment) come back
   as 422 with a `dispatchError` field, mirroring the webhook response;
   the commit row stays recorded when one was resolved.
@@ -223,33 +248,29 @@ matching environment created:
 
 All endpoints require a session (cookie) unless noted. Users are
 created with the `adduser` CLI (see
-[Getting started](#/docs/getting-started)).
+[Getting started](#/docs/getting-started)); administrators are created
+there too, with `adduser -admin`.
 
 | Method | Path                            | Description                                   |
 |--------|---------------------------------|-----------------------------------------------|
 | GET    | `/api/health`                   | Health check (no session)                     |
 | POST   | `/api/login`                    | Authenticate, sets session cookie             |
 | POST   | `/api/logout`                   | Destroy the current session                   |
-| GET    | `/api/me`                       | Current user                                  |
-| GET    | `/api/environments`             | List the user's test environments             |
-| POST   | `/api/environments`             | Create a test environment                     |
-| GET    | `/api/environments/{id}`        | Get one environment                           |
-| PUT    | `/api/environments/{id}`        | Update one environment                        |
-| DELETE | `/api/environments/{id}`        | Delete one environment (and its test runs)    |
-
-Environment create/update bodies carry `name`, `host`, `username`,
-`privateKey`, `tags`, `description`, `enabled` and `envScript` (the
-environment setup script sourced before every stage — see
-[Test environments](#/docs/environments)). Unlike the private key (empty
-on update = keep), an omitted/empty `envScript` clears the script.
-Both fields round-trip: the private key is never echoed back, the env
-script is (it is not a secret).
+| GET    | `/api/me`                       | Current user (`id`, `username`, `email`, `role`) |
+| GET    | `/api/users`                    | List every account (administrator only)       |
+| PUT    | `/api/users/{id}`               | Edit an account: your own, or anyone's as an administrator |
+| GET    | `/api/environments`             | List every environment on the site, each with `owner` and `canEdit` |
+| POST   | `/api/environments`             | Create a test environment (you become its owner) |
+| GET    | `/api/environments/{id}`        | Get one environment (any signed-in user)      |
+| PUT    | `/api/environments/{id}`        | Update one environment (owner or administrator) |
+| DELETE | `/api/environments/{id}`        | Delete one environment (owner or administrator; also its test runs) |
 | POST   | `/api/environments/{id}/test`   | SSH connectivity check                        |
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
-| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`) |
+| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`, `webhookToken` — administrators only) |
 | PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local) |
+| POST   | `/api/site-config/webhook-token`| Rotate the webhook secret and return the configuration (administrators only) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
 | POST   | `/api/test-runs`                | Report a test run result                      |
@@ -263,4 +284,43 @@ script is (it is not a secret).
 | GET    | `/api/jobs`                     | Recent task graphs (`?limit=`, monitoring; legacy job shape) |
 | GET    | `/api/tasks/{id}`               | One task; a root carries its sub-task list and commit/environment context |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | The task's log chunks after the given sequence (incremental, live-following) |
-| POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session; see [Webhooks](#/docs/webhooks)) |
+| POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session: authenticated by the `X-Gitlab-Token` header, see [Webhooks](#/docs/webhooks)) |
+
+The environment list is **not** owner-scoped: dispatch matches a yaml entry
+against every enabled environment, so the pool is site-wide and every row is
+visible to everyone. Each row carries `owner` (the managing account's
+username) and `canEdit` (true for the owner and for administrators), which is
+what the UI uses to render a foreign row read-only. Mutating a row you do not
+own is `403`; an id that does not exist is `404`. See
+[Test environments](#/docs/environments).
+
+Environment create/update bodies carry `name`, `host`, `username`,
+`privateKey`, `tags`, `description`, `enabled` and `envScript` (the
+environment setup script sourced before every stage — see
+[Test environments](#/docs/environments)). Unlike the private key (empty
+on update = keep), an omitted/empty `envScript` clears the script.
+Both fields round-trip: the private key is never echoed back, the env
+script is (it is not a secret).
+
+The site-configuration tokens differ in what they reveal. `accessToken` and
+`secretToken` are write-only: the API reports `accessTokenSet` /
+`secretTokenSet` and never the values, and an update keeps the stored token
+unless a value or the matching `clear…` flag is sent. `webhookToken` is the
+one that comes back in full, because it has to be copied into GitLab by
+hand — and only to an administrator: for anybody else the field is empty.
+It is generated with the site configuration, so it is never unset; there is
+no way to clear it, only to rotate it with
+`POST /api/site-config/webhook-token` (administrators only, answers with the
+whole configuration). The webhook endpoint compares `X-Gitlab-Token` against
+it in constant time and answers `401` on a mismatch, before parsing the body.
+See [Site configuration → Webhook secret](#/docs/site-configuration).
+
+The account endpoints are where the two roles differ. `/api/users` requires an
+administrator. `/api/users/{id}` accepts your own account, or any account when
+you are an administrator; its body carries `username`, `email`, `password`
+(empty = keep the stored one) and `disabled` — the last is administrator-only,
+and is refused on an administrator's account and on your own. `role` is not
+part of the body, and sending one changes nothing: only `adduser -admin`
+creates an administrator. A new password ends that account's other sessions;
+disabling ends all of them. See
+[Site configuration → User accounts](#/docs/site-configuration).

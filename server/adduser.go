@@ -16,11 +16,15 @@ import (
 //
 // Usage:
 //
-//	md-builder adduser -username <name> -email <addr> [-password <pw>] [-dsn <dsn>]
+//	md-builder adduser -username <name> -email <addr> [-password <pw>] [-admin] [-dsn <dsn>]
 //
 // If -password is omitted the password is read interactively from the
 // controlling terminal without echoing it. Stdin is read as a fallback when
 // there is no TTY (e.g. piping from another process).
+//
+// -admin creates an administrator, an account that may manage the other
+// accounts in the web UI. This is the only way to create one: neither the API
+// nor the UI can set a role.
 //
 // The database defaults to database.dsn in the server config file, so the
 // command writes the same database the server reads; -dsn overrides it.
@@ -29,6 +33,7 @@ func adduserSubcommand() int {
 	username := fs.String("username", "", "username (required)")
 	email := fs.String("email", "", "email address (required)")
 	password := fs.String("password", "", "password (read interactively if omitted)")
+	admin := fs.Bool("admin", false, "create an administrator account")
 	dsn := fs.String("dsn", "", "database DSN (default: database.dsn from the config file)")
 	configPath := fs.String(config.FlagName, "", config.FlagUsage)
 	if err := fs.Parse(os.Args[2:]); err != nil {
@@ -42,6 +47,16 @@ func adduserSubcommand() int {
 		fs.Usage()
 		return 2
 	}
+	// The same rules the API applies when an account is edited, so an account
+	// cannot be created with a name or address it could not later keep.
+	if msg := auth.ValidateUsername(*username); msg != "" {
+		fmt.Fprintf(os.Stderr, "error: %s\n", msg)
+		return 2
+	}
+	if msg := auth.ValidateEmail(*email); msg != "" {
+		fmt.Fprintf(os.Stderr, "error: %s\n", msg)
+		return 2
+	}
 
 	if *password == "" {
 		p, err := readPassword("Enter password: ")
@@ -51,8 +66,8 @@ func adduserSubcommand() int {
 		}
 		*password = p
 	}
-	if *password == "" {
-		fmt.Fprintln(os.Stderr, "error: password must not be empty")
+	if msg := auth.ValidatePassword(*password); msg != "" {
+		fmt.Fprintf(os.Stderr, "error: %s\n", msg)
 		return 2
 	}
 
@@ -91,15 +106,22 @@ func adduserSubcommand() int {
 		fmt.Fprintf(os.Stderr, "error: hash password: %v\n", err)
 		return 1
 	}
+	role := store.RoleUser
+	kind := "user"
+	if *admin {
+		role = store.RoleAdmin
+		kind = "administrator"
+	}
 	if err := s.CreateUser(&store.User{
 		Username:     *username,
 		Email:        *email,
 		PasswordHash: hash,
+		Role:         role,
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "error: create user: %v\n", err)
 		return 1
 	}
-	fmt.Printf("created user %q (%s)\n", *username, *email)
+	fmt.Printf("created %s %q (%s)\n", kind, *username, *email)
 	return 0
 }
 

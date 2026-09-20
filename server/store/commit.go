@@ -34,11 +34,24 @@ type Commit struct {
 	SHA       string    `gorm:"index:idx_commits_repo_sha;not null"` // the pushed commit id
 	Ref       string    `gorm:"not null;default:''"`                 // branch name, e.g. "main"
 	Author    string    `gorm:"not null;default:''"`                 // the pushing user
-	Message   string    `gorm:"not null;default:''"`                // head commit title
-	Event     string    `gorm:"not null;default:''"`                // what created the row: push | tag_push | merge_request | manual | manual_yaml (CommitEvent*)
+	Message   string    `gorm:"not null;default:''"`                 // head commit title
+	Event     string    `gorm:"not null;default:''"`                 // what created the row: push | tag_push | merge_request | manual | manual_yaml (CommitEvent*)
 	PushedAt  time.Time `gorm:"not null"`                            // when the push was received
 	CreatedAt time.Time
+
+	// DispatchError is why this commit produced no task graph: the message
+	// the webhook caller sees as dispatchError (the yaml could not be read or
+	// parsed, no entry matched an environment), kept on the row so the
+	// dashboard can explain an empty column long after the response is gone.
+	// Empty means a graph was created, or that no dispatch was attempted at
+	// all — a push to a repository other than the configured code repo.
+	DispatchError string `gorm:"not null;default:''"`
 }
+
+// maxDispatchErrorLen caps the stored dispatch message. A git or SSH failure
+// can carry an arbitrarily long stderr dump, and the column feeds a
+// dashboard tooltip, not a log file.
+const maxDispatchErrorLen = 2000
 
 // --- Commit queries ---
 
@@ -103,6 +116,20 @@ func restampCommit(db *gorm.DB, stored *Commit, incoming Commit) {
 			stored.Message, _ = v.(string)
 		}
 	}
+}
+
+// SetCommitDispatchError records (or, with an empty message, clears) why a
+// commit produced no task graph. It writes the single column rather than
+// saving the whole row, so a concurrent update of the other fields — a
+// re-recorded push restamping its event, for one — is not clobbered. The
+// message is truncated to maxDispatchErrorLen.
+func (s *Store) SetCommitDispatchError(id int64, msg string) error {
+	msg = strings.TrimSpace(msg)
+	if len(msg) > maxDispatchErrorLen {
+		msg = msg[:maxDispatchErrorLen]
+	}
+	return s.DB.Model(&Commit{}).Where("id = ?", id).
+		Update("dispatch_error", msg).Error
 }
 
 // GetCommitByID loads a commit by its internal id.

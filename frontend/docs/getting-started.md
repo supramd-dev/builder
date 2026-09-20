@@ -147,6 +147,15 @@ It prompts for the password (the `-password` flag works too, but the
 password then lands in your shell history). `seed` takes the same route
 when you want the demo data.
 
+Add `-admin` to create an **administrator** — an account that can manage the
+other accounts from **Settings → Users** (see
+[Site configuration → User accounts](#/docs/site-configuration)). The CLI is
+the only way to create one, so do it on the server:
+
+```sh
+docker compose --profile tools run --rm cli adduser -admin -username root -email root@example.com
+```
+
 Building without compose works as well — the image is a static binary plus
 the built frontend on Alpine, and it can take its whole configuration from
 the environment:

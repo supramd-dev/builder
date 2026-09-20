@@ -20,12 +20,14 @@ git@gitlab.example.com:group/code.git
 
 For private repositories configure a **Project Access Token** — created in
 GitLab under *Settings → Access Tokens* with the `read_repository` scope.
-The token is used by the **server only**: to read the test matrix from the
-code repository and to clone it before uploading it to the test
-environments (the environments themselves need no repository access —
-see [Runner and tasks](#/docs/runner-strategy)). Repository locations
-given in SSH form (ssh:// or git@host:group/repo) are cloned over https
-with the token. For public repositories leave the token empty.
+That one scope covers both things the server does with the token: read the
+test matrix from the code repository (see
+[GitLab webhooks](#/docs/webhooks)) and clone it before uploading it to
+the test environments (the environments themselves need no repository
+access — see [Runner and tasks](#/docs/runner-strategy)). Repository
+locations given in SSH form (ssh:// or git@host:group/repo) are read and
+cloned over https with the token. For public repositories leave the token
+empty.
 
 The token is write-only: the form shows whether one is configured, never
 the value itself; leave the field blank to keep the stored token, tick
@@ -52,6 +54,34 @@ reported. If a command echoes the value into its output (`env`,
 `REDACTED` in the task log before storing it. See
 [Test matrix → Secret token](#/docs/test-matrix) for usage.
 
+## Webhook secret
+
+The **Settings → Webhook** tab shows the shared secret the webhook
+endpoint verifies. It is generated automatically the first time the site
+configuration is read — no setup step — and every webhook event GitLab
+delivers has to carry it back in the `X-Gitlab-Token` header. An event
+with a missing or wrong token is rejected with `401` before its body is
+parsed, so a forged push cannot record a commit or start a build.
+
+Paste the value into the webhook's **Secret token** field on the GitLab
+side. **Regenerate** replaces it with a fresh random value; the GitLab
+webhook keeps failing until the new value is saved there, so rotate it
+when the old one may have leaked (a screenshot, a shared terminal, a
+GitLab export).
+
+This secret and the secret token above are two different things, going in
+opposite directions:
+
+| | Direction | Purpose | Visible in the UI |
+|---|---|---|---|
+| **Webhook secret** (this tab) | inbound | authenticates GitLab's calls to md-builder | yes, to administrators |
+| **Secret token** (Repository tab) | outbound | authenticates your build commands against internal services, as `MD_SECRET_TOKEN` | never |
+
+Reading or rotating the webhook secret requires an administrator account;
+a regular user opening the tab sees the webhook URL and a note to ask an
+administrator for the token. See
+[User accounts](#/docs/site-configuration) for the two roles.
+
 ## Display timezone
 
 The **Settings → Display** tab sets the timezone every timestamp is
@@ -60,6 +90,33 @@ displayed in (dashboards, task and run pages): pick an IANA zone such as
 in their own zone. The setting is display-only — stored data and logs keep
 their original timestamps, and the browser caches the choice locally so
 pages render immediately after a reload.
+
+## User accounts
+
+Accounts come in two kinds. A **regular user** signs in and uses md-builder.
+An **administrator** additionally manages the accounts, in the
+**Settings → Users** tab: every account with its username, email, role, status
+and creation date, an **Edit** action (username, email, password) and a
+**Disable**/**Enable** action. A regular user sees the same tab under the name
+**Account**, holding their own details and nothing else.
+
+Administrators are created on the server, and nowhere else:
+
+```sh
+md-builder adduser -admin -username root -email root@example.com
+```
+
+No request the web UI can make creates or promotes an administrator — a role
+is not part of any account form — so the panel is not a way to acquire one.
+
+**Disabling** an account signs it out at once and refuses further logins
+("this account has been disabled"). The account and everything it configured
+stay in place; **Enable** restores access. You cannot disable your own account
+or another administrator's, so a site cannot be left with no way in.
+
+Changing a password signs that account out everywhere except the browser that
+made the change — which is what makes a reset a reset. Passwords must be at
+least 8 characters; usernames and email addresses must be unique.
 
 ## Object storage
 

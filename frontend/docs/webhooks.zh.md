@@ -7,8 +7,15 @@ POST https://your-server/api/webhooks/gitlab
 ```
 
 并勾选 **Push events**、**Tag push events** 和 **Merge request events**
-触发器。该端点无需认证(由 GitLab 服务器调用);一旦配置了密钥,
-请通过 `X-Gitlab-Token` 请求头校验。
+触发器。
+
+该端点无法使用会话 cookie(调用方是 GitLab 服务器),因此用站点的
+webhook 密钥认证:把 Settings → Webhook 里 **Secret token** 的值复制到
+GitLab webhook 自己的 **Secret token** 字段。之后 GitLab 会在每个事件
+里通过 `X-Gitlab-Token` 请求头带回该值,缺失或错误的请求会在解析
+请求体之前就被拒绝(401)。这个密钥随站点配置一起生成,全新安装时
+就已经存在;万一泄露,可在同一个标签页里重新生成。见
+[站点配置 → Webhook 密钥](#/docs/site-configuration)。
 
 ## 一个事件会发生什么
 
@@ -40,7 +47,49 @@ Merge request 事件在 `open`、`reopen` 和 `merge` 动作时派发
    [Runner 与任务](#/docs/runner-strategy)和
    [测试矩阵](#/docs/test-matrix))。
 3. 响应携带 `jobsCreated` / `entriesSkipped`,以及 YAML 无法获取或解析
-   时的 `dispatchError` —— 无论成败,提交都会被记录。
+   时的 `dispatchError` —— 无论成败,提交都会被记录。响应是给调用方
+   (GitLab 的 webhook 日志)看的;同一条消息还会存到 commit 行上,
+   因此响应早已消失之后,仪表板仍然能解释该 commit 的空列 —— 见下。
+
+**GitLab 只给 webhook 十秒的响应时间**,所以第 1 步的读取不能随仓库
+大小增长。它确实不会:服务器通过代码主机的 API 索取这一个文件 ——
+与 `curl` 发出的请求完全相同:
+
+```
+GET /api/v4/projects/group%2Fcode/repository/files/md-builder.yaml/raw?ref=<sha>
+PRIVATE-TOKEN: <Project Access Token>
+```
+
+一个小请求,十次提交还是一百万次提交,代价都一样。
+
+该提交下没有这个文件时 —— 最常见的情况,即 YAML 还没提交 —— 主机会
+明说,派发以
+`file not found — commit the md-builder.yaml to the repository root`
+结束,不再做别的。这个失败最常见,所以最值得保持便宜。
+
+其余在这条路由上定不下来的情况,会回退到完整克隆(更慢,且*可能*超过
+十秒):
+
+- 用配置的令牌读不到该项目;
+- 仓库地址没有可用的 https 形式(比如裸写 `group/code`);
+- 主机回的是一个网页而不是文件(比如重定向到登录页)—— 服务端不会把
+  这种东西交给 YAML 解析器。
+
+两种情况都不会丢东西:提交在开始读取之前就已入库,所以仪表板列会立刻
+出现,单元格在派发完成时填入。读取本身有上限(默认 60 秒),因此仓库
+服务器不可达时,结果是一条记录下来的 `dispatchError`,而不是一个永远
+不返回的请求。
+
+注意:GitLab 的 *web* 文件地址 —— 浏览器打开的那个
+`/-/raw/<ref>/<path>` —— 在这里用不了:它只认浏览器会话,会忽略令牌,
+直接重定向到登录页。能用令牌的是上面那条 API 路由。
+
+中间环节不会静默丢失:从收到事件到生成任务图,每一步都会留下记录。
+派发失败的推送(读不到或内容非法的 `md-builder.yaml`、没有任何条目
+匹配到已启用环境)会在全量仪表板的 **graph** 列显示一个警告三角 ——
+悬停看原因,点击看完整文本。如果站点没有配置代码仓库、推送根本没有
+被派发,它的行上同样会写明。派发*之后*的失败 —— clone、构建、测试
+—— 记录在任务和运行本身,以常规的阶段状态呈现。
 
 私有仓库通过站点设置中配置的 Project Access Token(项目访问令牌)处理
 (见[站点配置](#/docs/site-configuration))。

@@ -33,14 +33,22 @@ func newTestServerWithObjects(t *testing.T, objs storage.Store) (*Server, *store
 	return apiServer, s
 }
 
-// seedUser creates a user with a bcrypt-hashed password directly in the store.
+// seedUser creates a regular user with a bcrypt-hashed password directly in
+// the store.
 func seedUser(t *testing.T, s *store.Store, username, email, password string) *store.User {
+	t.Helper()
+	return seedUserWithRole(t, s, username, email, password, store.RoleUser)
+}
+
+// seedUserWithRole creates a user with an explicit role, for the tests that
+// need an administrator.
+func seedUserWithRole(t *testing.T, s *store.Store, username, email, password, role string) *store.User {
 	t.Helper()
 	hash, err := auth.HashPassword(password)
 	if err != nil {
 		t.Fatalf("hash password: %v", err)
 	}
-	u := &store.User{Username: username, Email: email, PasswordHash: hash}
+	u := &store.User{Username: username, Email: email, PasswordHash: hash, Role: role}
 	if err := s.CreateUser(u); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -82,12 +90,25 @@ func TestLoginLogoutMe(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login: expected 200, got %d, body: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
+	var resp struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+		Email    string `json:"email"`
+		Role     string `json:"role"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode login response: %v", err)
 	}
-	if resp["username"] != "alice" || resp["email"] != "alice@example.com" {
-		t.Fatalf("unexpected login response: %v", resp)
+	if resp.Username != "alice" || resp.Email != "alice@example.com" {
+		t.Fatalf("unexpected login response: %+v", resp)
+	}
+	// The account id and role travel with the session: the settings page
+	// needs the id to edit the account, and the role to know what to offer.
+	if resp.ID == 0 {
+		t.Fatalf("expected the account id in the login response: %+v", resp)
+	}
+	if resp.Role != store.RoleUser {
+		t.Fatalf("expected role %q, got %q", store.RoleUser, resp.Role)
 	}
 
 	// Extract the session cookie.

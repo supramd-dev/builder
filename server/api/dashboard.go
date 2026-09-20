@@ -43,6 +43,11 @@ type dashboardEnvJSON struct {
 	Description string `json:"description"`
 	Tags        string `json:"tags"`
 	Enabled     bool   `json:"enabled"`
+	// Owner is the username of the account that manages the environment. The
+	// matrix is site-wide — a column may belong to someone else, and dispatch
+	// matches yaml entries against every enabled environment — so the column
+	// has to say whose machine it is.
+	Owner string `json:"owner,omitempty"`
 }
 
 // commitJSON is a commit row of the dashboard matrix.
@@ -58,6 +63,11 @@ type commitJSON struct {
 	Event      string `json:"event,omitempty"` // what created the row: push | tag_push | merge_request | manual | manual_yaml
 	PushedAt   string `json:"pushedAt"`
 	Superseded bool   `json:"superseded,omitempty"` // a newer attempt of the same SHA exists (manual re-dispatch)
+	// Why the dispatch of this commit produced no task graph — the webhook's
+	// dispatchError, stored at dispatch time (fetch/parse failure, no entry
+	// matching an environment, no code repo configured). Empty when a graph
+	// was created. The matrix shows it on the cells that have no graph.
+	DispatchError string `json:"dispatchError,omitempty"`
 }
 
 // runCellJSON is one cell of the matrix: a run's summary, aligned with an
@@ -179,6 +189,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 	}
 
 	// Environment columns, name-ordered.
+	owners := s.environmentOwnerNames(envs)
 	for i := range envs {
 		env := &envs[i]
 		out.Environments = append(out.Environments, dashboardEnvJSON{
@@ -187,6 +198,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 			Description: env.Description,
 			Tags:        env.Tags,
 			Enabled:     env.Enabled,
+			Owner:       owners[env.OwnerID],
 		})
 	}
 
@@ -325,6 +337,7 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 		Environments: make([]dashboardEnvJSON, 0, len(envs)),
 		Rows:         make([]fullRowJSON, 0, len(commits)),
 	}
+	owners := s.environmentOwnerNames(envs)
 	for i := range envs {
 		env := &envs[i]
 		out.Environments = append(out.Environments, dashboardEnvJSON{
@@ -333,6 +346,7 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 			Description: env.Description,
 			Tags:        env.Tags,
 			Enabled:     env.Enabled,
+			Owner:       owners[env.OwnerID],
 		})
 	}
 
@@ -546,7 +560,7 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 
 	// Environment existence is validated via a lookup; the dashboard is a
 	// site-wide view, but reports must reference a real environment.
-	if _, err := s.Store.GetEnvironmentAny(in.EnvironmentID); err != nil {
+	if _, err := s.Store.GetEnvironment(in.EnvironmentID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "environment not found"})
 			return
@@ -664,7 +678,7 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 	if run.Status == store.StatusFailed && strings.HasPrefix(run.Summary, "skipped:") {
 		run.Status = "skipped"
 	}
-	env, err := s.Store.GetEnvironmentAny(run.EnvironmentID)
+	env, err := s.Store.GetEnvironment(run.EnvironmentID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			env = nil // environment deleted after the run; detail stays viewable
@@ -1086,16 +1100,17 @@ func shortSHA(sha string) string {
 
 func (s *Server) toCommitJSON(c *store.Commit) commitJSON {
 	return commitJSON{
-		ID:       c.ID,
-		SHA:      c.SHA,
-		ShortSHA: shortSHA(c.SHA),
-		Repo:     c.Repo,
-		RepoURL:  s.repoWebURL(c.Repo),
-		Ref:      c.Ref,
-		Author:   c.Author,
-		Message:  c.Message,
-		Event:    c.Event,
-		PushedAt: c.PushedAt.UTC().Format(time.RFC3339),
+		ID:            c.ID,
+		SHA:           c.SHA,
+		ShortSHA:      shortSHA(c.SHA),
+		Repo:          c.Repo,
+		RepoURL:       s.repoWebURL(c.Repo),
+		Ref:           c.Ref,
+		Author:        c.Author,
+		Message:       c.Message,
+		Event:         c.Event,
+		PushedAt:      c.PushedAt.UTC().Format(time.RFC3339),
+		DispatchError: c.DispatchError,
 	}
 }
 

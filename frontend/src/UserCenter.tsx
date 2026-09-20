@@ -104,6 +104,12 @@ export default function UserCenter() {
         variants, GPU machines. Connectivity is verified over SSH with the
         stored private key.
       </p>
+      <p className="text-muted">
+        Every environment on the site is listed: a push is dispatched to the
+        environment whose tags match the entry in <code>md-builder.yaml</code>,
+        whichever account owns it. Rows you do not own are read-only — only
+        their owner or an administrator can change them.
+      </p>
 
       {editing.mode === 'none' && (
         <p>
@@ -147,6 +153,7 @@ export default function UserCenter() {
           <thead>
             <tr>
               <th>Name</th>
+              <th>Owner</th>
               <th>Host</th>
               <th>User</th>
               <th>Tags</th>
@@ -164,6 +171,10 @@ export default function UserCenter() {
               return (
                 <tr key={env.id}>
                   <td>{env.name}</td>
+                  <td className={env.canEdit ? 'text-muted' : undefined}>
+                    {env.owner || <span className="text-muted">—</span>}
+                    {!env.canEdit && <span className="text-muted"> (read-only)</span>}
+                  </td>
                   <td>
                     <code>{env.host}</code>
                   </td>
@@ -183,20 +194,31 @@ export default function UserCenter() {
                   </td>
                   <td className="text-muted">{env.description}</td>
                   <td>
-                    <button
-                      type="button"
-                      className="btn btn-sm"
-                      disabled={toggling.has(env.id)}
-                      onClick={() => handleToggleEnabled(env)}
-                      style={{
-                        background: env.enabled ? 'var(--success)' : 'var(--btn-default-bg)',
-                        color: env.enabled ? '#fff' : 'var(--muted)',
-                        borderColor: env.enabled ? 'var(--success)' : 'var(--border)',
-                      }}
-                      title={env.enabled ? 'Disable this environment' : 'Enable this environment'}
-                    >
-                      {toggling.has(env.id) ? '…' : env.enabled ? 'Enabled' : 'Disabled'}
-                    </button>
+                    {env.canEdit ? (
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        disabled={toggling.has(env.id)}
+                        onClick={() => handleToggleEnabled(env)}
+                        style={{
+                          background: env.enabled ? 'var(--success)' : 'var(--btn-default-bg)',
+                          color: env.enabled ? '#fff' : 'var(--muted)',
+                          borderColor: env.enabled ? 'var(--success)' : 'var(--border)',
+                        }}
+                        title={env.enabled ? 'Disable this environment' : 'Enable this environment'}
+                      >
+                        {toggling.has(env.id) ? '…' : env.enabled ? 'Enabled' : 'Disabled'}
+                      </button>
+                    ) : (
+                      // Someone else's environment: the state is shown, not
+                      // offered — a toggle here would 403.
+                      <span
+                        className={env.enabled ? 'text-success' : 'text-muted'}
+                        title="only the owner or an administrator can change this"
+                      >
+                        {env.enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    )}
                   </td>
                   <td className="text-muted">
                     {formatTime(env.updatedAt)}
@@ -213,30 +235,34 @@ export default function UserCenter() {
                     )}
                   </td>
                   <td className="text-right">
-                    <div style={{ display: 'flex', gap: '0.25rem', justifyContent: 'flex-end' }}>
-                      <button
-                        type="button"
-                        className="btn btn-default btn-sm"
-                        disabled={isTesting}
-                        onClick={() => handleTest(env)}
-                      >
-                        {isTesting ? 'Testing…' : 'Test'}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-primary btn-sm"
-                        onClick={() => setEditing({ mode: 'edit', env })}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-danger btn-sm"
-                        onClick={() => handleDelete(env)}
-                      >
-                        Delete
-                      </button>
-                    </div>
+                    {env.canEdit ? (
+                      <div style={{ display: 'flex', gap: '0.25rem', justifyContent: 'flex-end' }}>
+                        <button
+                          type="button"
+                          className="btn btn-default btn-sm"
+                          disabled={isTesting}
+                          onClick={() => handleTest(env)}
+                        >
+                          {isTesting ? 'Testing…' : 'Test'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-primary btn-sm"
+                          onClick={() => setEditing({ mode: 'edit', env })}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-danger btn-sm"
+                          onClick={() => handleDelete(env)}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-muted">read-only</span>
+                    )}
                   </td>
                 </tr>
               )

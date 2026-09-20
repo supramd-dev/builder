@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"md-builder/server/store"
 )
 
 const testKey = `-----BEGIN OPENSSH PRIVATE KEY-----
@@ -108,15 +110,17 @@ func TestEnvironmentAPIFlow(t *testing.T) {
 		t.Fatalf("environment without tags must serialize tags as [], got: %s", rec.Body.String())
 	}
 
-	// --- list (owner-scoped) ---
+	// --- list (site-wide, with the caller's rights on each row) ---
 	rec = authed(aliceCookie, http.MethodGet, "/api/environments", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list: expected 200, got %d", rec.Code)
 	}
 	var list struct {
 		Environments []struct {
-			ID   int64  `json:"id"`
-			Name string `json:"name"`
+			ID      int64  `json:"id"`
+			Name    string `json:"name"`
+			Owner   string `json:"owner"`
+			CanEdit bool   `json:"canEdit"`
 		} `json:"environments"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
@@ -125,14 +129,20 @@ func TestEnvironmentAPIFlow(t *testing.T) {
 	if len(list.Environments) != 1 || list.Environments[0].ID != created.ID {
 		t.Fatalf("unexpected list: %+v", list)
 	}
+	if list.Environments[0].Owner != "alice" || !list.Environments[0].CanEdit {
+		t.Fatalf("alice's own row: want owner alice and canEdit true, got %+v", list.Environments[0])
+	}
 
-	// bob sees none of alice's environments.
+	// bob sees alice's environment — the pool is shared — but may not edit it.
 	rec = authed(bobCookie, http.MethodGet, "/api/environments", "")
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode bob list: %v", err)
 	}
-	if len(list.Environments) != 0 {
-		t.Fatalf("bob should see 0 environments, got %d", len(list.Environments))
+	if len(list.Environments) != 1 {
+		t.Fatalf("bob should see the site-wide pool (1 environment), got %d", len(list.Environments))
+	}
+	if list.Environments[0].Owner != "alice" || list.Environments[0].CanEdit {
+		t.Fatalf("bob's view of alice's row: want owner alice and canEdit false, got %+v", list.Environments[0])
 	}
 
 	// --- update: empty private key keeps the existing one ---
@@ -142,7 +152,7 @@ func TestEnvironmentAPIFlow(t *testing.T) {
 		t.Fatalf("update: expected 200, got %d, body %s", rec.Code, rec.Body.String())
 	}
 	// The stored key must be unchanged (update with empty key keeps the old one).
-	env, err := s.GetEnvironment(1, created.ID) // alice has user ID 1 (first seed)
+	env, err := s.GetEnvironment(created.ID)
 	if err != nil {
 		t.Fatalf("get from store: %v", err)
 	}
@@ -190,10 +200,19 @@ func TestEnvironmentAPIFlow(t *testing.T) {
 		t.Fatalf("envScript should be cleared when omitted: %s", rec.Body.String())
 	}
 
-	// --- foreign access is 404 ---
+	// --- foreign reads are allowed, flagged read-only (see ---
+	// --- TestEnvironmentOwnershipRights for the write refusals) ---
 	rec = authed(bobCookie, http.MethodGet, fmt.Sprintf("/api/environments/%d", created.ID), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("foreign get: expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"canEdit":false`) {
+		t.Fatalf("foreign get must report canEdit false, got %s", rec.Body.String())
+	}
+	// An unknown id is still a 404.
+	rec = authed(bobCookie, http.MethodGet, fmt.Sprintf("/api/environments/%d", created.ID+999), "")
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("foreign get: expected 404, got %d", rec.Code)
+		t.Fatalf("unknown get: expected 404, got %d", rec.Code)
 	}
 
 	// --- connectivity test endpoint (host unreachable in test env) ---
@@ -229,7 +248,7 @@ func TestEnvironmentAPIFlow(t *testing.T) {
 	}
 
 	// The state is persisted.
-	env, err2 := s.GetEnvironment(1, created.ID) // alice has user ID 1 (first seed)
+	env, err2 := s.GetEnvironment(created.ID)
 	if err2 != nil {
 		t.Fatalf("get from store: %v", err2)
 	}
@@ -246,8 +265,8 @@ func TestEnvironmentAPIFlow(t *testing.T) {
 	// Foreign user cannot toggle.
 	rec = authed(bobCookie, http.MethodPut, fmt.Sprintf("/api/environments/%d/enabled", created.ID),
 		`{"enabled":true}`)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("foreign toggle: expected 404, got %d", rec.Code)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign toggle: expected 403, got %d", rec.Code)
 	}
 
 	// Re-enable.
@@ -367,11 +386,23 @@ func TestEnvironmentExec(t *testing.T) {
 		t.Fatalf("unauth exec: expected 401, got %d", rec.Code)
 	}
 
-	// Foreign user cannot exec on someone else's environment.
+	// Foreign user cannot exec on someone else's environment: reading the
+	// site-wide pool is allowed, using the owner's key to log in is not.
 	rec = authed(eveCookie, http.MethodPost, fmt.Sprintf("/api/environments/%d/exec", created.ID),
 		`{"command":"uname -a"}`)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("foreign exec: expected 404, got %d", rec.Code)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign exec: expected 403, got %d", rec.Code)
+	}
+
+	// ...and the same for the connectivity check and the script upload.
+	rec = authed(eveCookie, http.MethodPost, fmt.Sprintf("/api/environments/%d/test", created.ID), "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign test: expected 403, got %d", rec.Code)
+	}
+	rec = authed(eveCookie, http.MethodPost, fmt.Sprintf("/api/environments/%d/script", created.ID),
+		`{"language":"bash","script":"echo hi"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("foreign script: expected 403, got %d", rec.Code)
 	}
 
 	// Empty command is rejected with 400.
@@ -417,7 +448,7 @@ func TestEnvironmentExec(t *testing.T) {
 	}
 
 	// The state is persisted.
-	env, err := s.GetEnvironment(1, created.ID) // dave has user ID 1 (first seed)
+	env, err := s.GetEnvironment(created.ID)
 	if err != nil {
 		t.Fatalf("get from store: %v", err)
 	}
@@ -549,7 +580,115 @@ func TestEnvironmentScript(t *testing.T) {
 	}
 
 	// The environment is still owned by frank (ID 1).
-	if _, err := s.GetEnvironment(1, created.ID); err != nil {
+	if _, err := s.GetEnvironment(created.ID); err != nil {
 		t.Fatalf("get from store: %v", err)
+	}
+}
+
+// TestEnvironmentOwnershipRights pins the read-only rule: every signed-in user
+// sees the whole site-wide pool (dispatch matches yaml entries against all of
+// it, so a hidden row would be an unexplained column), but only the owner and
+// the administrators may change a row or spend its private key.
+func TestEnvironmentOwnershipRights(t *testing.T) {
+	apiServer, s := newTestServer(t)
+	seedUser(t, s, "owner", "owner@example.com", "ownerpass")
+	seedUser(t, s, "stranger", "stranger@example.com", "strangerpass")
+	seedUserWithRole(t, s, "root", "root@example.com", "rootpass", store.RoleAdmin)
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	ownerCookie := loginAndGetCookie(t, mux, "owner", "ownerpass")
+	strangerCookie := loginAndGetCookie(t, mux, "stranger", "strangerpass")
+	rootCookie := loginAndGetCookie(t, mux, "root", "rootpass")
+
+	authed := func(cookie, method, target, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		var req *http.Request
+		if body == "" {
+			req = httptest.NewRequest(method, target, nil)
+		} else {
+			req = httptest.NewRequest(method, target, strings.NewReader(body))
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := authed(ownerCookie, http.MethodPost, "/api/environments", fmt.Sprintf(
+		`{"name":"owned-node","host":"203.0.113.9","username":"runner","privateKey":%q}`, testKey))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID    int64  `json:"id"`
+		Owner string `json:"owner"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+	if created.Owner != "owner" {
+		t.Fatalf("created environment owner: want owner, got %q", created.Owner)
+	}
+	path := fmt.Sprintf("/api/environments/%d", created.ID)
+	updateBody := fmt.Sprintf(
+		`{"name":"renamed","host":"203.0.113.9","username":"runner","privateKey":%q}`, testKey)
+
+	// The stranger reads it, flagged read-only, and every write is refused.
+	for _, tc := range []struct{ name, method, target, body string }{
+		{"update", http.MethodPut, path, updateBody},
+		{"toggle", http.MethodPut, path + "/enabled", `{"enabled":false}`},
+		{"delete", http.MethodDelete, path, ""},
+	} {
+		rec = authed(strangerCookie, tc.method, tc.target, tc.body)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("stranger %s: expected 403, got %d, body %s", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+	// Reads stay open to everyone.
+	rec = authed(strangerCookie, http.MethodGet, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stranger get: expected 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), `"canEdit":false`) {
+		t.Fatalf("stranger get must report canEdit false, got %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"owner":"owner"`) {
+		t.Fatalf("stranger get must name the owner, got %s", rec.Body.String())
+	}
+
+	// Nothing the stranger attempted took effect.
+	env, err := s.GetEnvironment(created.ID)
+	if err != nil {
+		t.Fatalf("get from store: %v", err)
+	}
+	if env.Name != "owned-node" || !env.Enabled {
+		t.Fatalf("stranger's writes must not land: %+v", env)
+	}
+
+	// An administrator manages the whole pool, including rows it did not create.
+	rec = authed(rootCookie, http.MethodPut, path+"/enabled", `{"enabled":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin toggle: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"canEdit":true`) {
+		t.Fatalf("admin toggle must report canEdit true, got %s", rec.Body.String())
+	}
+	if env, err = s.GetEnvironment(created.ID); err != nil || env.Enabled {
+		t.Fatalf("admin toggle not persisted: %+v (%v)", env, err)
+	}
+	rec = authed(rootCookie, http.MethodPut, path, updateBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin update: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if env, err = s.GetEnvironment(created.ID); err != nil || env.Name != "renamed" {
+		t.Fatalf("admin update not persisted: %+v (%v)", env, err)
+	}
+	rec = authed(rootCookie, http.MethodDelete, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin delete: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if _, err := s.GetEnvironment(created.ID); err == nil {
+		t.Fatal("admin delete must remove the row")
 	}
 }

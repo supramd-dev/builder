@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,6 +119,46 @@ func TestRepoPath(t *testing.T) {
 		if got := RepoPath(tc.in); got != tc.want {
 			t.Errorf("RepoPath(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestSetCommitDispatchError(t *testing.T) {
+	s := newTestStore(t)
+	c := &Commit{Repo: "group/md-code", SHA: "abc1234", Message: "keep me"}
+	if err := s.CreateCommit(c); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.SetCommitDispatchError(c.ID, "  md-builder.yaml: file not found  "); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, err := s.GetCommitByID(c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DispatchError != "md-builder.yaml: file not found" {
+		t.Fatalf("dispatch error = %q, want the trimmed message", got.DispatchError)
+	}
+	// A single-column write: the rest of the row is untouched.
+	if got.Message != "keep me" {
+		t.Fatalf("message = %q, want the stored one", got.Message)
+	}
+
+	// An empty message clears it again (a later dispatch that worked).
+	if err := s.SetCommitDispatchError(c.ID, ""); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if got, _ = s.GetCommitByID(c.ID); got.DispatchError != "" {
+		t.Fatalf("dispatch error = %q, want empty after clear", got.DispatchError)
+	}
+
+	// A pathological message (a git stderr dump) is capped.
+	long := strings.Repeat("x", maxDispatchErrorLen+500)
+	if err := s.SetCommitDispatchError(c.ID, long); err != nil {
+		t.Fatalf("long set: %v", err)
+	}
+	if got, _ = s.GetCommitByID(c.ID); len(got.DispatchError) != maxDispatchErrorLen {
+		t.Fatalf("stored %d bytes, want the %d cap", len(got.DispatchError), maxDispatchErrorLen)
 	}
 }
 

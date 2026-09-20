@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log"
@@ -51,13 +52,32 @@ type gitlabEventPayload struct {
 // Push, tag push and merge request events are recorded in the commits table
 // — the dashboard's columns — and dispatched: the md-builder.yaml matrix at
 // the event's commit is read, its entries matched to enabled environments by
-// tags, and one job per entry is created for the worker pool. The endpoint is
-// unauthenticated by design: GitLab servers cannot hold a session cookie.
-// When a webhook secret is configured it should be verified here
-// (X-Gitlab-Token header).
+// tags, and one job per entry is created for the worker pool.
+//
+// It cannot use a session cookie (the caller is the GitLab server), so it is
+// authenticated with the site's webhook token instead: the value shown in
+// Settings → Webhook, echoed back by GitLab in the X-Gitlab-Token header.
+// That token is unrelated to the site's secret token, which is exported to
+// the build scripts as MD_SECRET_TOKEN.
 func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
+	// Verify before reading the body: a forged event must not be parsed, and
+	// the cheaper the rejection the better.
+	cfg, err := s.Store.GetSiteConfig()
+	if err != nil {
+		log.Printf("gitlab webhook: load site config: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	if !webhookTokenMatches(cfg.WebhookToken, r.Header.Get("X-Gitlab-Token")) {
+		// The token itself is never logged — only that it did not match.
+		log.Printf("gitlab webhook: rejected %s: missing or wrong X-Gitlab-Token "+
+			"(copy the token from Settings → Webhook into the GitLab webhook)", r.RemoteAddr)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid webhook token"})
 		return
 	}
 
@@ -96,6 +116,18 @@ func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 			"message": "event type ignored; push, tag_push and merge_request events are handled",
 		})
 	}
+}
+
+// webhookTokenMatches reports whether the X-Gitlab-Token header carries the
+// site's webhook token. The comparison is constant-time, so a caller cannot
+// recover the token byte by byte from the response times. An empty token on
+// either side never matches: GetSiteConfig generates one, so an empty stored
+// token means the row was emptied by hand.
+func webhookTokenMatches(want, got string) bool {
+	if want == "" || got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
 }
 
 // recordPush stores a push or tag push event as a dashboard commit column.
@@ -145,19 +177,39 @@ func (s *Server) recordPush(w http.ResponseWriter, payload gitlabEventPayload, e
 		"created":  created,
 	}
 	if s.Runner != nil {
-		if s.shouldDispatch(payload) {
+		if ok, reason := s.dispatchDecision(payload); ok {
 			d := s.Runner.DispatchForCommit(commit)
 			resp["jobsCreated"] = d.TasksCreated
 			resp["entriesSkipped"] = d.EntriesSkipped
 			if d.Err != nil {
 				// The commit is recorded; the dispatch failure is surfaced but
 				// is not a webhook-level error (GitLab would retry pointlessly).
+				// DispatchForCommit stores it on the commit row as well.
 				resp["dispatchError"] = d.Err.Error()
 				log.Printf("gitlab webhook: dispatch for commit %d failed: %v", commit.ID, d.Err)
 			}
+		} else {
+			// Not dispatched: the reason goes on the commit row too, so the
+			// matrix explains the empty row instead of just being empty.
+			resp["dispatchSkipped"] = reason
+			s.recordDispatchError(commit, reason)
 		}
+	} else {
+		s.recordDispatchError(commit, "task dispatch is not configured on the server")
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// recordDispatchError stores the reason a commit produced no task graph on
+// its row (see store.SetCommitDispatchError). Bookkeeping only: a failure to
+// store is logged, never surfaced — the webhook has already answered, and an
+// error status would make GitLab retry an event that was processed fine.
+func (s *Server) recordDispatchError(commit *store.Commit, msg string) {
+	if err := s.Store.SetCommitDispatchError(commit.ID, msg); err != nil {
+		log.Printf("gitlab webhook: commit %d: record dispatch error: %v", commit.ID, err)
+		return
+	}
+	commit.DispatchError = msg
 }
 
 // recordMergeRequest stores a merge request event as a dashboard commit
@@ -215,7 +267,7 @@ func (s *Server) recordMergeRequest(w http.ResponseWriter, payload gitlabEventPa
 		resp["message"] = "action " + oa.Action + " recorded; not dispatched (only open, reopen and merge trigger tests)"
 	}
 	if dispatch && s.Runner != nil {
-		if s.shouldDispatch(payload) {
+		if ok, reason := s.dispatchDecision(payload); ok {
 			d := s.Runner.DispatchForCommit(commit)
 			resp["jobsCreated"] = d.TasksCreated
 			resp["entriesSkipped"] = d.EntriesSkipped
@@ -223,28 +275,40 @@ func (s *Server) recordMergeRequest(w http.ResponseWriter, payload gitlabEventPa
 				resp["dispatchError"] = d.Err.Error()
 				log.Printf("gitlab webhook: dispatch for commit %d failed: %v", commit.ID, d.Err)
 			}
+		} else {
+			resp["dispatchSkipped"] = reason
+			s.recordDispatchError(commit, reason)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// shouldDispatch reports whether a push should trigger jobs: the pushed
-// repository must match the configured code repository (when one is set).
-// The payload carries path_with_namespace ("group/code"), while the config
-// may be a full URL — compare on the extracted repo path, falling back to a
-// suffix comparison for bare-path configs.
-func (s *Server) shouldDispatch(payload gitlabEventPayload) bool {
+// dispatchDecision reports whether a push should trigger jobs and, when it
+// should not, the reason to record on the commit row. The pushed repository
+// must match the configured code repository; the payload carries
+// path_with_namespace ("group/code"), while the config may be a full URL —
+// compare on the extracted repo path, falling back to a suffix comparison
+// for bare-path configs.
+//
+// A missing code repository is the only non-match worth recording: a push to
+// some *other* repository never reaches the matrix (the dashboard is filtered
+// to the code repo), so a message about it could only ever be stale.
+func (s *Server) dispatchDecision(payload gitlabEventPayload) (dispatch bool, reason string) {
 	cfg, err := s.Store.GetSiteConfig()
-	if err != nil || cfg.CodeRepo == "" {
-		return false
+	if err != nil {
+		return false, "site config could not be loaded: " + err.Error()
+	}
+	if cfg.CodeRepo == "" {
+		return false, "the site config has no code repository set: " +
+			"the push is recorded, but no tests are dispatched"
 	}
 	pushed := strings.TrimSuffix(strings.Trim(payload.Project.PathWithNamespace, "/"), ".git")
 	configured := store.RepoPath(cfg.CodeRepo)
 	if configured == "" || configured == pushed {
-		return configured == pushed
+		return configured == pushed, ""
 	}
 	// Configured as a bare path (e.g. "group/code"): match the tail.
-	return strings.HasSuffix(pushed, "/"+configured) || pushed == configured
+	return strings.HasSuffix(pushed, "/"+configured) || pushed == configured, ""
 }
 
 // firstLine returns the first line of a commit message (its title).

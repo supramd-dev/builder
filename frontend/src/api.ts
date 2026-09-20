@@ -17,13 +17,59 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
+// Role is read-only everywhere in the UI: an administrator account is created
+// with `md-builder adduser -admin`, and no request can change a role.
+export type Role = 'admin' | 'user'
+
 export interface Me {
+  id: number
   username: string
   email: string
+  role: Role
+}
+
+// Account is one row of the administrator's account list. The password hash
+// never leaves the server.
+export interface Account {
+  id: number
+  username: string
+  email: string
+  role: Role
+  disabled: boolean
+  createdAt: string
+}
+
+// AccountUpdate is the PUT body. An empty password keeps the stored one; an
+// omitted disabled keeps the current state. `role` is deliberately absent.
+export interface AccountUpdate {
+  username: string
+  email: string
+  password?: string
+  disabled?: boolean
+}
+
+export async function listAccounts(): Promise<Account[]> {
+  const res = await api<{ users: Account[] }>('/api/users')
+  return res.users
+}
+
+export async function updateAccount(
+  id: number,
+  input: AccountUpdate,
+): Promise<Account> {
+  return api<Account>(`/api/users/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
 }
 
 export interface TestEnvironment {
   id: number
+  // The account that manages this environment. Every signed-in user sees the
+  // whole site-wide pool, but only the owner and the administrators may
+  // change a row or use its private key.
+  owner: string
+  canEdit: boolean
   name: string
   host: string
   username: string
@@ -135,6 +181,11 @@ export interface SiteConfig {
   // browser-local zone.
   timezone: string
   secretTokenSet: boolean
+  // The webhook shared secret GitLab must send back in X-Gitlab-Token.
+  // Unlike the two tokens above it is readable — it has to be copied into
+  // GitLab by hand — but only for an administrator: the API leaves it empty
+  // for everybody else.
+  webhookToken: string
   updatedAt: string
 }
 
@@ -178,6 +229,17 @@ export async function updateSiteConfig(
   return cfg
 }
 
+// rotateWebhookToken replaces the webhook shared secret (administrators
+// only) and returns the updated configuration. It is its own call so the
+// rotation cannot carry — and so cannot overwrite — the other settings.
+export async function rotateWebhookToken(): Promise<SiteConfig> {
+  const cfg = await api<SiteConfig>('/api/site-config/webhook-token', {
+    method: 'POST',
+  })
+  siteConfigCache = cfg
+  return cfg
+}
+
 // --- Test dashboard ---
 
 export type DashboardKind = 'regression' | 'unit' | 'build' | 'full'
@@ -188,6 +250,10 @@ export interface DashboardEnvironment {
   description: string
   tags: string
   enabled: boolean
+  // The account that manages this environment. The matrix is site-wide — a
+  // column may be someone else's machine, since dispatch matches yaml entries
+  // against every enabled environment — so the header names the owner.
+  owner?: string
 }
 
 export interface DashboardCommit {
@@ -206,6 +272,11 @@ export interface DashboardCommit {
   // true when a newer attempt of the same SHA exists (manual re-dispatch):
   // the row is kept for history but rendered dimmed.
   superseded?: boolean
+  // Why this commit produced no task graph — the webhook's dispatchError,
+  // recorded at dispatch time (the yaml could not be read or parsed, no entry
+  // matched an environment, no code repo configured). Absent when a graph was
+  // created; the matrix shows it on the cells that have no graph.
+  dispatchError?: string
 }
 
 export interface RunCell {

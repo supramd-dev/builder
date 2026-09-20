@@ -20,7 +20,11 @@ how repeated triggers are recorded.
   the dispatch via `POST /api/jobs` after changing environment tags or
   the YAML — requeues the existing graph: sub-tasks and logs are rebuilt
   from the fresh snapshot, and test runs of stages the new graph no
-  longer contains are dropped.
+  longer contains are dropped. The YAML read itself is one request for
+  one file through the code host, with the full clone as a fallback, and
+  is capped by a timeout — so a dispatch never scales with the repository,
+  and a silent repository server cannot hold it open (see
+  [Webhooks](#/docs/webhooks)).
 - **Manual yaml dispatch** (the **Run command** page's *Manual test*
   tab, first section — one ref input and one button — or
   `POST /api/jobs/manual-yaml`): the webhook flow, started by hand for a
@@ -39,8 +43,11 @@ how repeated triggers are recorded.
   resolved to a concrete commit before dispatch (empty = HEAD), and the
   build / unit / regression commands come from the form: an empty stage
   is simply not part of the graph (its matrix cells show "—"), and each
-  stage runs with the default timeout (1 h). Any subset of the enabled environments can be
+  stage runs with the default timeout (1 h). Any subset of the environments
+  you may use — your own, plus every one for an administrator — can be
   selected (all are preselected); one graph is created per environment.
+  Unlike the yaml flow this is not a tag match: the environment is named by
+  the caller, and the endpoint itself accepts any enabled environment id.
   Unlike webhook pushes, every manual dispatch records a **fresh commit
   row**: re-running the same ref gives each attempt its own matrix row
   (the commit message carries the dispatch time), and older rows of the
@@ -52,6 +59,20 @@ The `trigger` column of a task records how its graph was created —
 surfaced on the task pages and the
 matrix (a small "M" / "manual" badge marks manually created graphs —
 `1` or `2`).
+
+**Which environments each entry point draws on.** Environments are a shared,
+site-wide pool (see
+[Test environments](#/docs/environments)), so the yaml flow and the two
+pickers of the **Run command** page do not cover the same set:
+
+| Entry point | Environments |
+|---|---|
+| Webhook push, **manual yaml dispatch** | every **enabled** environment of the site, one per yaml entry, matched by tags — a run may land on a machine another account registered |
+| **Exec / script** tab (**Run command**) | the environments you may use: your own, plus every one for an administrator — the command logs in with the environment's private key |
+| *Manual test* tab, **manual dispatch** | the same set (the picker); the environment is chosen explicitly, not matched |
+
+The Runner Envs list and the dashboard matrix always show the whole pool,
+labelled with each environment's owner.
 
 A graph is a root task plus a small DAG of sub-tasks:
 
