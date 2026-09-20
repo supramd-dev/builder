@@ -65,6 +65,8 @@ const (
 	// EnvDisableWorker overrides worker.enabled (it is named for what it
 	// turns off, so it inverts).
 	EnvDisableWorker = "MD_BUILDER_DISABLE_WORKER"
+	// EnvPublicURL overrides server.publicURL.
+	EnvPublicURL = "MD_BUILDER_PUBLIC_URL"
 )
 
 // DefaultDSN is the database opened when neither the file nor the environment
@@ -79,6 +81,23 @@ type Server struct {
 	// Port overrides the port inside Addr. 0 takes the port from Addr, and
 	// 0 with an Addr that has none means 8080.
 	Port int `yaml:"port"`
+	// PublicURL is the address users reach this site at, e.g.
+	// "https://md.example.com" (no trailing slash). It exists because the
+	// GitLab sign-in integration has to hand GitLab an absolute callback
+	// address, and GitLab matches it against the application's registered
+	// redirect URI character for character.
+	//
+	// It is configured rather than derived from the request's Host header:
+	// that header is attacker-controlled, and behind a reverse proxy it is
+	// often not the address the browser used. Empty disables GitLab sign-in
+	// — the integration reports itself as not configured.
+	PublicURL string `yaml:"publicURL"`
+}
+
+// PublicBaseURL returns the configured public URL with any trailing slashes
+// removed, or "" when it is not configured.
+func (c *Config) PublicBaseURL() string {
+	return strings.TrimRight(strings.TrimSpace(c.Server.PublicURL), "/")
 }
 
 // Database is the `database` section.
@@ -274,6 +293,7 @@ func applyEnv(cfg *Config) error {
 	}
 	setString(EnvDSN, &cfg.Database.DSN)
 	setString(EnvDist, &cfg.Dist)
+	setString(EnvPublicURL, &cfg.Server.PublicURL)
 	if v := strings.TrimSpace(os.Getenv(EnvWorkers)); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {

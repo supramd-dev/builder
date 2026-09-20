@@ -27,11 +27,11 @@ interface SettingsPageProps {
 
 // SettingsPage organizes the site-wide configuration into tabs, in this
 // order: the code repository (and its credentials), the GitLab webhook
-// reference, the GitLab sign-in integration (a preview, administrators
-// only), the account tab — everyone edits their own account there, and an
-// administrator also manages the other accounts — and the display settings
-// (timezone). Test inputs live inside the code repository itself, so there
-// is no separate test-input tab.
+// reference, the GitLab sign-in integration (administrators only), the
+// account tab — everyone edits their own account there, and an administrator
+// also manages the other accounts — and the display settings (timezone).
+// Test inputs live inside the code repository itself, so there is no
+// separate test-input tab.
 export default function SettingsPage({ me, onMeChange, onError }: SettingsPageProps) {
   const [tab, setTab] = useState<
     'repo' | 'webhook' | 'gitlab' | 'account' | 'display'
@@ -101,7 +101,7 @@ export default function SettingsPage({ me, onMeChange, onError }: SettingsPagePr
       ) : tab === 'webhook' ? (
         <WebhookTab me={me} />
       ) : tab === 'gitlab' ? (
-        <GitLabTab />
+        <GitLabTab onError={onError} />
       ) : tab === 'account' ? (
         <AccountPanel me={me} onMeChange={onMeChange} onError={onError} />
       ) : (
@@ -111,118 +111,250 @@ export default function SettingsPage({ me, onMeChange, onError }: SettingsPagePr
   )
 }
 
-// --- GitLab integration tab (preview) ----------------------------------------
+// --- GitLab sign-in tab (administrators only) --------------------------------
 
-// GitLabTab is a placeholder for the planned GitLab sign-in integration: it
-// shows the shape of the configuration that will be needed (the instance
-// address, an API token, and the OAuth application a future "Sign in with
-// GitLab" button will use), with every control disabled.
+// GitLabTab configures the GitLab sign-in integration: the OAuth application
+// whose credentials let a user authenticate with their GitLab account. It is
+// separate from the Repository tab — that token reads the code under test,
+// whereas this one identifies people.
 //
-// Nothing here is wired up: there is no store column, no API field and no
-// request, so the fields are deliberately disabled rather than merely
-// unsaved — an editable form that silently drops its input would read as a
-// configuration that works. Wiring it up is a separate change (store
-// columns, a migration, and write-only token handling on the API, following
-// the same rules as the Repository tab's credentials).
-function GitLabTab() {
+// A GitLab sign-in registers an account but does not admit it: the new
+// account waits in the Users tab until an administrator approves it.
+function GitLabTab({ onError }: { onError: (message: string) => void }) {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  const [gitlabUrl, setGitlabUrl] = useState('')
+  const [gitlabClientId, setGitlabClientId] = useState('')
+  const [gitlabClientSecret, setGitlabClientSecret] = useState('')
+  const [clearClientSecret, setClearClientSecret] = useState(false)
+  const [clientSecretSet, setClientSecretSet] = useState(false)
+  const [loginEnabled, setLoginEnabled] = useState(false)
+  const [redirectURI, setRedirectURI] = useState('')
+  // The fields this tab does not own are sent back unchanged, so saving here
+  // cannot wipe the repository (or the display timezone).
+  const [codeRepo, setCodeRepo] = useState('')
+  const [timezone, setTimezone] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    getSiteConfig()
+      .then((cfg: SiteConfig) => {
+        if (cancelled) return
+        setGitlabUrl(cfg.gitlabUrl)
+        setGitlabClientId(cfg.gitlabClientId)
+        setClientSecretSet(cfg.gitlabClientSecretSet)
+        setLoginEnabled(cfg.gitlabLoginEnabled)
+        setRedirectURI(cfg.gitlabRedirectUri)
+        setCodeRepo(cfg.codeRepo)
+        setTimezone(cfg.timezone)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        const msg = err instanceof Error ? err.message : String(err)
+        setSaveError(msg)
+        onError(msg)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [onError])
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSaving(true)
+    setSaveError('')
+    setSaved(false)
+    try {
+      const cfg = await updateSiteConfig({
+        codeRepo,
+        timezone,
+        gitlabUrl,
+        gitlabClientId,
+        gitlabClientSecret: clearClientSecret ? '' : gitlabClientSecret,
+        clearGitlabClientSecret: clearClientSecret,
+        gitlabLoginEnabled: loginEnabled,
+      })
+      setGitlabUrl(cfg.gitlabUrl)
+      setGitlabClientId(cfg.gitlabClientId)
+      setClientSecretSet(cfg.gitlabClientSecretSet)
+      setLoginEnabled(cfg.gitlabLoginEnabled)
+      setRedirectURI(cfg.gitlabRedirectUri)
+      setGitlabClientSecret('')
+      setClearClientSecret(false)
+      setSaved(true)
+    } catch (err: unknown) {
+      setSaveError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return <p className="text-muted">Loading…</p>
+  }
+
   return (
     <div>
-      <h3>GitLab integration</h3>
+      {saveError && <div className="alert alert-danger">{saveError}</div>}
 
-      <div className="alert alert-warning" role="alert">
-        <strong>Not implemented yet.</strong> This tab is a preview of the
-        planned <strong>GitLab sign-in</strong> integration — the fields below
-        are shown disabled because nothing reads or stores them. To sign in
-        today, use the account created by the server administrator.
-      </div>
+      <h3>GitLab sign-in</h3>
 
       <p className="text-muted">
-        Once implemented, this configuration will let users authenticate with
-        their GitLab account instead of a local password. It is separate from
-        the Repository tab: that token reads the code under test, whereas this
-        one identifies <em>people</em>.
+        Lets users authenticate with their GitLab account instead of a local
+        password. A first sign-in registers a new account as an ordinary user;
+        an administrator must approve it in the <strong>Users</strong> tab
+        before it can sign in.
       </p>
 
-      {/* No onSubmit: the form is inert, and the Save button is disabled, so
-          submitting is not reachable. */}
-      <form style={{ maxWidth: '36rem' }}>
+      <form onSubmit={save} style={{ maxWidth: '36rem' }}>
+        <h4>OAuth application</h4>
+        <p className="text-muted">
+          On the GitLab instance, create an application (a group or user
+          application works; on gitlab.com it lives under{' '}
+          <em>Preferences → Applications</em>, on a self-managed instance under{' '}
+          <em>Admin Area → Applications</em>) with the{' '}
+          <code>read_user</code> scope, then copy its credentials here.
+        </p>
+
         <div className="form-group">
-          <label htmlFor="gl-site-address">Site address</label>
+          <label htmlFor="gl-site-address">GitLab site address</label>
           <input
             id="gl-site-address"
             type="text"
-            defaultValue="https://gitlab.com"
-            placeholder="https://gitlab.example.com"
-            disabled
+            value={gitlabUrl}
+            onChange={(e) => {
+              setGitlabUrl(e.target.value)
+              setSaved(false)
+            }}
+            placeholder="https://gitlab.com"
           />
           <small className="text-muted">
-            The GitLab instance users sign in against — gitlab.com or a
-            self-hosted instance.
+            The instance users sign in against — gitlab.com or a self-hosted
+            one. A full URL: include <code>https://</code>, or GitLab will
+            reject the callback address.
           </small>
         </div>
 
         <div className="form-group">
-          <label htmlFor="gl-api-token">API token</label>
+          <label htmlFor="gl-redirect-uri">Redirect URI</label>
           <input
-            id="gl-api-token"
-            type="password"
-            placeholder="glpat-… (the token value)"
-            autoComplete="off"
-            disabled
+            id="gl-redirect-uri"
+            type="text"
+            value={redirectURI}
+            readOnly
+            placeholder="(set server.publicURL in the server configuration)"
           />
           <small className="text-muted">
-            Used to look up GitLab users (and, optionally, their group
-            membership) when someone signs in.
+            {redirectURI ? (
+              <>
+                Register this exact URL on the GitLab application. It comes
+                from <code>server.publicURL</code> in the server
+                configuration, so change it there if the address is wrong.
+              </>
+            ) : (
+              <>
+                Not available: the server has no{' '}
+                <code>server.publicURL</code> configured, and GitLab requires
+                an absolute callback URL. Set it in the server configuration
+                and restart.
+              </>
+            )}
           </small>
         </div>
-
-        <h4>OAuth application (for sign-in)</h4>
-        <p className="text-muted">
-          Create an application in GitLab under{' '}
-          <em>Admin Area → Applications</em> with the <code>read_user</code>{' '}
-          scope, then copy its credentials here.
-        </p>
 
         <div className="form-group">
           <label htmlFor="gl-app-id">Application ID</label>
           <input
             id="gl-app-id"
             type="text"
-            placeholder="The application's Client ID"
-            disabled
+            value={gitlabClientId}
+            onChange={(e) => {
+              setGitlabClientId(e.target.value)
+              setSaved(false)
+            }}
+            placeholder="The application's Application ID"
           />
         </div>
 
         <div className="form-group">
-          <label htmlFor="gl-app-secret">Application secret</label>
+          <label htmlFor="gl-app-secret">
+            Application secret{' '}
+            {clientSecretSet &&
+              !clearClientSecret &&
+              '(configured — leave blank to keep)'}
+          </label>
           <input
             id="gl-app-secret"
             type="password"
+            value={gitlabClientSecret}
+            onChange={(e) => {
+              setGitlabClientSecret(e.target.value)
+              if (e.target.value) setClearClientSecret(false)
+              setSaved(false)
+            }}
             placeholder="••••••••"
             autoComplete="off"
-            disabled
           />
           <small className="text-muted">
             Stored server-side and never shown again, like the Repository
             tab's token.
           </small>
+          {clientSecretSet && (
+            <label
+              style={{
+                display: 'block',
+                fontWeight: 'normal',
+                marginTop: '0.35rem',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={clearClientSecret}
+                onChange={(e) => {
+                  setClearClientSecret(e.target.checked)
+                  if (e.target.checked) setGitlabClientSecret('')
+                  setSaved(false)
+                }}
+                style={{ marginRight: '0.35rem', position: 'relative', top: '2px' }}
+              />
+              Remove the stored secret
+            </label>
+          )}
         </div>
+
+        <h4>Availability</h4>
 
         <div className="form-group">
           <label
             style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
           >
-            <input type="checkbox" disabled />
-            Allow sign-in with GitLab
+            <input
+              type="checkbox"
+              id="gl-login-enabled"
+              checked={loginEnabled}
+              onChange={(e) => {
+                setLoginEnabled(e.target.checked)
+                setSaved(false)
+              }}
+            />
+            Offer sign-in with GitLab
           </label>
           <small className="text-muted">
-            When off, only local accounts can sign in.
+            Shows a “Sign in with GitLab” button on the login page. Turning it
+            on needs all three fields above; when off, only local accounts can
+            sign in. Accounts already registered through GitLab keep working.
           </small>
         </div>
 
-        <button type="submit" className="btn btn-primary" disabled>
-          Save
-        </button>
+        <button type="submit" className="btn btn-primary" disabled={saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>{' '}
+        {saved && <span style={{ color: 'var(--success)' }}>Saved.</span>}
       </form>
     </div>
   )

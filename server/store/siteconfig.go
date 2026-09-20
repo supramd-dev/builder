@@ -59,6 +59,27 @@ type SiteConfig struct {
 	// none, so it is set from the moment the site config first exists.
 	WebhookToken string
 
+	// GitLabURL is the base address of the GitLab instance users sign in
+	// against ("https://gitlab.com", or a self-hosted instance). It is the
+	// instance the OAuth application below belongs to, and is independent of
+	// CodeRepo: the repository under test may live somewhere else entirely.
+	GitLabURL string
+
+	// GitLabClientID and GitLabClientSecret are the OAuth application
+	// ("Application ID" and "Secret" in GitLab's Admin Area → Applications)
+	// the sign-in integration authenticates with. The id is readable through
+	// the API to an administrator, who has to be able to compare it against
+	// the GitLab form; the secret is write-only, exactly like AccessToken
+	// and SecretToken — never returned, and redacted from errors and logs.
+	GitLabClientID     string
+	GitLabClientSecret string
+
+	// GitLabLoginEnabled is the administrator's switch for the whole
+	// integration. While it is false the sign-in routes answer "not
+	// configured" and the login page shows no GitLab button, so an
+	// accidentally half-filled configuration cannot expose a login path.
+	GitLabLoginEnabled bool
+
 	UpdatedAt time.Time
 }
 

@@ -31,6 +31,15 @@ const (
 	RoleUser  = "user"
 )
 
+// Where an account came from. SourceLocal covers every account this site
+// creates itself (the CLI, the first-run setup, and an administrator adding
+// someone by hand); SourceGitLab is a self-service registration through the
+// GitLab sign-in integration, which starts out awaiting approval.
+const (
+	SourceLocal  = "local"
+	SourceGitLab = "gitlab"
+)
+
 // User is an application user. PasswordHash holds a bcrypt hash, never a
 // plaintext password.
 type User struct {
@@ -43,8 +52,55 @@ type User struct {
 	Role string `gorm:"not null;default:user"`
 	// Disabled accounts cannot log in, and their existing sessions stop
 	// working.
-	Disabled  bool `gorm:"not null;default:false"`
+	Disabled bool `gorm:"not null;default:false"`
+	// Source is SourceLocal or SourceGitLab. The default covers rows created
+	// before the column existed.
+	Source string `gorm:"not null;default:local"`
+	// GitLabID is the account's user id on the GitLab instance it registered
+	// through; nil for a local account. It is a pointer so the unique index
+	// tolerates any number of local accounts: both SQLite and PostgreSQL
+	// treat NULLs in a unique index as distinct, so many NULLs coexist while
+	// one GitLab id can only ever map to one account.
+	GitLabID *int64 `gorm:"uniqueIndex;column:gitlab_id"`
+	// Approved is false while an account is waiting for an administrator to
+	// admit it — the state every GitLab self-registration starts in. A local
+	// account is approved from the start.
+	//
+	// The default is what makes AutoMigrate able to add this column to a
+	// populated table at all (SQLite refuses a NOT NULL column that has no
+	// default), and it gives pre-existing rows the right value: an account
+	// created before this column existed keeps working.
+	//
+	// Do NOT create a pending account with the struct form: GORM skips
+	// zero-valued fields that carry a default, so User{Approved: false}
+	// would be stored as true — the opposite of what it says. Use
+	// CreatePendingUser.
+	Approved  bool `gorm:"not null;default:true"`
 	CreatedAt time.Time
+}
+
+// CreatePendingUser inserts an account awaiting administrator approval, the
+// state a GitLab self-registration starts in.
+//
+// It inserts and then clears the flag in one transaction rather than writing
+// it in the insert, because Approved carries a `default:true` tag (needed so
+// AutoMigrate can add the column to a populated table) and GORM skips
+// zero-valued fields that have a default — a struct with Approved:false
+// stores as true. Clearing it explicitly is the only form that writes false
+// through the struct API; the transaction keeps a failure between the two
+// statements from leaving an already-approved account behind.
+func (s *Store) CreatePendingUser(u *User) error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(u).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&User{}).Where("id = ?", u.ID).
+			Update("approved", false).Error; err != nil {
+			return err
+		}
+		u.Approved = false
+		return nil
+	})
 }
 
 // IsAdmin reports whether the user may manage other accounts.
@@ -52,12 +108,20 @@ func (u *User) IsAdmin() bool { return u.Role == RoleAdmin }
 
 // UserUpdate carries the mutable fields of an account, already validated and
 // with the password hashed. Role is deliberately absent: only the CLI sets a
-// role, so an update can never escalate one.
+// role, so an update can never escalate one. Source is absent for the same
+// reason — where an account came from is a fact, not a setting.
+//
+// Disabled and Approved are written as given, not treated as optional: the
+// zero value clears the flag. A caller that means "leave it alone" has to
+// pass the account's current value — which is what the one production caller
+// does. PasswordHash is the exception, because "" is not a password.
 type UserUpdate struct {
 	Username     string
 	Email        string
 	PasswordHash string // "" = keep the stored hash
 	Disabled     bool
+	// Approved admits an account that was waiting for an administrator.
+	Approved bool
 }
 
 // Session is a login session backed by a random token stored in the DB.
@@ -193,6 +257,17 @@ func (s *Store) GetUserByID(id int64) (*User, error) {
 	return &u, nil
 }
 
+// GetUserByGitLabID loads the account registered through GitLab with the
+// given GitLab user id. It returns ErrNotFound when nobody has registered
+// with it yet — the caller then registers a new account.
+func (s *Store) GetUserByGitLabID(gitlabID int64) (*User, error) {
+	var u User
+	if err := s.DB.Where("gitlab_id = ?", gitlabID).First(&u).Error; err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
 // ListUsers returns every account, oldest first (the list the admin panel
 // shows).
 func (s *Store) ListUsers() ([]User, error) {
@@ -229,6 +304,7 @@ func (s *Store) UpdateUser(id int64, u UserUpdate) error {
 		"username": u.Username,
 		"email":    u.Email,
 		"disabled": u.Disabled,
+		"approved": u.Approved,
 	}
 	if u.PasswordHash != "" {
 		fields["password_hash"] = u.PasswordHash
