@@ -50,14 +50,27 @@ matrix:
       command: "ctest -L unit"
 `
 
+// seedDispatchEnv seeds an environment owned by a throwaway user: enough for
+// the paths that only need an environment to exist (the webhook dispatch, the
+// job/dashboard listings). The manual dispatch endpoints additionally require
+// the caller to manage the target environment, so those tests use
+// seedOwnedDispatchEnv instead — the throwaway owner here cannot even log in
+// (its password hash is not a valid hash), so it can never be the caller.
 func seedDispatchEnv(t *testing.T, s *store.Store, name, tags string, enabled bool) *store.TestEnvironment {
 	t.Helper()
 	u := &store.User{Username: "env-" + name + t.Name(), Email: name + "@example.com", PasswordHash: "x"}
 	if err := s.CreateUser(u); err != nil {
 		t.Fatal(err)
 	}
+	return seedOwnedDispatchEnv(t, s, u, name, tags, enabled)
+}
+
+// seedOwnedDispatchEnv seeds an environment under a given owner, for the tests
+// that dispatch as that same user.
+func seedOwnedDispatchEnv(t *testing.T, s *store.Store, owner *store.User, name, tags string, enabled bool) *store.TestEnvironment {
+	t.Helper()
 	env := &store.TestEnvironment{
-		OwnerID: u.ID, Name: name, Host: "h", Username: "u", PrivateKey: "k",
+		OwnerID: owner.ID, Name: name, Host: "h", Username: "u", PrivateKey: "k",
 		Tags: tags, Enabled: enabled,
 	}
 	if err := s.CreateEnvironment(env); err != nil {
@@ -715,9 +728,9 @@ func TestManualTrigger(t *testing.T) {
 		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
 		t.Fatal(err)
 	}
-	seedUser(t, s, "manualuser", "manual@example.com", "pw")
-	envCPU := seedDispatchEnv(t, s, "cpu-manual", "cpu", true)
-	envGPU := seedDispatchEnv(t, s, "gpu-manual", "gpu", true)
+	user := seedUser(t, s, "manualuser", "manual@example.com", "pw")
+	envCPU := seedOwnedDispatchEnv(t, s, user, "cpu-manual", "cpu", true)
+	envGPU := seedOwnedDispatchEnv(t, s, user, "gpu-manual", "gpu", true)
 
 	// The runner resolves refs without git: inject a fake.
 	apiServer.Runner.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *runner.GitCredentials) (string, error) {

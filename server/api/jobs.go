@@ -106,6 +106,16 @@ func (s *Server) triggerJobs(w http.ResponseWriter, r *http.Request) {
 
 	commitID := in.CommitID
 	if commitID == 0 && in.CommitSHA != "" {
+		// The SHA is caller-supplied and every stage interpolates it into a
+		// remote shell command (runner.RemoteTaskDir), so it has to be a plain
+		// hex commit id — never a branch name, a ref or anything else that
+		// carries shell syntax.
+		if !runner.IsFullSHA(in.CommitSHA) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "commitSha must be a full 40-character hex commit id",
+			})
+			return
+		}
 		c := &store.Commit{Repo: in.CommitRepo, SHA: in.CommitSHA}
 		if _, err := s.Store.GetOrCreateCommit(c); err != nil {
 			log.Printf("jobs trigger: create commit: %v", err)
@@ -188,6 +198,29 @@ func (s *Server) triggerManual(w http.ResponseWriter, r *http.Request, user *sto
 		strings.TrimSpace(in.RegressionCommand) == "" {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "at least one stage command is required"})
 		return
+	}
+
+	// A stage command runs over SSH with the environment owner's private key,
+	// so a manual dispatch may only target environments the caller may manage —
+	// the same rule /api/environments/{id}/exec, /script and /test already
+	// apply, and the one the Run page applies when it builds this list
+	// (enabled && canEdit). The runner deliberately stays user-agnostic: the
+	// webhook path dispatches onto the shared pool and must not be narrowed.
+	for _, id := range in.EnvironmentIDs {
+		env, err := s.Store.GetEnvironment(id)
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+				"error": "environment " + strconv.FormatInt(id, 10) + " not found",
+			})
+			return
+		}
+		if !canManageEnvironment(user, env) {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "environment " + env.Name + " belongs to another user; " +
+					"only its owner or an administrator can run a test on it",
+			})
+			return
+		}
 	}
 
 	roots, err := s.Runner.DispatchManual(runner.ManualDispatch{

@@ -215,7 +215,7 @@ func (s *Service) writeEnvScript(ctx context.Context, rc *rootContext, logw *Log
 	var script strings.Builder
 	w := func(format string, args ...any) { fmt.Fprintf(&script, format+"\n", args...) }
 	w("#!/usr/bin/env bash")
-	w("# environment setup script of %s (written by md-builder)", rc.env.Name)
+	w("# environment setup script of %s (written by md-builder)", commentSafe(rc.env.Name))
 	w("%s", rc.env.EnvScript)
 
 	// The task dir carries a $HOME reference — double-quote so the remote
@@ -469,7 +469,17 @@ func (s *Service) fetchArtifactFile(ctx context.Context, h SSHHost, rc *rootCont
 	if res.ExitCode != 0 {
 		return "", fmt.Errorf("remote read failed (exit %d)", res.ExitCode)
 	}
-	return out.String(), nil
+	// Artifacts are served verbatim to every authenticated user and the site's
+	// secrets are exported into the stage scripts, so a command that dumps its
+	// environment would otherwise publish them here. The stage log writer
+	// scrubs the same two values (see stageLogWriter); this path stores its
+	// bytes in the object store instead of the log table, so it needs its own
+	// pass.
+	content := out.String()
+	for _, secret := range []string{rc.cfg.AccessToken, rc.cfg.SecretToken} {
+		content = Redact(content, secret)
+	}
+	return content, nil
 }
 
 // readLogTail re-reads the persisted log tail (the LogWriter already closed
