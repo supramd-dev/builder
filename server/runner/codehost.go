@@ -109,13 +109,18 @@ func fileURL(h codeHost, codeRepoURL, ref, path string) (string, bool) {
 	}
 	// The placeholder sets do not overlap: at a position holding "{project_raw}"
 	// the pattern "{project}" cannot match, because the next byte is "_".
+	//
+	// {ref} is a query-parameter value and is escaped as one: an unescaped "#"
+	// would truncate the URL at the fragment, letting a caller-supplied ref
+	// smuggle shell syntax past this fetch while the host still resolves the
+	// part before the "#" (see the commitSha validation in api/jobs.go).
 	expanded := strings.NewReplacer(
 		"{base}", base,
 		"{project}", url.PathEscape(project),
 		"{project_raw}", project,
 		"{path}", url.PathEscape(path),
 		"{path_raw}", path,
-		"{ref}", strings.TrimSpace(ref),
+		"{ref}", url.QueryEscape(strings.TrimSpace(ref)),
 	).Replace(h.URLTemplate)
 	return expanded, true
 }

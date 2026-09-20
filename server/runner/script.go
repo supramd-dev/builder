@@ -154,6 +154,18 @@ func exportEnv(w func(format string, args ...any), in *ScriptInput) {
 	if in.Entry != nil {
 		keys := make([]string, 0, len(in.Entry.Env))
 		for k := range in.Entry.Env {
+			// The value is quoted (shq) but the name cannot be — `export <name>=`
+			// is shell syntax. A name that is not a plain identifier would
+			// therefore splice itself into the script, so it is skipped with a
+			// warning instead. Such a name never exported correctly anyway
+			// (`export foo-bar=1` is an error in bash), so nothing that worked
+			// before stops working; the warning just says why the variable is
+			// missing.
+			if !isEnvName(k) {
+				w("echo %s >&2", shq(fmt.Sprintf(
+					"warning: ignoring env %q: not a valid shell identifier", k)))
+				continue
+			}
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
@@ -200,12 +212,58 @@ func shq(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
+// isEnvName reports whether s is a shell identifier and so usable as the left
+// side of an `export name=value` line.
+func isEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// commentSafe flattens a value for use inside a generated bash comment. A
+// newline would end the comment and let the remainder of the value run as a
+// command, so control characters become spaces.
+func commentSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
 // shellExpand double-quotes a path for bash, letting $HOME (and other
-// parameter expansions) resolve on the remote host. Backslashes, double
-// quotes and dollars that are NOT part of $HOME-style references would
-// need escaping; task dirs are plain "$HOME/..." so this stays simple.
+// parameter expansions) resolve on the remote host.
+//
+// Inside the double quotes everything that could end the quoting or start a
+// substitution is escaped, so a value cannot append a second command to the
+// line it is spliced into (the caller writes `cd <value> || exit 1`, and a
+// value containing a bare `"` used to close the quote and run the rest):
+//
+//	\  → \\    a literal backslash must not be able to escape our \" below
+//	"  → \"    end the quoting and append a command
+//	`  → \`    command substitution
+//	$( → \$(   command substitution (also covers the $(( arithmetic form))
+//
+// $VAR and ${VAR} still expand — that is the point of this function: task dirs
+// are "$HOME/..." and yaml workdirs may reference the exported MD_* variables.
+// Only the substitution forms that can run a command are neutralised.
 func shellExpand(s string) string {
-	return "\"" + s + "\""
+	return "\"" + strings.NewReplacer(
+		"\\", "\\\\",
+		"\"", "\\\"",
+		"`", "\\`",
+		"$(", "\\$(",
+	).Replace(s) + "\""
 }
 
 // ShellQuote is the exported form of shq, for API handlers composing

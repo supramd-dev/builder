@@ -205,8 +205,8 @@ func TestWebhookManualCommitEvents(t *testing.T) {
 		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
 		t.Fatal(err)
 	}
-	seedUser(t, s, "eventuser", "event@example.com", "pw")
-	env := seedDispatchEnv(t, s, "cpu-mev", "cpu", true)
+	user := seedUser(t, s, "eventuser", "event@example.com", "pw")
+	env := seedOwnedDispatchEnv(t, s, user, "cpu-mev", "cpu", true)
 
 	apiServer.Runner.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *runner.GitCredentials) (string, error) {
 		// Distinct SHAs per ref so the two dispatches record separate rows

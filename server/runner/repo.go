@@ -318,6 +318,13 @@ func isFullSHA(s string) bool {
 	return true
 }
 
+// IsFullSHA is the exported form of isFullSHA, for API handlers that must
+// validate a caller-supplied commit SHA before it is stored. RemoteTaskDir
+// interpolates that value into the remote shell commands of every stage, so a
+// SHA that is not a plain hex commit id must never reach the store or the
+// runner.
+func IsFullSHA(s string) bool { return isFullSHA(s) }
+
 // RemoteTaskDir is the remote workspace path for a commit: ~/.md-builder/
 // tasks/<sha12> (as a $HOME reference — the remote shell expands it; both
 // the stage scripts and the clone upload use it).

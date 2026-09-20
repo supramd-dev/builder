@@ -229,7 +229,9 @@ func (s *Service) DispatchManual(in ManualDispatch) (roots []*store.Task, err er
 		return nil, errors.New("no environment selected")
 	}
 
-	creds := &GitCredentials{AccessToken: cfg.AccessToken}
+	// The caller chooses repo; the site's token is only attached when that
+	// repository is on the configured host (see CredsForRepo).
+	creds := CredsForRepo(cfg.CodeRepo, repo, cfg.AccessToken)
 	sha, err := s.resolveRef(context.Background(), repo, in.Ref, creds)
 	if err != nil {
 		return nil, err

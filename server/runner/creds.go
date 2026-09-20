@@ -75,6 +75,41 @@ func HTTPURL(repoURL string) string {
 	return loc
 }
 
+// CredsForRepo returns the credentials to use for repoURL: the site's access
+// token, but only when repoURL is on the same host as the site's own code
+// repository.
+//
+// The token belongs to a single GitLab instance and go-git sends it as
+// preemptive HTTP Basic auth on the very first request, so attaching it to an
+// arbitrary host hands that host the token. A manual dispatch takes a
+// caller-supplied repository, so "arbitrary host" is reachable — see
+// Service.DispatchManual. A repository on another host still resolves and
+// clones; it just does so unauthenticated, which is all the site's token could
+// have offered there anyway.
+func CredsForRepo(siteRepo, repoURL, token string) *GitCredentials {
+	if strings.TrimSpace(token) == "" {
+		return &GitCredentials{}
+	}
+	if !sameRepoHost(siteRepo, repoURL) {
+		return &GitCredentials{}
+	}
+	return &GitCredentials{AccessToken: token}
+}
+
+// sameRepoHost reports whether two repository locations live on the same
+// platform host. Both sides go through splitRepo (and so through HTTPURL), so
+// the scp and ssh:// forms compare equal to their https equivalent. The scheme
+// is part of the comparison: a token configured for an https repository is not
+// sent to a plain-http URL on the same host.
+func sameRepoHost(a, b string) bool {
+	aBase, _, aOK := splitRepo(a)
+	bBase, _, bOK := splitRepo(b)
+	if !aOK || !bOK {
+		return false
+	}
+	return strings.EqualFold(aBase, bBase)
+}
+
 // Redact replaces a secret's occurrences in s with a fixed placeholder so
 // error messages (which may echo the failing credential) can be stored or
 // returned safely.
