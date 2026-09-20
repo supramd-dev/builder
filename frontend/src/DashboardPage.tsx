@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Network, TriangleAlert } from 'lucide-react'
+import TimeAgo from 'react-timeago'
 import {
   getDashboard,
   getFullDashboard,
@@ -13,7 +14,7 @@ import {
 } from './api'
 import MessageDialog from './MessageDialog'
 import { StageStatus, commitUrl, truncate } from './StatusViews'
-import { formatTimeShort } from './timezone'
+import { formatTime } from './timezone'
 
 interface Props {
   onError: (message: string) => void
@@ -415,9 +416,10 @@ const commitEventLabels: Record<string, { label: string; title: string }> = {
 }
 
 // CommitCell is the matrix row header: one line with the short sha (bold,
-// linked to the commit on the repository host), author, push date — in the
-// normal text color — and the gray commit message, with gaps between the
-// parts; the line truncates with an ellipsis when too wide.
+// linked to the commit on the repository host), author, push time as a
+// relative "x ago" (exact time in its tooltip) — in the normal text color —
+// and the gray commit message, with gaps between the parts; the line
+// truncates with an ellipsis when too wide.
 function CommitCell({ commit }: { commit: DashboardCommit }) {
   const url = commitUrl(commit.repoUrl, commit.sha)
   const ev = commit.event ? commitEventLabels[commit.event] : undefined
@@ -433,7 +435,22 @@ function CommitCell({ commit }: { commit: DashboardCommit }) {
       <span className="dash-commit-author" title={commit.author}>
         {truncate(commit.author, 16)}
       </span>
-      <span className="dash-commit-date">{formatTimeShort(commit.pushedAt)}</span>
+      {/* Relative ("3 hours ago") with the exact time in the tooltip: the
+          relative form is what makes a column of timestamps scannable, and
+          the tooltip keeps the precision. TimeAgo re-renders itself on an
+          adaptive schedule (<1min every second, <1h every minute, <1d every
+          hour, then weekly), so this needs no timer of its own.
+          The class stays on the wrapper: TimeAgo's Props have no index
+          signature, so a className cannot be passed through to the <time>
+          it renders. An empty/invalid timestamp renders nothing at all, so
+          keep the "—" the old formatter produced. */}
+      <span className="dash-commit-date">
+        {commit.pushedAt ? (
+          <TimeAgo date={commit.pushedAt} title={formatTime(commit.pushedAt)} />
+        ) : (
+          '—'
+        )}
+      </span>
       {commit.message && <span className="dash-commit-msg">{commit.message}</span>}
       {ev && (
         <span className="dash-event" title={ev.title}>

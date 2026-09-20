@@ -101,31 +101,6 @@ export function formatTime(ts: string): string {
   return `${text.replace(', ', ' ')} (${utcOffsetLabel(d)})`
 }
 
-// formatTimeShort renders only the date part (dashboard commit rows), in
-// the site timezone: "2025-09-12".
-export function formatTimeShort(ts: string): string {
-  if (!ts) {
-    return '—'
-  }
-  const d = new Date(ts)
-  if (isNaN(d.getTime())) {
-    return '—'
-  }
-  const opts: Intl.DateTimeFormatOptions = {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }
-  if (activeTimezone) {
-    opts.timeZone = activeTimezone
-  }
-  try {
-    return new Intl.DateTimeFormat('en-CA', opts).format(d)
-  } catch {
-    return new Intl.DateTimeFormat('en-CA', { ...opts, timeZone: undefined }).format(d)
-  }
-}
-
 // utcOffsetLabel renders the zone's current offset from UTC, e.g. "UTC+8"
 // or "UTC-5" (DST-aware, computed for the timestamp's instant).
 function utcOffsetLabel(d: Date): string {

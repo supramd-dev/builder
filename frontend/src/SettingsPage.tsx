@@ -25,14 +25,17 @@ interface SettingsPageProps {
   onError: (message: string) => void
 }
 
-// SettingsPage organizes the site-wide configuration into tabs: the code
-// repository (and its credentials), the display settings (timezone), the
-// GitLab webhook reference, and the account tab — everyone edits their own
-// account there, and an administrator also manages the other accounts. Test
-// inputs live inside the code repository itself, so there is no separate
-// test-input tab.
+// SettingsPage organizes the site-wide configuration into tabs, in this
+// order: the code repository (and its credentials), the GitLab webhook
+// reference, the GitLab sign-in integration (a preview, administrators
+// only), the account tab — everyone edits their own account there, and an
+// administrator also manages the other accounts — and the display settings
+// (timezone). Test inputs live inside the code repository itself, so there
+// is no separate test-input tab.
 export default function SettingsPage({ me, onMeChange, onError }: SettingsPageProps) {
-  const [tab, setTab] = useState<'repo' | 'display' | 'webhook' | 'account'>('repo')
+  const [tab, setTab] = useState<
+    'repo' | 'webhook' | 'gitlab' | 'account' | 'display'
+  >('repo')
   const isAdmin = me.role === 'admin'
 
   return (
@@ -51,21 +54,27 @@ export default function SettingsPage({ me, onMeChange, onError }: SettingsPagePr
         <button
           type="button"
           role="tab"
-          aria-selected={tab === 'display'}
-          className={tab === 'display' ? 'tab active' : 'tab'}
-          onClick={() => setTab('display')}
-        >
-          Display
-        </button>
-        <button
-          type="button"
-          role="tab"
           aria-selected={tab === 'webhook'}
           className={tab === 'webhook' ? 'tab active' : 'tab'}
           onClick={() => setTab('webhook')}
         >
           Webhook
         </button>
+        {/* The GitLab sign-in integration holds credentials, so the tab is
+            rendered only for an administrator. (The Repository tab, which
+            also holds a token, is currently visible to everyone — that is a
+            separate question; this one does not have to inherit it.) */}
+        {isAdmin && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'gitlab'}
+            className={tab === 'gitlab' ? 'tab active' : 'tab'}
+            onClick={() => setTab('gitlab')}
+          >
+            GitLab
+          </button>
+        )}
         <button
           type="button"
           role="tab"
@@ -77,16 +86,144 @@ export default function SettingsPage({ me, onMeChange, onError }: SettingsPagePr
               gets the account list, so only an administrator sees "Users". */}
           {isAdmin ? 'Users' : 'Account'}
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'display'}
+          className={tab === 'display' ? 'tab active' : 'tab'}
+          onClick={() => setTab('display')}
+        >
+          Display
+        </button>
       </div>
       {tab === 'repo' ? (
         <RepositoryTab onError={onError} />
-      ) : tab === 'display' ? (
-        <DisplayTab onError={onError} />
       ) : tab === 'webhook' ? (
         <WebhookTab me={me} />
-      ) : (
+      ) : tab === 'gitlab' ? (
+        <GitLabTab />
+      ) : tab === 'account' ? (
         <AccountPanel me={me} onMeChange={onMeChange} onError={onError} />
+      ) : (
+        <DisplayTab onError={onError} />
       )}
+    </div>
+  )
+}
+
+// --- GitLab integration tab (preview) ----------------------------------------
+
+// GitLabTab is a placeholder for the planned GitLab sign-in integration: it
+// shows the shape of the configuration that will be needed (the instance
+// address, an API token, and the OAuth application a future "Sign in with
+// GitLab" button will use), with every control disabled.
+//
+// Nothing here is wired up: there is no store column, no API field and no
+// request, so the fields are deliberately disabled rather than merely
+// unsaved — an editable form that silently drops its input would read as a
+// configuration that works. Wiring it up is a separate change (store
+// columns, a migration, and write-only token handling on the API, following
+// the same rules as the Repository tab's credentials).
+function GitLabTab() {
+  return (
+    <div>
+      <h3>GitLab integration</h3>
+
+      <div className="alert alert-warning" role="alert">
+        <strong>Not implemented yet.</strong> This tab is a preview of the
+        planned <strong>GitLab sign-in</strong> integration — the fields below
+        are shown disabled because nothing reads or stores them. To sign in
+        today, use the account created by the server administrator.
+      </div>
+
+      <p className="text-muted">
+        Once implemented, this configuration will let users authenticate with
+        their GitLab account instead of a local password. It is separate from
+        the Repository tab: that token reads the code under test, whereas this
+        one identifies <em>people</em>.
+      </p>
+
+      {/* No onSubmit: the form is inert, and the Save button is disabled, so
+          submitting is not reachable. */}
+      <form style={{ maxWidth: '36rem' }}>
+        <div className="form-group">
+          <label htmlFor="gl-site-address">Site address</label>
+          <input
+            id="gl-site-address"
+            type="text"
+            defaultValue="https://gitlab.com"
+            placeholder="https://gitlab.example.com"
+            disabled
+          />
+          <small className="text-muted">
+            The GitLab instance users sign in against — gitlab.com or a
+            self-hosted instance.
+          </small>
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="gl-api-token">API token</label>
+          <input
+            id="gl-api-token"
+            type="password"
+            placeholder="glpat-… (the token value)"
+            autoComplete="off"
+            disabled
+          />
+          <small className="text-muted">
+            Used to look up GitLab users (and, optionally, their group
+            membership) when someone signs in.
+          </small>
+        </div>
+
+        <h4>OAuth application (for sign-in)</h4>
+        <p className="text-muted">
+          Create an application in GitLab under{' '}
+          <em>Admin Area → Applications</em> with the <code>read_user</code>{' '}
+          scope, then copy its credentials here.
+        </p>
+
+        <div className="form-group">
+          <label htmlFor="gl-app-id">Application ID</label>
+          <input
+            id="gl-app-id"
+            type="text"
+            placeholder="The application's Client ID"
+            disabled
+          />
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="gl-app-secret">Application secret</label>
+          <input
+            id="gl-app-secret"
+            type="password"
+            placeholder="••••••••"
+            autoComplete="off"
+            disabled
+          />
+          <small className="text-muted">
+            Stored server-side and never shown again, like the Repository
+            tab's token.
+          </small>
+        </div>
+
+        <div className="form-group">
+          <label
+            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}
+          >
+            <input type="checkbox" disabled />
+            Allow sign-in with GitLab
+          </label>
+          <small className="text-muted">
+            When off, only local accounts can sign in.
+          </small>
+        </div>
+
+        <button type="submit" className="btn btn-primary" disabled>
+          Save
+        </button>
+      </form>
     </div>
   )
 }
