@@ -269,6 +269,116 @@ table {
   background-color: var(--bg);
 }
 
+/* A table with many columns (Runner Envs has ten) cannot fit a phone, and
+   scrolling sideways hides the row's own name while the reader hunts for its
+   buttons. Tables marked .table-stack become one card per row instead: the
+   header row is dropped and each cell carries its column name, from the
+   data-label attribute the markup sets. */
+@media (max-width: 767px) {
+  .table-stack thead {
+    display: none;
+  }
+
+  .table-stack,
+  .table-stack tbody,
+  .table-stack tr {
+    display: block;
+  }
+
+  .table-stack tbody tr {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  /* One cell is one "label  value" line. The value is usually a bare text
+     node, so it becomes an anonymous flex item — which inherits overflow-wrap
+     from here, letting a long hostname or email address break rather than
+     hold the card wider than the screen. */
+  .table-stack tbody td {
+    display: flex;
+    gap: 0.5rem;
+    overflow-wrap: anywhere;
+    border: none;
+    padding: 0.1rem 0;
+    background: none;
+  }
+
+  .table-stack tbody td::before {
+    content: attr(data-label);
+    flex: 0 0 6.5rem;
+    color: var(--muted);
+  }
+
+  /* The actions cell carries no label and closes the card, so its buttons
+     read as the card's footer rather than as one more field. */
+  .table-stack tbody td.row-actions {
+    display: block;
+    border-top: 1px solid var(--border-light);
+    margin-top: 0.4rem;
+    padding-top: 0.5rem;
+  }
+
+  .table-stack tbody td.row-actions::before {
+    content: none;
+  }
+
+  .table-stack tbody td.row-actions .row-action-buttons {
+    justify-content: flex-start;
+  }
+
+  /* Inside a card the tags have the whole row to themselves, so they may wrap
+     again: the reason for nowrap above is the desktop table's column sizing,
+     which does not apply here, and a long tag list should fold rather than run
+     off the edge of the card. */
+  .table-stack tbody td .env-tags {
+    flex-wrap: wrap;
+  }
+}
+
+/* Between the card layout and a width where the table genuinely fits, scroll
+   the table itself rather than the whole page. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+/* A row's buttons, right-aligned on desktop and left-aligned inside a card.
+   Flex rather than inline-block because JSX drops the whitespace between
+   elements, which would leave the buttons touching. */
+.row-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  justify-content: flex-end;
+}
+
+/* The tags on one environment, one pill each. The wrapper has to be a flex
+   container: the spans are adjacent siblings in JSX, so with no whitespace
+   between them an inline layout would run two tags together ("cpugpu").
+
+   It must not wrap, either. A wrapping wrapper reports a min-content width of
+   one pill, and the table's auto layout sizes the Tags column from exactly
+   that — so the column came out narrower than two pills and the browser broke
+   the line, stacking "cpu" over "gpu" in every two-tag row. Keeping the pills
+   on one line makes min-content the whole row of them, which is the width the
+   column is then given. */
+.env-tags {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: 0.25rem;
+}
+
+.env-tag {
+  display: inline-block;
+  padding: 0 0.3rem;
+  font-size: 0.7rem;
+  line-height: 1.1;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
 /* --- Forms --- */
 
 form {
@@ -450,6 +560,10 @@ textarea.form-control:focus {
 
 .tabs {
   display: flex;
+  /* Settings carries five tabs, which is wider than a phone: without this the
+     bar holds the page open at 470px and the last tab sits off-screen. Wrapping
+     keeps every tab reachable instead of hiding them behind a scroll. */
+  flex-wrap: wrap;
   gap: 0.25rem;
   margin-bottom: 1.25rem;
   border-bottom: 1px solid var(--border);
