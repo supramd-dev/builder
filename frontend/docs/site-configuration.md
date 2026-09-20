@@ -97,14 +97,97 @@ in their own zone. The setting is display-only — stored data and logs keep
 their original timestamps, and the browser caches the choice locally so
 pages render immediately after a reload.
 
+## GitLab sign-in
+
+The **Settings → GitLab** tab (administrators only) lets people sign in with
+their GitLab account instead of a local password. It is independent of the
+repository configuration above: that token reads the *code* under test,
+whereas this one identifies *people* — a site can clone from one GitLab
+instance and authenticate against another.
+
+On the GitLab instance, create an application with the **`read_user`** scope
+(on gitlab.com under *Preferences → Applications*, on a self-managed instance
+under *Admin Area → Applications*) and give it the **Redirect URI** the tab
+shows. Then fill in the tab:
+
+| Field | What it is |
+| --- | --- |
+| GitLab site address | The instance users sign in against, e.g. `https://gitlab.com`. A full URL, scheme included — a bare host is refused. |
+| Redirect URI | Read-only. Built by the server from `server.publicURL` — copy it into the application as-is. |
+| Application ID | The application's *Application ID*. |
+| Application secret | The application's *Secret*. Write-only, like the repository token: stored server-side, never shown again. |
+| Offer sign-in with GitLab | The switch. While it is off, only local accounts can sign in. |
+
+The Redirect URI comes from the server configuration, not from the request:
+
+```yaml
+server:
+  # The address users reach this site at. Required for GitLab sign-in: the
+  # callback URL is built from it and must match the redirect URI registered
+  # on the GitLab application.
+  publicURL: https://md.example.com
+```
+
+It is a configuration value on purpose. Deriving it from the request's `Host`
+header would let a caller point the callback at a server of their choosing,
+and the value has to match what was registered on GitLab anyway. Like the
+GitLab address it has to be a full URL with the scheme: without one the
+callback address would come out relative, which GitLab rejects with an error
+that says nothing about the cause.
+
+Switching the integration on with a field missing is refused — a site would
+otherwise advertise a button that cannot work. Leaving the address or the
+application id blank in a later save is not the same as clearing it: a blank
+field means "keep what is stored", so flipping only the switch leaves the
+credentials alone. Clearing the application secret has its own checkbox, and
+clearing the address or the id while the integration is on is refused for the
+same reason as above.
+
+### What happens on a first sign-in
+
+A GitLab sign-in **registers** an account; it does not admit one. The new
+account is created as a regular user (never an administrator, whatever GitLab
+says), with no password, and lands in the **Settings → Users** tab marked
+**Pending approval**. Until an administrator presses **Approve** it cannot
+sign in, by GitLab or by password — the login page says the account is
+awaiting approval. The Accounts table carries a notice at the top while
+anything is waiting, and the **Source** column shows **GitLab** or **Local**,
+so a self-registration is visible at a glance.
+
+An account's identity is its GitLab user id, so later sign-ins land on the
+same account and no second one is created. The GitLab username is only a
+label: if it collides with an existing one, the new account gets a numeric
+suffix (`alice`, `alice-2`, …).
+
+Two things are refused rather than resolved automatically:
+
+- **An email address that already belongs to an account here.** GitLab's idea
+  of who owns an address is not something this site can verify, so linking the
+  two would hand an existing account to whoever controls that address on the
+  GitLab instance. The sign-in is refused with a message; the existing account
+  is untouched.
+- **A GitLab account with no visible email.** There is nothing to build an
+  account on, so GitLab sign-in cannot be used for it.
+
+Disabling an approved account keeps it out of the GitLab path too, with the
+same message as a password login, and **un-approving** one does the same
+thing: it goes back to awaiting approval. Both decisions end the account's
+live sessions immediately, so access stops when the decision is made rather
+than when the session happens to expire.
+
 ## User accounts
 
 Accounts come in two kinds. A **regular user** signs in and uses md-builder.
 An **administrator** additionally manages the accounts, in the
-**Settings → Users** tab: every account with its username, email, role, status
-and creation date, an **Edit** action (username, email, password) and a
-**Disable**/**Enable** action. A regular user sees the same tab under the name
-**Account**, holding their own details and nothing else.
+**Settings → Users** tab: every account with its username, email, source,
+role, status and creation date, an **Edit** action (username, email,
+password) and a **Disable**/**Enable** action. A regular user sees the same
+tab under the name **Account**, holding their own details and nothing else.
+
+An account's **source** is `Local` (created here, by an administrator or the
+first-run setup) or `GitLab` (registered by a GitLab sign-in, see
+[GitLab sign-in](#gitlab-sign-in) above). It is a fact about the account, not
+a setting, and no form can change it.
 
 Administrators are created on the server, and nowhere else:
 
@@ -117,8 +200,12 @@ is not part of any account form — so the panel is not a way to acquire one.
 
 **Disabling** an account signs it out at once and refuses further logins
 ("this account has been disabled"). The account and everything it configured
-stay in place; **Enable** restores access. You cannot disable your own account
-or another administrator's, so a site cannot be left with no way in.
+stay in place; **Enable** restores access. **Approving** admits an account
+that registered itself through GitLab, and withdrawing that approval sends it
+back to awaiting it; both sign the account out at once, for the same reason
+disabling does — see [GitLab sign-in](#gitlab-sign-in). You cannot disable or
+approve your own
+account, nor another administrator's, so a site cannot be left with no way in.
 
 Changing a password signs that account out everywhere except the browser that
 made the change — which is what makes a reset a reset. Passwords must be at

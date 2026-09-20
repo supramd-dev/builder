@@ -296,6 +296,9 @@ administrators are created there too, with `adduser -admin`.
 | POST   | `/api/login`                    | Authenticate, sets session cookie             |
 | POST   | `/api/logout`                   | Destroy the current session                   |
 | GET    | `/api/me`                       | Current user (`id`, `username`, `email`, `role`) |
+| GET    | `/api/auth/gitlab/enabled`      | Whether the site offers GitLab sign-in (no session) |
+| GET    | `/api/auth/gitlab/start`        | Begin a GitLab sign-in (redirects to GitLab)  |
+| GET    | `/api/auth/gitlab/callback`     | Finish it (GitLab redirects back here)        |
 | GET    | `/api/users`                    | List every account (administrator only)       |
 | PUT    | `/api/users/{id}`               | Edit an account: your own, or anyone's as an administrator |
 | GET    | `/api/environments`             | List every environment on the site, each with `owner` and `canEdit` |
@@ -308,7 +311,7 @@ administrators are created there too, with `adduser -admin`.
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
 | GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`, `webhookToken` — administrators only) |
-| PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local) |
+| PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local; the `gitlab*` fields are administrator-only) |
 | POST   | `/api/site-config/webhook-token`| Rotate the webhook secret and return the configuration (administrators only) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
@@ -354,12 +357,45 @@ whole configuration). The webhook endpoint compares `X-Gitlab-Token` against
 it in constant time and answers `401` on a mismatch, before parsing the body.
 See [Site configuration → Webhook secret](#/docs/site-configuration).
 
+The GitLab sign-in configuration lives on the same endpoint but is
+administrator-only: `gitlabUrl`, `gitlabClientId`, `gitlabClientSecret` and
+`gitlabLoginEnabled`. A request from anybody else that carries any of them is
+`403`. `gitlabLoginEnabled` and `gitlabClientSecretSet` are reported to
+everyone — the login page needs the first — while the instance address, the
+application id and `gitlabRedirectUri` come back for administrators only. The
+secret follows the same write-only rule as the two tokens above
+(`clearGitLabClientSecret` removes it). `gitlabUrl` and `gitlabClientId` are
+optional in a different way: leaving one out keeps the stored value, so a
+request that only flips `gitlabLoginEnabled` does not disturb the
+credentials. Sending an explicit `""` clears it, which is refused with `400`
+while the integration would be left switched on — as is switching it on
+without all three pieces. Both `gitlabUrl` and `server.publicURL` must be
+full URLs including `http://` or `https://`; a bare host is refused, because
+it would build a relative `redirect_uri` that GitLab rejects with a message
+that says nothing about the cause. See
+[Site configuration → GitLab sign-in](#/docs/site-configuration).
+
+The three `/api/auth/gitlab/*` routes are unauthenticated — they are how a
+visitor becomes an account. `start` sets a short-lived `md_gitlab_state`
+cookie and redirects to the instance's authorization page; `callback`
+compares the returned `state` against that cookie in constant time, clears it,
+and answers with a redirect: to the dashboard on success, or to the login page
+with a status word (`pending`, `disabled`, `email_taken`, `no_email`,
+`denied`, `unavailable`, `error`) when the sign-in was refused. Every outcome
+is a redirect carrying a fixed word — never a token, a code, or anything a
+remote server said. The redirect URI is built from the configured
+`server.publicURL`, never from the request's `Host` header.
+
 The account endpoints are where the two roles differ. `/api/users` requires an
 administrator. `/api/users/{id}` accepts your own account, or any account when
 you are an administrator; its body carries `username`, `email`, `password`
-(empty = keep the stored one) and `disabled` — the last is administrator-only,
-and is refused on an administrator's account and on your own. `role` is not
-part of the body, and sending one changes nothing: only `adduser -admin`
-creates an administrator. A new password ends that account's other sessions;
-disabling ends all of them. See
-[Site configuration → User accounts](#/docs/site-configuration).
+(empty = keep the stored one), `disabled` and `approved` — the last two are
+administrator-only, and both are refused on an administrator's account and on
+your own. `role` and `source` are not part of the body, and sending either
+changes nothing: only `adduser -admin` creates an administrator, and where an
+account came from is a fact about it. An account row also reports `source`
+(`local` or `gitlab`), `approved`, and `gitlabId` (0 for a local account). A
+new password ends that account's other sessions; disabling ends all of them,
+and so does withdrawing an approval — an account loses access when the
+decision is made, not when its session happens to expire.
+See [Site configuration → User accounts](#/docs/site-configuration).

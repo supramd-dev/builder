@@ -21,6 +21,13 @@ server:
   # Port to listen on. 0 takes the port from `addr`, and 0 with an address
   # that has none means 8080. Override with MD_BUILDER_PORT.
   port: 8080
+  # The address users reach this site at, scheme and host, no trailing
+  # slash — e.g. https://md.example.com. Required when GitLab sign-in is
+  # turned on: the OAuth callback URL is built from it and must match the
+  # redirect URI registered on the GitLab application. It is deliberately
+  # not derived from the request, whose Host header a client controls.
+  # Override with MD_BUILDER_PUBLIC_URL.
+  # publicURL: https://md.example.com
 
 database:
   # SQLite file path, or a PostgreSQL URL (postgres://user:pw@host/db).

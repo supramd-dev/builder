@@ -58,6 +58,29 @@ export async function completeSetup(input: SetupInput): Promise<Me> {
   })
 }
 
+// GitLabStartURL is where the browser goes to begin a GitLab sign-in. It is
+// a full-page navigation, not a fetch: the server answers with a redirect to
+// the GitLab authorization page, which must be followed by the browser so the
+// address bar shows GitLab while the user consents.
+export const gitlabStartURL = '/api/auth/gitlab/start'
+
+// getGitLabEnabled asks whether the site offers GitLab sign-in. It is
+// unauthenticated, so the login page can call it before anyone has signed in.
+export async function getGitLabEnabled(): Promise<boolean> {
+  try {
+    const res = await api<{ enabled: boolean }>('/api/auth/gitlab/enabled')
+    return res.enabled
+  } catch {
+    // A site that cannot answer (older server, network hiccup) simply does
+    // not offer the button.
+    return false
+  }
+}
+
+// AccountSource is where an account came from: a local registration (created
+// by an administrator or the first-run setup) or a GitLab sign-in. Read-only.
+export type AccountSource = 'local' | 'gitlab'
+
 // Account is one row of the administrator's account list. The password hash
 // never leaves the server.
 export interface Account {
@@ -67,15 +90,25 @@ export interface Account {
   role: Role
   disabled: boolean
   createdAt: string
+  source: AccountSource
+  // approved is false while the account waits for an administrator to admit
+  // it. Every GitLab self-registration starts unapproved and cannot sign in
+  // until it is admitted.
+  approved: boolean
+  // gitlabId is the account's user id on the GitLab instance, 0 for a local
+  // account.
+  gitlabId: number
 }
 
 // AccountUpdate is the PUT body. An empty password keeps the stored one; an
-// omitted disabled keeps the current state. `role` is deliberately absent.
+// omitted disabled or approved keeps the current state. `role` and `source`
+// are deliberately absent — neither is a setting.
 export interface AccountUpdate {
   username: string
   email: string
   password?: string
   disabled?: boolean
+  approved?: boolean
 }
 
 export async function listAccounts(): Promise<Account[]> {
@@ -217,10 +250,28 @@ export interface SiteConfig {
   // for everybody else.
   webhookToken: string
   updatedAt: string
+
+  // The GitLab sign-in integration. Whether it is on and whether a client
+  // secret is stored are plain booleans, so everyone sees them (the login
+  // page needs the first one); the instance address and the application id
+  // come back for administrators only.
+  gitlabLoginEnabled: boolean
+  gitlabClientSecretSet: boolean
+  gitlabUrl: string
+  gitlabClientId: string
+  // The callback URL to register on the GitLab application, built by the
+  // server from server.publicURL. Empty when the site address is not
+  // configured, in which case GitLab sign-in cannot work at all.
+  gitlabRedirectUri: string
 }
 
 // SiteConfigUpdate is the PUT body: the tokens are write-only.
 // An empty value keeps the stored one; the clear flags remove it.
+//
+// The gitlab* fields are administrators only — the API refuses the request
+// otherwise. gitlabLoginEnabled is a boolean rather than optional-nullable
+// because the server treats an absent field as "leave it alone", so simply
+// omitting it is what keeps the current state.
 export interface SiteConfigUpdate {
   codeRepo: string
   accessToken?: string
@@ -228,6 +279,11 @@ export interface SiteConfigUpdate {
   secretToken?: string
   clearAccessToken?: boolean
   clearSecretToken?: boolean
+  gitlabUrl?: string
+  gitlabClientId?: string
+  gitlabClientSecret?: string
+  clearGitlabClientSecret?: boolean
+  gitlabLoginEnabled?: boolean
 }
 
 export async function getSiteConfig(): Promise<SiteConfig> {

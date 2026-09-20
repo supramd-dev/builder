@@ -215,6 +215,11 @@ func main() {
 	apiServer.Version = version
 	apiServer.Register(mux)
 	apiServer.SetRunner(runnerSvc)
+	// The GitLab sign-in redirect URI is built from this, so it must be the
+	// address the browser actually uses (never derived from the request: the
+	// Host header is attacker-controlled and would let someone point the
+	// callback at their own server).
+	apiServer.SetPublicURL(cfg.PublicBaseURL())
 
 	// --- Static frontend assets (with SPA fallback) ---
 	distDir := resolveDistDir(cfg.Dist)

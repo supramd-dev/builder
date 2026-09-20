@@ -20,6 +20,9 @@ type accountJSON struct {
 	Role      string `json:"role"`
 	Disabled  bool   `json:"disabled"`
 	CreatedAt string `json:"createdAt"`
+	Source    string `json:"source"`
+	Approved  bool   `json:"approved"`
+	GitLabID  int64  `json:"gitlabId"`
 }
 
 // doJSON performs an authenticated request and returns the recorder. A nil

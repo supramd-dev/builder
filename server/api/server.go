@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"md-builder/server/auth"
@@ -32,6 +33,13 @@ type Server struct {
 	// (webhook) and manual triggers. Injected by main so API tests can run
 	// without it or with a fake executor.
 	Runner *runner.Service
+
+	// PublicURL is the address users reach this site at (config
+	// server.publicURL, no trailing slash), used to build the GitLab OAuth
+	// callback address. Injected by main. Empty disables GitLab sign-in: the
+	// redirect URI has to be absolute and exact, so it is configured rather
+	// than read from the request's Host header.
+	PublicURL string
 }
 
 // New returns a configured *Server.
@@ -45,10 +53,22 @@ func (s *Server) SetRunner(svc *runner.Service) {
 	s.Runner = svc
 }
 
+// SetPublicURL wires the site's public address, used to build the GitLab
+// OAuth callback address. Empty (the default) disables GitLab sign-in.
+func (s *Server) SetPublicURL(u string) {
+	s.PublicURL = strings.TrimRight(strings.TrimSpace(u), "/")
+}
+
 // Register mounts the auth + environment API on the given mux.
 func (s *Server) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/logout", s.handleLogout)
+	// GitLab sign-in. All three are unauthenticated by necessity: they run
+	// before there is an account to authenticate. /enabled is the login
+	// page's probe, /start and /callback are the two legs of the OAuth flow.
+	mux.HandleFunc("/api/auth/gitlab/enabled", s.handleGitLabEnabled)
+	mux.HandleFunc("/api/auth/gitlab/start", s.handleGitLabStart)
+	mux.HandleFunc("/api/auth/gitlab/callback", s.handleGitLabCallback)
 	mux.HandleFunc("/api/me", s.handleMe)
 	mux.HandleFunc("/api/health", s.handleHealth)
 	// First-run setup (unauthenticated: it runs before any account exists,
@@ -134,10 +154,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
-	// A disabled account is refused with its own message: the password was
-	// right, so the user needs to be told why they still cannot get in.
-	if user.Disabled {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "this account has been disabled"})
+	// The password was right, so an account that still cannot get in is
+	// refused with its own message explaining why. The rules are shared with
+	// the GitLab sign-in (loginRefusal) so the two cannot drift apart.
+	if _, msg := loginRefusal(user); msg != "" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": msg})
 		return
 	}
 
@@ -220,13 +241,18 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // currentUser resolves the authenticated user from the session cookie, if any.
 // A disabled account has no valid session: disabling deletes the stored
 // sessions, and this check covers the row that slipped through.
+// currentUser resolves the session cookie to an account, and refuses one that
+// is not allowed in — the same two rules loginRefusal applies at sign-in, so a
+// session cannot outlive a decision an administrator made about the account.
+// An account that is disabled or un-approved loses access at once rather than
+// keeping it until its session expires.
 func (s *Server) currentUser(r *http.Request) (*store.User, bool) {
 	cookie, err := r.Cookie(sessionCookie)
 	if err != nil || cookie.Value == "" {
 		return nil, false
 	}
 	_, user, err := s.Store.GetSessionByToken(cookie.Value)
-	if err != nil || user.Disabled {
+	if err != nil || user.Disabled || !user.Approved {
 		return nil, false
 	}
 	return user, true

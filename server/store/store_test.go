@@ -59,6 +59,98 @@ func TestCreateAndGetUser(t *testing.T) {
 	}
 }
 
+// TestCreatePendingUserIsUnapproved guards the trap that shaped it: the
+// Approved column carries `default:true` so that a plain Create stores true,
+// and GORM skips a field holding its zero value when it has a default — so a
+// struct literal with Approved:false would silently store true and hand a
+// self-registered account immediate access. CreatePendingUser writes the
+// column explicitly instead; this test fails loudly if that ever regresses.
+func TestCreatePendingUserIsUnapproved(t *testing.T) {
+	s := newTestStore(t)
+
+	gitlabID := int64(4242)
+	u := &User{
+		Username: "gitlab-user",
+		Email:    "g@example.com",
+		Role:     RoleUser,
+		Source:   SourceGitLab,
+		GitLabID: &gitlabID,
+	}
+	if err := s.CreatePendingUser(u); err != nil {
+		t.Fatalf("create pending user: %v", err)
+	}
+	if u.Approved {
+		t.Fatal("the in-memory user must report unapproved")
+	}
+
+	// The database is what matters: reload rather than trust the struct.
+	got, err := s.GetUserByID(u.ID)
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if got.Approved {
+		t.Fatal("a self-registered account must be stored unapproved")
+	}
+	if got.Source != SourceGitLab {
+		t.Fatalf("expected source %q, got %q", SourceGitLab, got.Source)
+	}
+	if got.GitLabID == nil || *got.GitLabID != gitlabID {
+		t.Fatalf("expected gitlab id %d, got %v", gitlabID, got.GitLabID)
+	}
+	if got.PasswordHash != "" {
+		t.Fatalf("a GitLab account must carry no password hash, got %q", got.PasswordHash)
+	}
+
+	// A locally created account, by contrast, is approved from the start:
+	// an administrator already vouched for it.
+	local := &User{Username: "alice", Email: "alice@example.com", PasswordHash: "hash"}
+	if err := s.CreateUser(local); err != nil {
+		t.Fatalf("create local user: %v", err)
+	}
+	localGot, err := s.GetUserByID(local.ID)
+	if err != nil {
+		t.Fatalf("get local user: %v", err)
+	}
+	if !localGot.Approved {
+		t.Fatal("a locally created account must be approved")
+	}
+	if localGot.Source != SourceLocal {
+		t.Fatalf("expected source %q, got %q", SourceLocal, localGot.Source)
+	}
+	if localGot.GitLabID != nil {
+		t.Fatalf("a local account must have no gitlab id, got %v", *localGot.GitLabID)
+	}
+}
+
+// TestGetUserByGitLabID covers the lookup a returning GitLab sign-in makes.
+func TestGetUserByGitLabID(t *testing.T) {
+	s := newTestStore(t)
+
+	gitlabID := int64(7)
+	if err := s.CreatePendingUser(&User{
+		Username: "g", Email: "g@example.com", Role: RoleUser,
+		Source: SourceGitLab, GitLabID: &gitlabID,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// A local account, whose gitlab id is NULL, must not be confused with it.
+	if err := s.CreateUser(&User{Username: "l", Email: "l@example.com", PasswordHash: "h"}); err != nil {
+		t.Fatalf("create local: %v", err)
+	}
+
+	got, err := s.GetUserByGitLabID(7)
+	if err != nil {
+		t.Fatalf("get by gitlab id: %v", err)
+	}
+	if got.Username != "g" {
+		t.Fatalf("unexpected account: %+v", got)
+	}
+
+	if _, err := s.GetUserByGitLabID(8); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for an unknown gitlab id, got %v", err)
+	}
+}
+
 func TestGetUserByUsername_NotFound(t *testing.T) {
 	s := newTestStore(t)
 	_, err := s.GetUserByUsername("nobody")

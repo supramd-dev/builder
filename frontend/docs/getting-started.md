@@ -32,9 +32,12 @@ account exists, the endpoints answer `409` and do nothing.
 
 ## Accounts
 
-Apart from that first administrator, there is **no registration UI**. Users
-are created via the `adduser` CLI subcommand on the server; the web UI only
-handles login.
+Apart from that first administrator, there is **no local registration UI**.
+Users are created via the `adduser` CLI subcommand on the server; the web UI
+handles login, and — when the administrator has configured
+[GitLab sign-in](#/docs/site-configuration) — self-registration through
+GitLab, which an administrator then has to approve in **Settings → Users**
+before the new account can sign in.
 
 ```sh
 # Interactive password (hidden, read from the terminal):

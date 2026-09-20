@@ -255,20 +255,19 @@ function NavBar({ me, onLogout }: { me: Me | null; onLogout: () => void }) {
           {navLink('/settings', 'Settings')}
         </nav>
       )}
+      {/* Signed out, this stays empty on purpose. The navbar only renders
+          above the login and setup pages, so a "Log in" link would point at
+          the page already on screen — and there is no registration UI to
+          link to: accounts come from the CLI or from a GitLab sign-in. The
+          div stays as the slot the username and Log out go into. */}
       <div className="navbar-text">
-        {me ? (
+        {me && (
           <>
             <span className="text-muted">{me.username}</span>
             {' — '}
             <a href="#" onClick={(e) => { e.preventDefault(); onLogout() }}>
               Log out
             </a>
-          </>
-        ) : (
-          <>
-            <a href="#">Log in</a>
-            {' — '}
-            <a href="#">Register</a>
           </>
         )}
       </div>

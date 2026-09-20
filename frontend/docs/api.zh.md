@@ -261,6 +261,9 @@ POST /api/setup
 | POST   | `/api/login`                    | 认证,设置会话 cookie                         |
 | POST   | `/api/logout`                   | 销毁当前会话                                  |
 | GET    | `/api/me`                       | 当前用户(`id`、`username`、`email`、`role`) |
+| GET    | `/api/auth/gitlab/enabled`      | 站点是否提供 GitLab 登录(无需会话)         |
+| GET    | `/api/auth/gitlab/start`        | 发起 GitLab 登录(重定向到 GitLab)          |
+| GET    | `/api/auth/gitlab/callback`     | 完成登录(GitLab 回调到这里)                |
 | GET    | `/api/users`                    | 列出全部账号(仅管理员)                      |
 | PUT    | `/api/users/{id}`               | 修改账号:自己的,或管理员修改任意账号      |
 | GET    | `/api/environments`             | 列出站点上的全部环境,每行带 `owner` 与 `canEdit` |
@@ -273,7 +276,7 @@ POST /api/setup
 | POST   | `/api/environments/{id}/exec`   | 运行 shell 命令(`{"command": string}`)       |
 | POST   | `/api/environments/{id}/script` | 运行脚本(`{"language", "script"}`)           |
 | GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`accessTokenSet`、`timezone`、`webhookToken` 仅管理员) |
-| PUT    | `/api/site-config`              | 更新站点配置(access token:留空保留,`clearAccessToken` 删除;`timezone`:IANA 名称,空 = 浏览器本地) |
+| PUT    | `/api/site-config`              | 更新站点配置(access token:留空保留,`clearAccessToken` 删除;`timezone`:IANA 名称,空 = 浏览器本地;`gitlab*` 字段仅管理员) |
 | POST   | `/api/site-config/webhook-token`| 轮换 webhook 密钥并返回配置(仅管理员) |
 | GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
@@ -312,10 +315,36 @@ GitLab —— 且只对管理员返回,其他人拿到的该字段为空。它�
 webhook 端点用常量时间比较 `X-Gitlab-Token`,不匹配时在解析请求体之前
 就返回 401。见 [站点配置 → Webhook 密钥](#/docs/site-configuration)。
 
+GitLab 登录配置位于同一端点,但仅管理员可写:`gitlabUrl`、
+`gitlabClientId`、`gitlabClientSecret` 和 `gitlabLoginEnabled`。其他账号
+的请求只要带上其中任意一项就返回 `403`。`gitlabLoginEnabled` 与
+`gitlabClientSecretSet` 对所有人可见(登录页需要前者),而实例地址、
+Application ID 与 `gitlabRedirectUri` 只返回给管理员。client secret 与
+上面两个 token 遵循同样的只写规则(`clearGitlabClientSecret` 可删除)。
+`gitlabUrl` 与 `gitlabClientId` 的可选性略有不同:不传就保留已存的值,
+所以只想开关集成的请求不会动到凭据;显式传 `""` 才清空,而清空后集成仍
+处于开启状态则返回 `400`。三项配置不全时开启集成同样返回 `400`。
+`gitlabUrl` 与 `server.publicURL` 都必须是带 `http://` 或 `https://` 的
+完整 URL:只写主机名会被拒绝,因为它会拼出相对的回调地址,而 GitLab
+拒绝时给出的报错完全看不出原因。见
+[站点配置 → GitLab 登录](#/docs/site-configuration)。
+
+三个 `/api/auth/gitlab/*` 端点都无需会话 —— 访客正是通过它们变成账号。
+`start` 设置一个短时效的 `md_gitlab_state` cookie 并重定向到实例的授权页;
+`callback` 用常量时间比较回传的 `state` 与该 cookie,随后清除它,并返回
+一个重定向:成功时进入控制台,被拒绝时回到登录页并附带状态词
+(`pending`、`disabled`、`email_taken`、`no_email`、`denied`、
+`unavailable`、`error`)。任何结果都只是带固定状态词的重定向 —— 绝不含
+token、授权码,或远端返回的任何文本。回调地址由配置项
+`server.publicURL` 拼出,绝不取自请求的 `Host` 请求头。
+
 账号相关端点正是两种角色差别所在。`/api/users` 需要管理员身份;
 `/api/users/{id}` 允许改自己的账号,管理员则可以改任意账号。请求体包含
-`username`、`email`、`password`(为空表示保留原密码)和 `disabled` ——
-最后一项仅管理员可用,且对管理员账号和自己都会被拒绝。`role` 不属于
-请求体,传了也不会生效:只有 `adduser -admin` 能创建管理员。改密码会
-登出该账号的其他会话,禁用则登出全部。见
+`username`、`email`、`password`(为空表示保留原密码)、`disabled` 和
+`approved` —— 最后两项仅管理员可用,且对管理员账号和自己都会被拒绝。
+`role` 与 `source` 不属于请求体,传了也不会生效:只有 `adduser -admin`
+能创建管理员,而账号的来源是既成事实。账号行还会返回 `source`(`local`
+或 `gitlab`)、`approved` 与 `gitlabId`(本地账号为 0)。改密码会登出该
+账号的其他会话,禁用则登出全部,撤销审批同样登出全部 —— 账号在决定作出时
+即失去访问权,而不是等会话自然过期。见
 [站点配置 → 用户账号](#/docs/site-configuration)。
