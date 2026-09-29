@@ -677,6 +677,137 @@ func TestUpsertCaseRunAggregatesIncrementally(t *testing.T) {
 	}
 }
 
+// A regression case runs as its own sub-task, so the child run it will
+// report has to follow that task: pending while it is queued, running from
+// the moment the scheduler claims it, terminal once the outcome lands. The
+// run page (case list, detail, live log) reads this row, so a case stuck on
+// the dispatch-time placeholder shows up as pending while it executes.
+func TestMarkCaseRunRunning(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+
+	// Dispatch placeholders, as seedStageRuns writes them: one case child
+	// per case sub-task, each linked to its own task.
+	const heatTask, poissonTask int64 = 71, 72
+	parent, err := s.UpsertPlaceholderRun(&RunInput{
+		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindRegression,
+		TaskID: heatTask, Status: StatusPending,
+		Cases: []CaseInput{
+			{Name: "heat", Description: "thermal", TaskID: heatTask},
+			{Name: "poisson", TaskID: poissonTask},
+		},
+	})
+	if err != nil {
+		t.Fatalf("placeholder: %v", err)
+	}
+	children, err := s.ListChildRuns(parent.ID)
+	if err != nil {
+		t.Fatalf("list children: %v", err)
+	}
+	if len(children) != 2 || children[0].Status != StatusPending || children[1].Status != StatusPending {
+		t.Fatalf("children should start pending: %+v", children)
+	}
+	if children[0].TaskID != heatTask || children[1].TaskID != poissonTask {
+		t.Fatalf("case children should carry their own sub-task: %+v", children)
+	}
+
+	// The scheduler claims the second case's task.
+	if err := s.MarkRunRunning(env.ID, commit.ID, RunKindRegression); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	if err := s.MarkCaseRunRunning(poissonTask); err != nil {
+		t.Fatalf("mark case running: %v", err)
+	}
+	children, _ = s.ListChildRuns(parent.ID)
+	if children[1].Status != StatusRunning || children[1].StartedAt.IsZero() {
+		t.Fatalf("claimed case should be running: %+v", children[1])
+	}
+	if children[0].Status != StatusPending {
+		t.Fatalf("the queued case stays pending: %+v", children[0])
+	}
+	// The parent aggregate stays in flight while a case runs.
+	if got, _ := s.GetTestRun(parent.ID); got.Status != StatusRunning {
+		t.Fatalf("parent should be running: %+v", got)
+	}
+
+	// A second claim (or a duplicate mark) changes nothing.
+	if err := s.MarkCaseRunRunning(poissonTask); err != nil {
+		t.Fatalf("re-mark: %v", err)
+	}
+
+	// The case finishes: the recorded outcome replaces the running row, and
+	// the mark is a no-op afterwards.
+	if _, _, err := s.UpsertCaseRun(&CaseRunInput{
+		EnvironmentID: env.ID, CommitID: commit.ID, TaskID: poissonTask,
+		Name: "poisson", Status: StatusPassed, Message: "max rel err 2e-9",
+	}); err != nil {
+		t.Fatalf("record case: %v", err)
+	}
+	if err := s.MarkCaseRunRunning(poissonTask); err != nil {
+		t.Fatalf("mark after finish: %v", err)
+	}
+	children, _ = s.ListChildRuns(parent.ID)
+	if children[1].Status != StatusPassed {
+		t.Fatalf("recorded case should stay passed: %+v", children[1])
+	}
+
+	// Reporting the other case completes the aggregate.
+	if _, _, err := s.UpsertCaseRun(&CaseRunInput{
+		EnvironmentID: env.ID, CommitID: commit.ID, TaskID: heatTask,
+		Name: "heat", Status: StatusPassed,
+	}); err != nil {
+		t.Fatalf("record case: %v", err)
+	}
+	got, _ := s.GetTestRun(parent.ID)
+	if got.Status != StatusPassed || got.Passed != 2 {
+		t.Fatalf("aggregate should be passed: %+v", got)
+	}
+
+	// Unknown or absent tasks are a no-op, not an error (a report without a
+	// task, or a stage whose child run never materialized).
+	for _, id := range []int64{0, 4242} {
+		if err := s.MarkCaseRunRunning(id); err != nil {
+			t.Fatalf("mark task %d: %v", id, err)
+		}
+	}
+}
+
+// FindCaseRunsByTasks resolves each stage sub-task to the case run it
+// recorded (the graph node's link), leaving tasks without one out.
+func TestFindCaseRunsByTasks(t *testing.T) {
+	s := newTestStore(t)
+	env, commit := seedEnvAndCommit(t, s)
+
+	if _, _, err := s.UpsertCaseRun(&CaseRunInput{
+		EnvironmentID: env.ID, CommitID: commit.ID, TaskID: 71,
+		Name: "heat", Status: StatusPassed,
+	}); err != nil {
+		t.Fatalf("record case: %v", err)
+	}
+	// A top-level run keyed by the same task id must not be picked up: only
+	// case children are.
+	if _, err := s.UpsertTestRun(&RunInput{
+		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit,
+		TaskID: 72, Status: StatusPassed,
+	}); err != nil {
+		t.Fatalf("record unit run: %v", err)
+	}
+
+	runs, err := s.FindCaseRunsByTasks([]int64{71, 72, 73})
+	if err != nil {
+		t.Fatalf("find case runs: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("want one case run, got %+v", runs)
+	}
+	if r, ok := runs[71]; !ok || r.Name != "heat" || r.ParentID == 0 {
+		t.Fatalf("case run 71 wrong: %+v", runs)
+	}
+	if empty, err := s.FindCaseRunsByTasks(nil); err != nil || len(empty) != 0 {
+		t.Fatalf("no tasks should return an empty map: %v %v", empty, err)
+	}
+}
+
 func TestUpsertCaseRunAllSkipped(t *testing.T) {
 	s := newTestStore(t)
 	env, commit := seedEnvAndCommit(t, s)

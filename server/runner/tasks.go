@@ -475,7 +475,8 @@ func (s *Service) createSubTasks(root *store.Task, graph []GraphTask) error {
 // pending parent with one pending child run per case (the detail page lists
 // every case from the start). TaskID links each run to the FIRST sub-task of
 // its kind; the stage overwrites it (the case runs update their own child)
-// when it executes.
+// when it executes. A regression child is linked to its OWN sub-task, so its
+// status and log follow that task as it is scheduled.
 func (s *Service) seedStageRuns(root *store.Task, subs []*store.Task) error {
 	// The regression parent run's description lives on the root snapshot
 	// (the merged entry), not on the per-case sub-tasks.
@@ -512,7 +513,15 @@ func (s *Service) seedStageRuns(root *store.Task, subs []*store.Task) error {
 			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
 				return fmt.Errorf("seed regression run: %w", err)
 			}
-			cases[kind] = append(cases[kind], store.CaseInput{Name: stage.Case, Description: stage.Description})
+			// TaskID ties the case's child run to its own sub-task: the
+			// child's status follows that task (pending until the scheduler
+			// claims it — MarkCaseRunRunning), and the case's detail page
+			// reads its log by it.
+			cases[kind] = append(cases[kind], store.CaseInput{
+				Name:        stage.Case,
+				Description: stage.Description,
+				TaskID:      sub.ID,
+			})
 		default:
 			continue // clone has no run
 		}

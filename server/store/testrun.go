@@ -543,6 +543,41 @@ type EnvCommit struct {
 	Commit int64
 }
 
+// MarkCaseRunRunning flips ONE regression case's child run from pending to
+// running: the scheduler claimed that case's sub-task, so the case's status
+// now follows the task instead of sitting on the dispatch-time placeholder
+// until the case finishes. Matched by the child's task (every case child is
+// seeded with its own sub-task id). A no-op when the child is absent, has no
+// task, or is already running/terminal (a re-run keeps its terminal row
+// until the new outcome lands through UpsertCaseRun).
+func (s *Store) MarkCaseRunRunning(taskID int64) error {
+	if taskID == 0 {
+		return nil // a report without a task: nothing to follow
+	}
+	return s.DB.Model(&TestRun{}).
+		Where("task_id = ? AND parent_id <> 0 AND status = ?", taskID, StatusPending).
+		Updates(map[string]any{"status": StatusRunning, "started_at": time.Now()}).Error
+}
+
+// FindCaseRunsByTasks returns the case child runs of the given stage
+// sub-tasks, keyed by task id: the graph page resolves a regression case node
+// to the run it recorded on its own sub-task (not the parent run every case
+// used to share). Tasks without a child run are absent from the map.
+func (s *Store) FindCaseRunsByTasks(taskIDs []int64) (map[int64]TestRun, error) {
+	runs := map[int64]TestRun{}
+	if len(taskIDs) == 0 {
+		return runs, nil
+	}
+	var list []TestRun
+	if err := s.DB.Where("task_id IN ? AND parent_id <> 0", taskIDs).Find(&list).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range list {
+		runs[r.TaskID] = r
+	}
+	return runs, nil
+}
+
 // UpsertPlaceholderRun creates (or resets) the placeholder run of one stage
 // for (environment, commit, kind): status pending or running, linked to the
 // stage sub-task. Called at dispatch time so the matrix cell and run detail

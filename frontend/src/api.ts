@@ -672,6 +672,10 @@ export interface TaskDetail {
   subTasks?: SubTask[]
   commit?: TaskCommit | null
   environment?: TaskEnvironment | null
+  // regressionRunId: the stage-wide regression run of a root. Each case
+  // sub-task carries its own runId (its case run); the graph's derived
+  // "reg test" node opens this one instead.
+  regressionRunId?: number
 }
 
 export async function getTask(id: number): Promise<TaskDetail> {

@@ -24,11 +24,17 @@ type fakeExecer struct {
 	// Unmatched scripts exit 0.
 	outcome map[string]int
 	output  map[string]string
+
+	// onScript, when set, is called with each script as it "executes" — the
+	// moment a real command would be running on the host, which is when
+	// tests observe the state the run pages read.
+	onScript func(script string)
 }
 
 func (f *fakeExecer) RunScript(ctx context.Context, h SSHHost, cmd, script string, timeout time.Duration, stdout, stderr io.Writer) ExecResult {
 	f.mu.Lock()
 	f.scripts = append(f.scripts, script)
+	hook := f.onScript
 	res := ExecResult{ExitCode: 0, Success: true}
 	for marker, code := range f.outcome {
 		if strings.Contains(script, marker) {
@@ -44,6 +50,9 @@ func (f *fakeExecer) RunScript(ctx context.Context, h SSHHost, cmd, script strin
 		}
 	}
 	f.mu.Unlock()
+	if hook != nil {
+		hook(script)
+	}
 	return res
 }
 

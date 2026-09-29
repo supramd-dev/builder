@@ -216,7 +216,9 @@ export default function TestRunDetailPage({ onError }: Props) {
           />
         </>
       )}
-      {run.cases.length === 0 && !run.artifacts.some((a) => a.kind === 'results') && (
+      {/* A case's own run has no sub-cases to list, so the note only makes
+          sense on a stage-wide run. */}
+      {run.cases.length === 0 && !run.parentRunId && !run.artifacts.some((a) => a.kind === 'results') && (
         <p className="text-muted">
           No per-case results were reported for this run — see the summary
           above.

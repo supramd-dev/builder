@@ -525,6 +525,163 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	}
 }
 
+// TestTaskDetailCaseRuns checks the graph's node → run links for a
+// regression stage: each case sub-task points at its own case run (so a node
+// opens its own case), while the stage-wide regression run comes back as
+// regressionRunId for the derived node. A case that never reported falls
+// back to the stage-wide run.
+func TestTaskDetailCaseRuns(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	seedUser(t, s, "caseuser", "case@example.com", "pw")
+	env := seedDispatchEnv(t, s, "cpu-cases", "cpu", true)
+	commit := &store.Commit{Repo: "group/code", SHA: "cases01", PushedAt: time.Now()}
+	if _, err := s.GetOrCreateCommit(commit); err != nil {
+		t.Fatal(err)
+	}
+
+	root := &store.Task{
+		Kind: store.TaskKindRoot, Name: "test cases01", CommitID: commit.ID,
+		EnvironmentID: env.ID, Tags: "cpu", Config: `{"entry":{"tags":["cpu"]},"testInputRef":"main"}`,
+	}
+	subs := []*store.Task{
+		{Kind: store.TaskKindClone, Name: "clone repositories", CommitID: commit.ID, EnvironmentID: env.ID},
+		{Kind: store.TaskKindBuild, Name: "build", CommitID: commit.ID, EnvironmentID: env.ID},
+		{Kind: store.TaskKindRegression, Name: "regression: heat", CommitID: commit.ID, EnvironmentID: env.ID,
+			Config: `{"case":"heat","command":"run_heat"}`},
+		{Kind: store.TaskKindRegression, Name: "regression: poisson", CommitID: commit.ID, EnvironmentID: env.ID,
+			Config: `{"case":"poisson","command":"run_poisson"}`},
+		{Kind: store.TaskKindRegression, Name: "regression: laplace", CommitID: commit.ID, EnvironmentID: env.ID,
+			Config: `{"case":"laplace","command":"run_laplace"}`},
+	}
+	deps := [][]int64{
+		{},
+		{store.TaskSubPlaceholderBase + 0},
+		{store.TaskSubPlaceholderBase + 1},
+		{store.TaskSubPlaceholderBase + 1},
+		{store.TaskSubPlaceholderBase + 1},
+	}
+	stored, err := store.CreateTaskGraph(s, root, subs, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heat, poisson, laplace := stored[3], stored[4], stored[5]
+
+	// The dispatch-time placeholder: one pending case child per case
+	// sub-task, then the outcomes of the two cases that ran.
+	parent, err := s.UpsertPlaceholderRun(&store.RunInput{
+		EnvironmentID: env.ID, CommitID: commit.ID, Kind: store.RunKindRegression,
+		TaskID: heat.ID, Status: store.StatusPending,
+		Cases: []store.CaseInput{
+			{Name: "heat", TaskID: heat.ID},
+			{Name: "poisson", TaskID: poisson.ID},
+			{Name: "laplace", TaskID: laplace.ID},
+		},
+	})
+	if err != nil {
+		t.Fatalf("placeholder: %v", err)
+	}
+	for _, c := range []struct {
+		name string
+		task *store.Task
+	}{{"heat", heat}, {"poisson", poisson}} {
+		if _, _, err := s.UpsertCaseRun(&store.CaseRunInput{
+			EnvironmentID: env.ID, CommitID: commit.ID, TaskID: c.task.ID,
+			Name: c.name, Status: store.StatusPassed,
+		}); err != nil {
+			t.Fatalf("record case %s: %v", c.name, err)
+		}
+	}
+	caseRuns, err := s.FindCaseRunsByTasks([]int64{heat.ID, poisson.ID, laplace.ID})
+	if err != nil {
+		t.Fatalf("find case runs: %v", err)
+	}
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "caseuser", "pw")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/tasks/%d", root.ID), nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("task detail: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var detail taskDetailJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.RegressionRunID != parent.ID {
+		t.Fatalf("regressionRunId: want the stage-wide run %d, got %d", parent.ID, detail.RegressionRunID)
+	}
+	byName := map[string]subTaskJSON{}
+	for _, sj := range detail.SubTasks {
+		byName[sj.Name] = sj
+	}
+	// Each case node opens its own case run — not the parent run they used
+	// to share.
+	if got := byName["regression: heat"].RunID; got != caseRuns[heat.ID].ID {
+		t.Errorf("heat node runId: want its case run %d, got %d", caseRuns[heat.ID].ID, got)
+	}
+	if got := byName["regression: poisson"].RunID; got != caseRuns[poisson.ID].ID {
+		t.Errorf("poisson node runId: want its case run %d, got %d", caseRuns[poisson.ID].ID, got)
+	}
+	if byName["regression: heat"].RunID == byName["regression: poisson"].RunID {
+		t.Error("the two case nodes should not share one run")
+	}
+	// A case that has not reported yet still links to its own (pending)
+	// placeholder row — the page that follows it live.
+	if got := byName["regression: laplace"].RunID; got != caseRuns[laplace.ID].ID {
+		t.Errorf("laplace node runId: want its placeholder run %d, got %d", caseRuns[laplace.ID].ID, got)
+	}
+	// The non-regression stages keep their stage-wide runs (none recorded
+	// here, so no link) and are not confused with cases.
+	if byName["build"].RunID != 0 || byName["clone repositories"].RunID != 0 {
+		t.Errorf("clone/build should have no run: %+v", detail.SubTasks)
+	}
+
+	// A dispatch that never seeded case rows (a run reported from outside,
+	// with no case sub-tasks recorded): the case node falls back to the
+	// stage-wide run instead of losing its link.
+	commit2 := &store.Commit{Repo: "group/code", SHA: "cases02", PushedAt: time.Now()}
+	if _, err := s.GetOrCreateCommit(commit2); err != nil {
+		t.Fatal(err)
+	}
+	root2 := &store.Task{
+		Kind: store.TaskKindRoot, Name: "test cases02", CommitID: commit2.ID,
+		EnvironmentID: env.ID, Tags: "cpu", Config: `{"entry":{"tags":["cpu"]},"testInputRef":"main"}`,
+	}
+	if _, err := store.CreateTaskGraph(s, root2,
+		[]*store.Task{
+			{Kind: store.TaskKindClone, Name: "clone repositories", CommitID: commit2.ID, EnvironmentID: env.ID},
+			{Kind: store.TaskKindRegression, Name: "regression: heat", CommitID: commit2.ID, EnvironmentID: env.ID,
+				Config: `{"case":"heat","command":"run_heat"}`},
+		},
+		[][]int64{{}, {store.TaskSubPlaceholderBase + 0}}); err != nil {
+		t.Fatal(err)
+	}
+	reported, err := s.UpsertTestRun(&store.RunInput{
+		EnvironmentID: env.ID, CommitID: commit2.ID, Kind: store.RunKindRegression,
+		Status: store.StatusPassed,
+	})
+	if err != nil {
+		t.Fatalf("report run: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/tasks/%d", root2.ID), nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	mux.ServeHTTP(rec, req)
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if got := detail.SubTasks[1]; got.RunID != reported.ID || got.Status != store.TaskPending {
+		t.Errorf("case node without its own run should fall back to the stage run %d: %+v", reported.ID, got)
+	}
+}
+
 // TestDashboardBuildKind checks the third dashboard kind: build runs are
 // reported, listed on /api/dashboard/build and rejected for unknown kinds.
 func TestDashboardBuildKind(t *testing.T) {

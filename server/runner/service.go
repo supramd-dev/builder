@@ -154,6 +154,11 @@ func (s *Service) runClaimed(ctx context.Context, task *store.Task) {
 // markStageRunRunning flips the claimed stage's placeholder run from
 // pending to running (a no-op for stages without a run). The run detail
 // page and matrix cell follow the stage live from this moment on.
+//
+// A regression stage is one sub-task per case, so the claimed task is ONE
+// case: the top-level regression run flips once (the first case claimed) and
+// the case's own child run flips with it, keeping that case's row on the run
+// page — and its detail page's log — in step with the task that runs it.
 func (s *Service) markStageRunRunning(task *store.Task) {
 	var kind string
 	switch task.Kind {
@@ -163,6 +168,9 @@ func (s *Service) markStageRunRunning(task *store.Task) {
 		kind = store.RunKindUnit
 	case store.TaskKindRegression:
 		kind = store.RunKindRegression
+		if err := s.Store.MarkCaseRunRunning(task.ID); err != nil {
+			log.Printf("runner: task %d: mark case run running: %v", task.ID, err)
+		}
 	default:
 		return // clone: no run
 	}

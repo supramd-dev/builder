@@ -1432,6 +1432,19 @@ code {
   background: var(--bg-alt);
 }
 
+/* The reg test node: a container summarizing the regression cases, not a
+   task the scheduler claims — a dashed border and the alternate background
+   say so, the status colors stay the same. (The root is the other container
+   and keeps its own class above.) */
+.graph-node-derived {
+  background: var(--bg-alt);
+  border-style: dashed;
+}
+
+.graph-node-derived .graph-node-name {
+  font-style: italic;
+}
+
 .graph-node:hover {
   background: var(--bg-alt);
 }

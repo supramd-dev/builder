@@ -5,21 +5,30 @@ import { getTask, type SubTask, type TaskDetail } from './api'
 import { TaskStatusText, commitUrl } from './StatusViews'
 import { Breadcrumbs } from './Breadcrumbs'
 import TaskLogView from './TaskLogView'
-
-// NODE_W/NODE_H size the graph nodes; GAP_X/GAP_Y the layer spacing.
-const NODE_W = 180
-const NODE_H = 44
-const GAP_X = 56
-const GAP_Y = 22
+import {
+  GAP_X,
+  GAP_Y,
+  NODE_H,
+  NODE_W,
+  ROOT_KEY,
+  graphEdges,
+  layerNodes,
+  nodePositions,
+  regressionGroup,
+  type LayoutNode,
+} from './graphLayout'
 
 // TaskPipelinePage shows one pipeline as two linked views: the dependency
 // graph on top, the pipeline step list (with inline expandable stage logs)
-// below it. A graph node with a recorded run opens the run's detail page; a
-// node without one scrolls to the step list and expands that stage's log.
-// Clicking a step toggles its log in place; statuses follow the live
-// pipeline — getTask is polled (3s) only while the graph is pending/running.
-// The requested id may be a root or a sub-task (legacy deep links); sub-task
-// ids resolve to their root and preselect that sub-task's log.
+// below it. Graph nodes come in two flavours (see graphLayout): real
+// sub-tasks, which open the run they recorded, and derived containers (the
+// root, and the reg test node summarizing the regression cases), which open
+// the stage-wide run. A node with no run at all scrolls to the step list and
+// expands that stage's log. Clicking a step toggles its log in place;
+// statuses follow the live pipeline — getTask is polled (3s) only while the
+// graph is pending/running. The requested id may be a root or a sub-task
+// (legacy deep links); sub-task ids resolve to their root and preselect that
+// sub-task's log.
 export default function TaskPipelinePage() {
   const params = useParams()
   const navigate = useNavigate()
@@ -117,25 +126,34 @@ export default function TaskPipelinePage() {
             task={root}
             subs={subs}
             expanded={expanded}
-            onNodeClick={(sub) => {
+            onNodeClick={(node) => {
+              // A derived node opens the stage-wide run it summarizes.
+              if (node.derived) {
+                if (root.regressionRunId) navigate(`/runs/${root.regressionRunId}`)
+                return
+              }
               // A recorded run owns the click: straight to the run's
               // detail page. Otherwise select the step: expand its log
               // in the pipeline list and scroll it into view.
-              if (sub.runId) {
-                navigate(`/runs/${sub.runId}`)
+              if (node.sub?.runId) {
+                navigate(`/runs/${node.sub.runId}`)
                 return
               }
-              setExpanded(sub.id)
-              requestAnimationFrame(() => {
-                document
-                  .getElementById(`pipeline-step-${sub.id}`)
-                  ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-              })
+              if (node.sub) {
+                const id = node.sub.id
+                setExpanded(id)
+                requestAnimationFrame(() => {
+                  document
+                    .getElementById(`pipeline-step-${id}`)
+                    ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+                })
+              }
             }}
           />
           <p className="text-muted graph-hint">
-            Click a stage with a recorded run to open its test details;
-            other nodes expand the stage's log in the pipeline below.
+            Click a stage with a recorded run to open its test details; the
+            reg test node opens the whole regression run; other nodes expand
+            the stage's log in the pipeline below.
           </p>
           <PipelineSection
             subs={subs}
@@ -208,9 +226,10 @@ function TaskHeader({ task }: { task: TaskDetail }) {
   )
 }
 
-// GraphCanvas draws the dependency graph. Nodes with a recorded run open
-// the run detail page (onNodeClick); the rest expand their step's log in
-// the pipeline list below. The root node is not clickable.
+// GraphCanvas draws the dependency graph. Real nodes with a recorded run
+// open the run detail page, derived nodes the stage-wide run (onNodeClick);
+// a node with neither expands its step's log in the pipeline list below. The
+// root node is not clickable.
 function GraphCanvas({
   task,
   subs,
@@ -220,17 +239,14 @@ function GraphCanvas({
   task: TaskDetail
   subs: SubTask[]
   expanded: number | null
-  onNodeClick: (sub: SubTask) => void
+  onNodeClick: (node: LayoutNode) => void
 }) {
   const root = task.kind === 'root' ? task : null
-  const layers = layerGraph(subs)
-  const pos = positions(layers, root)
+  const group = regressionGroup(subs)
+  const layers = layerNodes(subs, root, group)
+  const pos = nodePositions(layers)
 
-  const rows: { id: number | 'root'; node: TaskDetail | SubTask }[] = []
-  if (root) rows.push({ id: 'root', node: root })
-  for (const sub of subs) rows.push({ id: sub.id, node: sub })
-
-  const width = Math.max(1, layers.length + (root ? 1 : 0))
+  const width = Math.max(1, layers.length)
   const maxRows = Math.max(1, ...layers.map((l) => l.length))
   const height = Math.max(1, maxRows)
 
@@ -244,20 +260,20 @@ function GraphCanvas({
         }}
       >
         <svg className="graph-edges" width="100%" height="100%">
-          {edges(subs, root, pos).map((e, i) => (
+          {graphEdges(subs, root, group, pos).map((e, i) => (
             <path key={i} d={e.d} className={'graph-edge' + (e.done ? ' graph-edge-done' : '')} />
           ))}
         </svg>
-        {rows.map(({ id, node }) => {
-          const p = pos.get(id)
+        {layers.flat().map((node) => {
+          const p = pos.get(node.key)
           if (!p) return null
-          const isRoot = id === 'root'
-          const sub = isRoot ? null : (node as SubTask)
+          const isRoot = node.key === ROOT_KEY
           const status = node.status
           const cls = [
             'graph-node',
             isRoot ? 'graph-node-root' : '',
-            !isRoot && expanded === id ? 'graph-node-selected' : '',
+            node.derived ? 'graph-node-derived' : '',
+            node.sub && expanded === node.key ? 'graph-node-selected' : '',
             'graph-node-' + status,
           ]
             .filter(Boolean)
@@ -265,16 +281,18 @@ function GraphCanvas({
           return (
             <button
               type="button"
-              key={String(id)}
+              key={String(node.key)}
               className={cls}
               style={{ left: p.x, top: p.y, width: NODE_W, height: NODE_H }}
-              onClick={sub ? () => onNodeClick(sub) : undefined}
+              onClick={isRoot ? undefined : () => onNodeClick(node)}
               title={
                 isRoot
                   ? 'Pipeline root'
-                  : sub?.runId
-                    ? 'Open the run details'
-                    : "Expand the stage's log below"
+                  : node.derived
+                    ? `Derived from ${group?.cases.length ?? 0} case nodes — open the regression run`
+                    : node.sub?.runId
+                      ? 'Open the run details'
+                      : "Expand the stage's log below"
               }
             >
               <span className="graph-node-head">
@@ -285,7 +303,7 @@ function GraphCanvas({
                     nodeGlyph(status)
                   )}
                 </span>
-                <span className="graph-node-name">{isRoot ? 'task' : node.name}</span>
+                <span className="graph-node-name">{node.name}</span>
                 {(status === 'pending' || status === 'running') && (
                   <span className={'graph-node-state text-' + status}>{status}</span>
                 )}
@@ -368,89 +386,7 @@ function PipelineSection({
   )
 }
 
-// --- layout -----------------------------------------------------------------
-
-// layerGraph assigns each sub-task a dependency layer (longest path from a
-// source) and orders nodes within a layer by id, producing a left-to-right
-// DAG layout: clone in layer 0, build in layer 1, tests in layer 2.
-function layerGraph(subs: SubTask[]): SubTask[][] {
-  const byId = new Map(subs.map((s) => [s.id, s]))
-  const depth = new Map<number, number>()
-  function d(s: SubTask): number {
-    const cached = depth.get(s.id)
-    if (cached !== undefined) return cached
-    const deps = (s.dependsOn ?? []).filter((dep) => byId.has(dep))
-    depth.set(s.id, 0) // cycle guard
-    const v = deps.length === 0 ? 0 : 1 + Math.max(...deps.map((dep) => d(byId.get(dep)!)))
-    depth.set(s.id, v)
-    return v
-  }
-  for (const s of subs) d(s)
-
-  const layers: SubTask[][] = []
-  for (const s of subs) {
-    const l = depth.get(s.id) ?? 0
-    ;(layers[l] ??= []).push(s)
-  }
-  return layers.filter((l) => l && l.length > 0)
-}
-
-// positions computes each node's pixel position: x by layer, y centered
-// within its layer.
-function positions(
-  layers: SubTask[][],
-  root: TaskDetail | null,
-): Map<number | 'root', { x: number; y: number }> {
-  const pos = new Map<number | 'root', { x: number; y: number }>()
-  // The root sits in a leftmost virtual column, on the same horizontal
-  // line as the first node of the first layer (clone) — the pipeline's
-  // entry point reads as one row.
-  if (root) {
-    pos.set('root', { x: 0, y: 0 })
-  }
-  const stride = NODE_H + GAP_Y
-  // Sub-tasks start at x offset 1 column when the root column is present.
-  layers.forEach((layer, li) => {
-    layer.forEach((s, i) => {
-      pos.set(s.id, { x: (li + (root ? 1 : 0)) * (NODE_W + GAP_X), y: i * stride })
-    })
-  })
-  return pos
-}
-
-// edges builds the bezier path between every node and each of its
-// dependencies (root node included as the leftmost virtual column). An edge
-// is "done" once its source node finished, for the animated draw-in.
-function edges(
-  subs: SubTask[],
-  root: TaskDetail | null,
-  pos: Map<number | 'root', { x: number; y: number }>,
-): { d: string; done: boolean }[] {
-  const out: { d: string; done: boolean }[] = []
-  const mid = NODE_W / 2
-  // Root's position mirrors positions(): first row of the leftmost column.
-  const rootPos = root ? { x: 0, y: 0 } : undefined
-  for (const s of subs) {
-    const to = pos.get(s.id)
-    if (!to) continue
-    for (const dep of s.dependsOn ?? []) {
-      const isRootDep = dep === root?.id
-      const from = isRootDep ? rootPos : pos.get(dep)
-      if (!from) continue
-      const x1 = from.x + mid
-      const y1 = from.y + NODE_H / 2
-      const x2 = to.x + mid
-      const y2 = to.y + NODE_H / 2
-      const dx = Math.max(30, (x2 - x1) / 2)
-      const srcStatus = isRootDep ? root?.status : subs.find((x) => x.id === dep)?.status
-      out.push({
-        d: `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`,
-        done: srcStatus === 'done',
-      })
-    }
-  }
-  return out
-}
+// --- status glyphs ----------------------------------------------------------
 
 function nodeGlyph(status: string): string {
   switch (status) {

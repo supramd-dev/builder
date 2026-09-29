@@ -46,6 +46,11 @@ type taskDetailJSON struct {
 	SubTasks      []subTaskJSON     `json:"subTasks,omitempty"` // roots only
 	Commit        *commitJSON       `json:"commit,omitempty"`
 	Environment   *dashboardEnvJSON `json:"environment,omitempty"`
+
+	// RegressionRunID is the stage-wide regression run of a root: the graph
+	// page's derived "reg test" node opens it, since each case node opens its
+	// own case run instead.
+	RegressionRunID int64 `json:"regressionRunId,omitempty"`
 }
 
 // handleTaskItem routes /api/tasks/{id} (and /log).
@@ -147,6 +152,15 @@ func (s *Server) taskDetail(w http.ResponseWriter, id int64) {
 			unitRuns, _ = s.Store.FindRunsByCommits(store.RunKindUnit, ec, cc)
 			regRuns, _ = s.Store.FindRunsByCommits(store.RunKindRegression, ec, cc)
 		}
+		// A regression stage is one sub-task per case, and each case records
+		// its own child run: resolve every case node to the run it produced,
+		// so clicking a node opens that case rather than the whole stage.
+		// (The parent regression run stays the fallback for a node whose case
+		// never recorded one — an old dispatch, or a report without cases.)
+		var caseRuns map[int64]store.TestRun
+		if regIDs := regressionSubTaskIDs(subs); len(regIDs) > 0 {
+			caseRuns, _ = s.Store.FindCaseRunsByTasks(regIDs)
+		}
 		detail.SubTasks = make([]subTaskJSON, 0, len(subs))
 		for i := range subs {
 			sj := toSubTaskJSON(&subs[i])
@@ -161,11 +175,16 @@ func (s *Server) taskDetail(w http.ResponseWriter, id int64) {
 					sj.RunID = r.ID
 				}
 			case store.TaskKindRegression:
-				if r, ok := regRuns[key]; ok {
+				if r, ok := caseRuns[subs[i].ID]; ok {
+					sj.RunID = r.ID
+				} else if r, ok := regRuns[key]; ok {
 					sj.RunID = r.ID
 				}
 			}
 			detail.SubTasks = append(detail.SubTasks, sj)
+		}
+		if r, ok := regRuns[store.EnvCommit{Env: task.EnvironmentID, Commit: task.CommitID}]; ok {
+			detail.RegressionRunID = r.ID
 		}
 	}
 	writeJSON(w, http.StatusOK, detail)
@@ -216,6 +235,18 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, id int64) {
 type logChunkJSON struct {
 	Seq     int    `json:"seq"`
 	Content string `json:"content"`
+}
+
+// regressionSubTaskIDs collects the ids of a root's regression case
+// sub-tasks (each case is its own task and records its own child run).
+func regressionSubTaskIDs(subs []store.Task) []int64 {
+	var ids []int64
+	for i := range subs {
+		if subs[i].Kind == store.TaskKindRegression {
+			ids = append(ids, subs[i].ID)
+		}
+	}
+	return ids
 }
 
 func toSubTaskJSON(t *store.Task) subTaskJSON {
