@@ -4,6 +4,7 @@ import { LoaderCircle, Maximize2 } from 'lucide-react'
 import {
   getTestArtifact,
   getTestRun,
+  isTerminalStatus,
   runArtifactsZipUrl,
   testArtifactDownloadUrl,
   type Run,
@@ -63,9 +64,14 @@ export default function TestRunDetailPage({ onError }: Props) {
     }
   }, [runId, onError])
 
-  // A pending/running attempt follows its stage live: poll until the real
-  // outcome lands (status leaves pending/running).
-  const live = run?.status === 'pending' || run?.status === 'running'
+  // An attempt that has not finished follows its stage live: poll until the
+  // real outcome lands. The question is asked as "has it finished?" rather than
+  // "is it pending or running?" so that a status this build does not recognise
+  // keeps the page polling instead of freezing it — a frozen page has no
+  // request left to notice the outcome. (A terminal run needs no such care:
+  // the store never reopens one — a re-run opens a new attempt, and so a new
+  // run with a page of its own.)
+  const live = run !== null && !isTerminalStatus(run.status)
   useEffect(() => {
     if (!live) return
     // The interval is cleared on navigation/unmount, but a request already on
@@ -310,17 +316,15 @@ function AttemptsSection({ run }: { run: TestRunDetail }) {
 }
 
 // LogSection shows the attempt's stdout: the task's log at this run's
-// attempt, so an earlier attempt's page shows that attempt's output.
+// attempt, so an earlier attempt's page shows that attempt's output. The view
+// follows the run's own status, so an attempt that may still write is not read
+// as if its output were complete.
 function LogSection({ run }: { run: TestRunDetail }) {
   if (run.taskId === 0) return null
   return (
     <section>
       <h3 className="task-section-title">Log</h3>
-      <TaskLogView
-        taskId={run.taskId}
-        attempt={run.attempt}
-        live={run.status === 'running'}
-      />
+      <TaskLogView taskId={run.taskId} attempt={run.attempt} status={run.status} />
     </section>
   )
 }

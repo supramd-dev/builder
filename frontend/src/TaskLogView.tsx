@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { Download } from 'lucide-react'
-import { getTaskLogs, taskLogDownloadUrl } from './api'
+import { getTaskLogs, isTerminalStatus, taskLogDownloadUrl } from './api'
 
 // One read returns at most this many chunks (the store caps the query), so a
 // full page means there may be more and the viewer asks again.
@@ -10,50 +10,59 @@ const LOG_PAGE = 1000
 // connection for ever. A finished attempt has no next tick, so it is read to
 // the end in one go (the log itself is capped server-side).
 const LOG_PAGES_PER_TICK = 20
-// Rendered text is capped; the server keeps the whole log.
-const MAX_TEXT = 512 * 1024
 
 // TaskLogView shows one attempt's incremental log, polling with
-// after=lastSeq while live is set. Shared by the task pipeline page
-// (following a running stage) and the run detail page (a finished stage's
-// stdout, or an earlier attempt's).
+// after=lastSeq while the task may still write to it. Shared by the task
+// pipeline page (following a running stage) and the run detail page (a
+// finished stage's stdout, or an earlier attempt's).
 //
 // Exactly one reader runs at a time — the effect below is the only caller of
 // getTaskLogs — so a chunk is appended once: two pollers starting together
 // from the same sequence would each append the same page. A new taskId or
-// attempt is a new stream and resets what is rendered; `live` flipping false
-// only stops the timer, after one last read, so the lines written between the
-// final tick and the outcome still show up.
+// attempt is a new stream and resets what is rendered; the task finishing only
+// stops the timer, after one last read, so the lines written between the final
+// tick and the outcome still show up.
 //
-// The rendered text is capped (only the tail is kept), so the bar above it
-// links to the server's copy of the whole log — the button is how a user
-// gets the full file, whatever the viewer is showing.
+// Nothing read is ever dropped from the view: output that appeared stays
+// where it is, and the page grows downward as the attempt writes more. (A
+// view that trimmed its head to bound the text would make the first lines
+// vanish under the reader mid-follow.) The stored log is capped server-side,
+// which is what bounds this — the bar above links to that copy, whole or not.
 export default function TaskLogView({
   taskId,
   attempt,
-  live,
+  status,
 }: {
   taskId: number
   // The attempt to show; omit it for the task's current one.
   attempt?: number
-  live: boolean
+  // The task's status, which decides whether the view follows its output.
+  status: string
 }) {
-  const [text, setText] = useState('')
-  const [truncated, setTruncated] = useState(false)
+  // A task that may still write: one that is running, or one in a status this
+  // build does not know (an older server's row) — anything but a queued task,
+  // which has written nothing yet and will not until it runs, and a finished
+  // one, which has nothing left to say. The page around this view polls the
+  // status itself, so a queued task's follow starts the moment it does.
+  const live = status !== 'pending' && !isTerminalStatus(status)
+  // A stage that has not been dispatched yet reports attempt 0, which the API
+  // reads as a bad request. Omitting the parameter asks for the current
+  // attempt — which is the only one such a node can have.
+  const showAttempt = attempt !== undefined && attempt > 0 ? attempt : undefined
+  // One entry per read, kept as it arrived: appending to the text would relayout
+  // the whole log on every tick, and the array lets React touch only the new
+  // nodes.
+  const [chunks, setChunks] = useState<string[]>([])
   const lastSeq = useRef(0)
-  // Everything ever appended, i.e. the length of the untrimmed text.
-  const totalRef = useRef(0)
   const preRef = useRef<HTMLPreElement>(null)
 
   // A new task or attempt is a new stream: drop the old text and read from the
   // start. This runs before the reading effect (declaration order), so the
   // reader below never sees a sequence from the previous stream.
   useEffect(() => {
-    setText('')
-    setTruncated(false)
+    setChunks([])
     lastSeq.current = 0
-    totalRef.current = 0
-  }, [taskId, attempt])
+  }, [taskId, showAttempt])
 
   useEffect(() => {
     let stop = false
@@ -62,7 +71,7 @@ export default function TaskLogView({
       for (let page = 0; page < maxPages; page++) {
         let res
         try {
-          res = await getTaskLogs(taskId, lastSeq.current, attempt)
+          res = await getTaskLogs(taskId, lastSeq.current, showAttempt)
         } catch {
           return // transient; the next tick retries
         }
@@ -70,12 +79,7 @@ export default function TaskLogView({
         lastSeq.current = res.lastSeq
         if (res.chunks.length === 0) return
         const joined = res.chunks.map((c) => c.content).join('')
-        totalRef.current += joined.length
-        if (totalRef.current > MAX_TEXT) setTruncated(true)
-        setText((cur) => {
-          const next = cur + joined
-          return next.length > MAX_TEXT ? next.slice(next.length - MAX_TEXT) : next
-        })
+        setChunks((cur) => [...cur, joined])
         if (res.chunks.length < LOG_PAGE) return
       }
     }
@@ -86,7 +90,7 @@ export default function TaskLogView({
       stop = true
       clearInterval(timer)
     }
-  }, [taskId, attempt, live])
+  }, [taskId, showAttempt, live])
 
   // Auto-scroll to the bottom on new output while following.
   const stick = useRef(true)
@@ -95,15 +99,15 @@ export default function TaskLogView({
     if (pre && stick.current) {
       pre.scrollTop = pre.scrollHeight
     }
-  }, [text])
+  }, [chunks])
 
   return (
     <div className="task-log-box">
       <div className="task-log-bar">
         <a
           className="task-log-download"
-          href={taskLogDownloadUrl(taskId, attempt)}
-          download={`task-${taskId}${attempt === undefined ? '' : `-attempt-${attempt}`}.log`}
+          href={taskLogDownloadUrl(taskId, showAttempt)}
+          download={`task-${taskId}${showAttempt === undefined ? '' : `-attempt-${showAttempt}`}.log`}
           title="Download the full log as a file"
         >
           <Download size={13} /> Download log
@@ -117,8 +121,11 @@ export default function TaskLogView({
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
         }}
       >
-        {truncated && <span className="text-muted">… earlier output trimmed (full log on the server) …{'\n'}</span>}
-        {text || (live ? 'waiting for output…' : '(no output)')}
+        {chunks.length > 0
+          ? chunks.map((chunk, i) => <Fragment key={i}>{chunk}</Fragment>)
+          : live
+            ? 'waiting for output…'
+            : '(no output)'}
       </pre>
     </div>
   )

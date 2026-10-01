@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { LoaderCircle } from 'lucide-react'
-import { getTask, taskArtifactsZipUrl, type TaskDetail, type TaskNode } from './api'
+import { getTask, isTerminalStatus, taskArtifactsZipUrl, type TaskDetail, type TaskNode } from './api'
 import { StatusText, commitUrl } from './StatusViews'
 import { Breadcrumbs } from './Breadcrumbs'
 import TaskLogView from './TaskLogView'
@@ -16,16 +16,22 @@ import {
   regressionStage,
 } from './graphLayout'
 
+// How often the graph page re-reads its task: a graph that may still move is
+// followed at the first cadence, one that reads finished slows to the second.
+// The idle cadence is not a stop — a finished graph can be re-dispatched, and
+// nothing else would tell a page that has stopped asking (see graphLive).
+const POLL_LIVE_MS = 3000
+const POLL_IDLE_MS = 15000
+
 // TaskPipelinePage shows one pipeline as two linked views: the dependency
 // graph on top, the pipeline step list — with the selected step's log inlined
 // under it — below. The graph is drawn from the graph's own task nodes: the
 // real ones (clone, build, unit, and one per regression case) each have a run
 // of their own, whose log the panel streams while the stage executes; a
 // virtual one (the regression container) runs nothing itself — it summarizes
-// its cases, so selecting it lists them. getTask is polled (3s) only while the
-// graph is pending/running. The requested id may be any node (a dashboard cell
-// links its container, for instance): a non-root id resolves to its root and
-// preselects that node.
+// its cases, so selecting it lists them. getTask is polled as above. The
+// requested id may be any node (a dashboard cell links its container, for
+// instance): a non-root id resolves to its root and preselects that node.
 //
 // Nodes a later dispatch dropped are not part of the graph any more, but they
 // are not gone either: their runs, logs and artifacts stay readable, so they
@@ -48,6 +54,9 @@ export default function TaskPipelinePage() {
   // Whether the automatic first selection has happened — later polls must not
   // re-select a node the user moved away from.
   const autoSelectedRef = useRef(false)
+  // The current poll, for the wake-on-return effect below: the loop itself is
+  // owned by the effect that fetches the graph.
+  const pollRef = useRef<(() => void) | null>(null)
 
   // select is the only way the panel changes node, so the mirror cannot drift.
   const select = (id: number | null) => {
@@ -58,8 +67,22 @@ export default function TaskPipelinePage() {
   useEffect(() => {
     let live = true
     let timer: ReturnType<typeof setInterval> | undefined
+    // The period the running timer was armed with, so a poll that wants the
+    // cadence it already has leaves the timer alone.
+    let period = 0
     let loaded = false
     let retries = 0
+    function arm(ms: number) {
+      if (period === ms) return
+      if (timer) clearInterval(timer)
+      period = ms
+      timer = setInterval(poll, ms)
+    }
+    function disarm() {
+      if (timer) clearInterval(timer)
+      timer = undefined
+      period = 0
+    }
     // A new id is a different graph, and the route element is reused for it:
     // drop the old graph instead of rendering it under the new URL, and let
     // the new one make its own first selection.
@@ -101,14 +124,9 @@ export default function TaskPipelinePage() {
             select(pick)
           }
         }
-        // Follow the pipeline only while it is live; a terminal graph stops
-        // the loop (a finished page costs two requests in total).
-        if (t.status === 'pending' || t.status === 'running') {
-          if (!timer) timer = setInterval(poll, 3000)
-        } else if (timer) {
-          clearInterval(timer)
-          timer = undefined
-        }
+        // Keep following while anything in the graph may still change, and
+        // slow down — not stop — once it looks finished: see graphLive.
+        arm(graphLive(t) ? POLL_LIVE_MS : POLL_IDLE_MS)
       } catch (err) {
         if (!live) return
         // One failed request is not a dead page. Nothing has been shown yet,
@@ -120,19 +138,36 @@ export default function TaskPipelinePage() {
         setError(err instanceof Error ? err.message : 'Failed to load task')
         if (retries < 3) {
           retries++
-          if (!timer) timer = setInterval(poll, 3000)
-        } else if (timer) {
-          clearInterval(timer)
-          timer = undefined
+          arm(POLL_LIVE_MS)
+        } else {
+          disarm()
         }
       }
     }
+    pollRef.current = poll
     poll()
     return () => {
       live = false
-      if (timer) clearInterval(timer)
+      pollRef.current = null
+      disarm()
     }
   }, [urlId])
+
+  // Coming back to a page that was left open reads the graph at once: a
+  // background tab's timers may have been suspended for as long as the user was
+  // away, and the view should be current the moment it is looked at again
+  // rather than at the next tick of the poll.
+  useEffect(() => {
+    const wake = () => {
+      if (document.visibilityState === 'visible') pollRef.current?.()
+    }
+    window.addEventListener('focus', wake)
+    document.addEventListener('visibilitychange', wake)
+    return () => {
+      window.removeEventListener('focus', wake)
+      document.removeEventListener('visibilitychange', wake)
+    }
+  }, [])
 
   if (error) {
     return (
@@ -153,7 +188,7 @@ export default function TaskPipelinePage() {
 
   const subs = root.subTasks ?? []
   const retired = root.retiredTasks ?? []
-  const live = root.status === 'pending' || root.status === 'running'
+  const live = graphLive(root)
 
   // Selecting a node opens the panel below the step list: the attempt's log
   // for a real node (the panel's own link goes on to the run's page, with the
@@ -513,11 +548,13 @@ function StepPanel({
         // The panel names the attempt it shows: a re-dispatch during the
         // follow opens a new attempt, and asking for "the current one" every
         // tick would read the new attempt's log from the old one's sequence
-        // (the per-attempt sequence restarts), hiding its early output.
+        // (the per-attempt sequence restarts), hiding its early output. A
+        // node with no attempt yet passes none: the API reads attempt=0 as an
+        // error, and "the current attempt" is exactly right while there is one.
         <TaskLogView
           taskId={node.id}
-          attempt={node.attempts}
-          live={live && node.status === 'running'}
+          attempt={node.attempts > 0 ? node.attempts : undefined}
+          status={node.status}
         />
       )}
     </div>
@@ -525,6 +562,21 @@ function StepPanel({
 }
 
 // --- status glyphs ----------------------------------------------------------
+
+// graphLive reports whether anything in the graph may still change — the
+// question the page's poll loop asks. The root's own status is a rollup of its
+// children, so it is normally enough; it is not always, and the difference
+// freezes a page: a node that is still in flight while the root reads finished
+// (a re-dispatched stage, or one the current yaml no longer defines, which the
+// rollup leaves out) is advanced by the server with nobody asking for it. So
+// every node counts, retired ones included, and any status this build does not
+// recognise counts as still moving.
+function graphLive(task: TaskDetail): boolean {
+  if (!isTerminalStatus(task.status)) return true
+  return [...(task.subTasks ?? []), ...(task.retiredTasks ?? [])].some(
+    (node) => !isTerminalStatus(node.status),
+  )
+}
 
 function nodeGlyph(status: string): string {
   switch (status) {

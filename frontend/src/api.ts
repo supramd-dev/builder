@@ -647,6 +647,19 @@ export function runArtifactsZipUrl(runId: number): string {
 // latest attempt's (a virtual node's is rolled up from its children).
 export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped'
 
+// isTerminalStatus reports whether a status is final, i.e. can no longer
+// change: everything else (the two in-flight ones, and anything this build
+// does not know — an older row's status, say) is treated as still moving. It
+// mirrors the server's store.TaskStatusTerminal.
+//
+// Callers ask this question the other way round on purpose: a page that
+// follows a task decides to *keep* following, and a whitelist of the live
+// statuses would stop dead — with no request left to notice the change — on
+// a status it does not recognise.
+export function isTerminalStatus(status: string): boolean {
+  return status === 'passed' || status === 'failed' || status === 'skipped'
+}
+
 // TaskKind is a node's role in the graph: the virtual root per (commit,
 // environment), the three real stages, the virtual regression container and
 // the real case tasks under it.
