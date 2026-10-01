@@ -29,9 +29,11 @@ interface SettingsPageProps {
 // order: the code repository (and its credentials), the GitLab webhook
 // reference, the GitLab sign-in integration (administrators only), the
 // account tab — everyone edits their own account there, and an administrator
-// also manages the other accounts — and the display settings (timezone).
-// Test inputs live inside the code repository itself, so there is no
-// separate test-input tab.
+// also manages the other accounts — and the display settings (timezone). Test
+// inputs live inside the code repository itself, so there is no separate
+// test-input tab; the environment variable whitelist for md-builder.yaml
+// `variables:` is per build host and lives on the environment, under
+// Environments.
 export default function SettingsPage({ me, onMeChange, onError }: SettingsPageProps) {
   const [tab, setTab] = useState<
     'repo' | 'webhook' | 'gitlab' | 'account' | 'display'

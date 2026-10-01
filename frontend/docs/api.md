@@ -326,6 +326,7 @@ administrators are created there too, with `adduser -admin`.
 | GET    | `/api/jobs`                     | Recent task graphs (`?limit=`, monitoring; legacy job shape) |
 | GET    | `/api/tasks/{id}`               | One task; a root carries its sub-task list and commit/environment context |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | The task's log chunks after the given sequence (incremental, live-following) |
+| GET    | `/api/tasks/{id}/log/download`  | The task's full log as a `text/plain` file attachment (`Content-Disposition`) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session: authenticated by the `X-Gitlab-Token` header, see [Webhooks](#/docs/webhooks)) |
 
 The environment list is **not** owner-scoped: dispatch matches a yaml entry
@@ -337,12 +338,29 @@ own is `403`; an id that does not exist is `404`. See
 [Test environments](#/docs/environments).
 
 Environment create/update bodies carry `name`, `host`, `username`,
-`privateKey`, `tags`, `description`, `enabled` and `envScript` (the
-environment setup script sourced before every stage — see
+`privateKey`, `tags`, `description`, `enabled`, `envScript` (the
+environment setup script sourced before every stage) and `allowedEnvVars`
+(the host environment variable whitelist a md-builder.yaml `variables:`
+value may expand **on this machine** — see
 [Test environments](#/docs/environments)). Unlike the private key (empty
 on update = keep), an omitted/empty `envScript` clears the script.
 Both fields round-trip: the private key is never echoed back, the env
 script is (it is not a secret).
+
+`allowedEnvVars` is the one field here that is neither a secret nor a
+boolean: it is sent as one block of text (names separated by commas, spaces
+or newlines) and an empty string is a decision — allow nothing, which is why
+it is a plain string rather than a pointer-shaped "absent". Absent = keep
+the stored list, so saving the form without touching that box never rewrites
+it; on create, where there is nothing to keep, absent means the built-in
+default list (`allowedEnvVarsDefault` in the response reports it, and a new
+environment is created with it stored, not unset). The list is **per
+environment**, not per site: two hosts of the same site may expose different
+names. It holds names and no values, so it is reported to everybody, with
+the row's own permissions deciding who may change it — its owner or an
+administrator. Names are validated on save: one that is not a shell
+identifier, or one starting with `MD_`, is refused with a `400` naming the
+offender.
 
 The site-configuration tokens differ in what they reveal. `accessToken` and
 `secretToken` are write-only: the API reports `accessTokenSet` /

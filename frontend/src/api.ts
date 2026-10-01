@@ -139,6 +139,16 @@ export interface TestEnvironment {
   tags: string[]
   description: string
   envScript: string
+  // The host environment variables a md-builder.yaml `variables:` value may
+  // expand on THIS machine, as the runner will use them (the owner's list, or
+  // the default one while it is unset). Names only — never values — so it is
+  // reported with the rest of the row, which everybody can read. The list is
+  // per environment because the yaml is repository-side: which of a host's
+  // variables it may read is the decision of whoever runs that host, and two
+  // hosts of the same site may well differ. allowedEnvVarsDefault is the
+  // built-in minimal list the form offers back.
+  allowedEnvVars: string[]
+  allowedEnvVarsDefault: string[]
   enabled: boolean
   createdAt: string
   updatedAt: string
@@ -153,6 +163,12 @@ export interface EnvironmentInput {
   description: string
   envScript: string
   enabled?: boolean
+  // Names separated by commas, spaces or newlines. Optional on purpose: the
+  // server treats an absent field as "leave it alone", so a form save that
+  // does not touch this box never rewrites the list. On create there is
+  // nothing to leave alone and the built-in default list is stored; an empty
+  // string is a real value (nothing expands here) and must be sent as such.
+  allowedEnvVars?: string
 }
 
 export interface ConnectivityResult {
@@ -263,6 +279,7 @@ export interface SiteConfig {
   // server from server.publicURL. Empty when the site address is not
   // configured, in which case GitLab sign-in cannot work at all.
   gitlabRedirectUri: string
+
 }
 
 // SiteConfigUpdate is the PUT body: the tokens are write-only.

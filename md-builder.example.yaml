@@ -37,9 +37,31 @@ defaults:
 
   # Environment variables exported by every stage script of every entry
   # (before the environment's own setup script runs, so that script can
-  # still override them).
+  # still override them). A value is a literal: "$MD_CODE_DIR/x" here is
+  # the text "$MD_CODE_DIR/x", single-quoted by the generated script and
+  # never re-expanded. Use `variables` below (or an inline reference in
+  # the command itself) when you want expansion.
   env:
     OMP_NUM_THREADS: "4"
+
+  # Variables exported by every stage script of every entry, for the
+  # commands of that entry to use as shell variables ($BUILD_ROOT).
+  # Unlike env, a value is a TEMPLATE: it is expanded by the stage script
+  # on the environment, where
+  #   * the built-in MD_* variables (MD_CODE_DIR, MD_TASK_DIR, …),
+  #   * the entry's other variables (exported in dependency order, so one
+  #     may be written in terms of another), and
+  #   * the host environment variables that environment allows — the
+  #     "Expandable host variables" box in its form under Runner Envs
+  #     ($HOME, $USER, $PATH, $SHELL, $LOGNAME and $TMPDIR by default);
+  #     each host publishes its own names, so the same yaml can expand on
+  #     one machine and stay literal on another
+  # are substituted. A reference to anything else — a typo, or a host
+  # variable that environment does not allow — is kept as written and reported
+  # with a "warning: variables.<name>" line in the task log, so a path
+  # never silently ends up with a "$" in it.
+  variables:
+    BUILD_ROOT: "$MD_CODE_DIR/build"
 
   # Build defaults for every entry (same fields as matrix[].build).
   # The build stage is a shell command — there is no built-in cmake
@@ -126,11 +148,19 @@ matrix:
       CC: gcc
       CXX: g++
 
+    # This entry's variables, merged over defaults.variables (BUILD_ROOT
+    # is inherited from there). They are exported after the environment's
+    # setup script has been sourced, so a variable may also build on what
+    # that script exports.
+    variables:
+      CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF"
+
     build:
-      # The build command is a plain shell line (&& chains fine). This
-      # entry overrides defaults.build.command with its own flags; the
-      # command runs in the code dir by default.
-      command: "cmake -DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF . && cmake --build . -j8"
+      # The build command is a plain shell line (&& chains fine), and the
+      # variables above are ordinary shell variables in it. This entry
+      # overrides defaults.build.command with its own flags; the command
+      # runs in the code dir by default.
+      command: 'cmake -B "$BUILD_ROOT" $CMAKE_FLAGS . && cmake --build "$BUILD_ROOT" -j8'
       # workdir: "build"              # run the command in <code>/build
                                       # instead — e.g. for an out-of-source
                                       # cmake: `cmake "$MD_CODE_DIR" && ...`
@@ -191,7 +221,12 @@ matrix:
       artifacts: ["build/cuda_build.log", "build/compile_commands.json"]
 
     unit:
-      command: "./build/unit_tests --gtest_output=xml:build/unit_cuda.xml"
+      # BUILD_ROOT is inherited from defaults.variables — the same value
+      # entry 1 builds in, so this command names the build tree without
+      # repeating $MD_CODE_DIR. An entry that builds elsewhere overrides
+      # that one line (an entry-level variables entry wins over the
+      # default, like env).
+      command: '"$BUILD_ROOT/unit_tests" --gtest_output=xml:"$BUILD_ROOT/unit_cuda.xml"'
       artifacts: "build/unit_cuda.xml"
 
     regression:
@@ -213,6 +248,22 @@ matrix:
 #                one is configured — for authenticating against internal
 #                services (mirrors, artifact stores, license servers);
 #                echoed values are REDACTED from the task log
+#
+# Variables (env and variables) are exported in this order, so a later
+# step may override an earlier one:
+#   1. the MD_* variables above
+#   2. env — verbatim literals, single-quoted, never expanded
+#   3. the environment's setup script (sourced; it may override either)
+#   4. variables — templates, expanded as described in defaults.variables
+# The workdir (workdir:) may reference a variable too, since the cd
+# happens after all of them.
+#
+# Variables are validated when the yaml is read: a name must be a shell
+# identifier (no "1BAD", no dashes), may not start with MD_ (reserved),
+# may not also appear in the entry's env (literal there, template here —
+# keep it in one place), and two variables may not reference each other
+# in a cycle, which would have no answer. A bad entry fails the dispatch
+# with the offending name in the error.
 #
 # The environment setup script (md-builder-env-*.sh) is configured PER
 # ENVIRONMENT on the server (Runner Envs → edit), not in this file: it is

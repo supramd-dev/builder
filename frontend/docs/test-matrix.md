@@ -21,6 +21,8 @@ defaults:
   timeout: 3600                 # per-command timeout seconds (hard cap 4h)
   env:
     OMP_NUM_THREADS: "4"
+  variables:                    # templates, expanded on the environment
+    BUILD_ROOT: "$MD_CODE_DIR/build"
   build:
     # A plain shell command — cmake/make/script, whatever the project uses.
     command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
@@ -47,8 +49,10 @@ matrix:
     env:
       CC: gcc
       CXX: g++
+    variables:                    # merged over defaults.variables
+      CMAKE_FLAGS: "-DENABLE_MPI=OFF"
     build:
-      command: "cmake -DENABLE_MPI=OFF . && cmake --build ."
+      command: 'cmake -B "$BUILD_ROOT" $CMAKE_FLAGS . && cmake --build "$BUILD_ROOT"'
       description: "Build the code with gcc and cmake"
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
@@ -74,13 +78,14 @@ matrix:
 | Field                        | Required | Description                                                        |
 |------------------------------|----------|--------------------------------------------------------------------|
 | version                      | yes      | Must be 2.                                                          |
-| defaults                     | no       | Entry-level defaults: timeout, env, build, unit, regression.        |
+| defaults                     | no       | Entry-level defaults: timeout, env, variables, build, unit, regression. |
 | presets                      | no       | Shared regression cases (see below).                               |
 | matrix                       | yes      | One or more entries; each entry needs tags and at least one stage.  |
 | matrix[].tags                | yes      | Tags selecting the environment (see [Test environments](#/docs/environments)). Must be unique per entry. |
 | matrix[].description         | no       | Human-readable label.                                               |
 | matrix[].timeout             | no       | Default stage timeout in seconds (default 3600, capped at 14400).   |
-| matrix[].env                 | no       | Extra environment variables exported for all stages.                |
+| matrix[].env                 | no       | Extra environment variables exported for all stages — literal values. |
+| matrix[].variables           | no       | Extra variables for this entry's stages, merged over defaults.variables — template values (see [Variables](#variables)). |
 | matrix[].build               | no       | Build stage (see below).                                            |
 | matrix[].unit                | no       | Unit test stage: at least command; optional description, workdir, timeout, artifacts. |
 | matrix[].regression          | no       | Regression selection: use and/or disable referencing presets; optional description of the stage as a whole. |
@@ -225,6 +230,11 @@ unit:
   command: "$MD_CODE_DIR/build/unit_tests --gtest_output=xml:$MD_CODE_DIR/build/test_detail.xml"
 ```
 
+These references expand because the command itself runs inside the
+stage script, on the environment, where `MD_*` is exported. A value in
+`env`, by contrast, is a literal that is never expanded — see
+[Variables](#variables) for the expanding alternative.
+
 ### Secret token (MD_SECRET_TOKEN)
 
 Commands frequently need credentials — a private package mirror, an
@@ -252,6 +262,114 @@ form shows whether one is set, never the value. If a command echoes it
 `REDACTED` in the task log before storing it. When no token is
 configured the variable is simply unset.
 
+## Variables
+
+`defaults` and each matrix entry may declare **`variables`**: named
+values that the entry's stage commands use like any shell variable.
+They are the *expanding* counterpart of `env`, and the difference
+matters:
+
+- an **`env`** value is a literal. `BUILD_ROOT: "$MD_CODE_DIR/build"`
+  under `env` exports that text, single-quoted; nothing expands it, so a
+  command reading `$BUILD_ROOT` gets a path with a `$` inside it.
+- a **`variables`** value is a template, expanded by the stage script
+  **on the environment**, when the stage runs.
+
+Three kinds of reference are substituted there:
+
+1. the built-in `MD_*` variables (`$MD_CODE_DIR`, `$MD_COMMIT`, …);
+2. the entry's **other variables** — exported in dependency order, so
+   one may be written in terms of another;
+3. the **host** environment variables **that environment** allows
+   (*Runner Envs* → the row's **Edit** form — `HOME`, `USER`, `LOGNAME`,
+   `PATH`, `SHELL`, `TMPDIR` until its owner changes the list). Each host
+   publishes its own names, so the same yaml can expand on one machine and
+   stay literal on another. A name the entry's own `env` block exports
+   counts too while it is on that list: `env` is exported before the
+   variables.
+
+Everything else stays literal: a typo like `$MD_CODEDIR` reaches the
+command as the text `$MD_CODEDIR`, and the stage logs
+
+```
+warning: variables.<name>: $MD_CODEDIR is not a built-in variable, a variables entry or an allowed environment variable; kept literally
+```
+
+so a path never silently loses its `$`.
+
+```yaml
+defaults:
+  variables:
+    BUILD_ROOT: "$MD_CODE_DIR/build"
+
+matrix:
+  - tags: [cpu]
+    variables:
+      CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF"
+      UNIT_XML: "$BUILD_ROOT/tests/unit.xml"   # BUILD_ROOT expands first
+    build:
+      command: 'cmake -B "$BUILD_ROOT" $CMAKE_FLAGS . && cmake --build "$BUILD_ROOT" -j8'
+    unit:
+      command: "./build/unit_tests --gtest_output=xml:$UNIT_XML"
+```
+
+An entry inherits `defaults.variables` key-wise and wins on conflicts,
+exactly like `env`.
+
+### Values are data, never code
+
+A value is rendered as **one shell word**: expandable references become
+double-quoted `${NAME}`, everything around them is single-quoted. A
+value containing `$(…)`, backticks, quotes or a newline is therefore
+text: `INJECT: "$(touch /tmp/x)"` exports that string, and a command
+echoing `$INJECT` prints it instead of running it. The yaml cannot
+splice shell syntax into a stage script through `variables`.
+
+A literal `$` in a value is written `$$` (`PRICE: "5$$ per run"`); a
+`$` that is not followed by a name (`50$`, `${ }`) is left alone.
+
+### Order of the preamble exports
+
+Every stage script builds its environment in this order:
+
+1. the built-in `MD_*` variables;
+2. the entry's `env` (literals, single-quoted);
+3. the **environment setup script** (sourced — see below);
+4. the entry's `variables` (templates, expanded here);
+5. the `cd` into the working directory.
+
+Because variables are expanded after the environment setup script, a
+variable may build on what that script exports (module loads, host
+paths pushed by `module load`, …) — and a variable of the same name
+wins over the script's export. The `cd` comes last, so `workdir` may
+reference a variable too.
+
+### Allowing host variables
+
+Which host environment variables a repository's yaml may read is the
+**host owner's** decision, not the repository's: the list lives on the
+environment itself — *Runner Envs* → the row's **Edit** form,
+**Expandable host variables** — so two machines of the same site may
+expose different names (see
+[Test environments](#/docs/environments)). A new environment starts on a
+minimal default list (`HOME, USER, PATH, …`). A name that is not on the
+list stays literal, exactly like a typo; an owner may also clear the list
+to allow none at all.
+
+### Validation
+
+Variables are checked when the yaml is read, so a broken entry fails
+the dispatch with the offending name (a `dispatchError` on the commit
+row) instead of shipping a script whose values depend on the export
+order:
+
+- the name must be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`);
+- it may not start with `MD_` — reserved for the built-in variables,
+  which always expand;
+- it may not also appear in the entry's `env` — the name would have two
+  values with different semantics, so keep it in one of the two;
+- two variables may not reference each other in a cycle.
+
 ## Environment setup script
 
 Each **environment** (configured on the site, not in the yaml) may
@@ -263,8 +381,10 @@ exports, virtualenv activation, …):
 
 - **present**: every stage script runs `. md-builder-env-<hash>.sh`
   first; anything the script exports is visible to the build, unit and
-  regression commands (it runs last in the preamble, so it can even
-  override the built-in and yaml variables).
+  regression commands. It runs after the built-in `MD_*` and yaml `env`
+  exports and before the yaml `variables`, so it can override the
+  former, while a variable of the same name wins over it (see
+  [Order of the preamble exports](#order-of-the-preamble-exports)).
 - **absent**: the stage scripts log a warning and run without it.
 
 See [Test environments](#/docs/environments).
@@ -401,6 +521,9 @@ the download endpoints stay the same either way.
   `cmake_flags` / `threads`).
 - Every preset needs a `command`; names in `use` / `disable` must
   reference defined presets.
+- `variables` names must be shell identifiers, must not start with
+  `MD_`, must not repeat an `env` name of the same entry and must not
+  form a reference cycle (see [Variables](#variables)).
 
 Invalid YAML fails dispatch: the push is recorded and
 `dispatchError` surfaces in the webhook response (see
@@ -424,8 +547,8 @@ Each matched entry becomes a task graph (see
    script is written into the task dir.
 2. **build**: a generated script exports MD_COMMIT, MD_ENV_NAME,
    MD_ENV_TAGS, MD_TASK_DIR, MD_CODE_DIR plus the yaml env variables,
-   sources the env setup script (if any) and runs the build stage in
-   its working directory.
+   sources the env setup script (if any), exports the expanded yaml
+   variables and runs the build stage in its working directory.
 3. If the build (or the clone) fails, the dependent test stages are
    marked skipped and the dashboard shows ✗.
 4. **unit**: the stage command runs in its working directory under its

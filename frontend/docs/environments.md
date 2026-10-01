@@ -1,9 +1,10 @@
 # Test environments
 
 Register the machines that run the tests under **Runner Envs**: name,
-SSH host, SSH username, an SSH private key and an environment setup
-script. Use **Test** to verify connectivity, **Run command** to try
-commands interactively or dispatch a manual test on the machine (see
+SSH host, SSH username, an SSH private key, an environment setup script
+and the host variables a md-builder.yaml may expand there. Use **Test** to
+verify connectivity, **Run command** to try commands interactively or
+dispatch a manual test on the machine (see
 [Runner and tasks](#/docs/runner-strategy)).
 
 The server connects over SSH to upload the sources (a tar stream extracted
@@ -96,3 +97,32 @@ preamble, it can even override the built-in and yaml variables (see
 
 An environment without a script is fine: stage scripts log a warning
 (`env script ... not found`) and run without it.
+
+## Expandable host variables
+
+A md-builder.yaml may define `variables:` whose values reference host
+environment variables (see [Test matrix →
+Variables](#/docs/test-matrix)). Which of a host's variables a repository's
+yaml may read is that host's decision, not the repository's and not the
+site's: the **Expandable host variables** box in the environment form holds
+the names this machine exposes, and two environments of the same site can
+list different ones. The box is part of the environment row, so it follows
+the row's [permissions](#/docs/environments): its owner or an administrator
+edits it, everybody else reads it.
+
+```
+HOME, USER, LOGNAME, PATH, SHELL, TMPDIR
+```
+
+That is the built-in default minimal list, and a new environment starts on
+it (the form shows it as the placeholder until the box is filled in). A name
+on the list is substituted by the stage script; a name that is not — or a
+typo — stays literal in the generated script, so a path never silently loses
+a `$`, and the task log carries a warning naming it. An empty list is a
+decision too: no host variable expands on this machine.
+
+Saving the form pins whatever the box holds as this environment's own list,
+including the built-in default when that is what it was showing. The list is
+checked when saved: each entry must be a valid variable name, and `MD_*` is
+refused — those are md-builder's own variables and always expand, so they
+are not the owner's to grant.

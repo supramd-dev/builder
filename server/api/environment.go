@@ -28,9 +28,16 @@ type environmentJSON struct {
 	Tags        []string `json:"tags"`                 // lowercased labels used for job matching
 	Description string   `json:"description"`
 	EnvScript   string   `json:"envScript"` // bash setup script sourced before every stage
-	Enabled     bool     `json:"enabled"`
-	CreatedAt   string   `json:"createdAt"`
-	UpdatedAt   string   `json:"updatedAt"`
+	// AllowedEnvVars is this host's effective whitelist of environment
+	// variable names a md-builder.yaml `variables:` value may expand here.
+	// Names only, never values, so it is reported with the rest of the row
+	// (environment rows are readable by everyone); AllowedEnvVarsDefault is
+	// the built-in minimal list the form offers back.
+	AllowedEnvVars        []string `json:"allowedEnvVars"`
+	AllowedEnvVarsDefault []string `json:"allowedEnvVarsDefault"`
+	Enabled               bool     `json:"enabled"`
+	CreatedAt             string   `json:"createdAt"`
+	UpdatedAt             string   `json:"updatedAt"`
 }
 
 // environmentInput is the request body for create/update.
@@ -43,6 +50,13 @@ type environmentInput struct {
 	Description string   `json:"description"`
 	EnvScript   string   `json:"envScript"`
 	Enabled     *bool    `json:"enabled"` // pointer so omitted means "keep current" on update
+
+	// AllowedEnvVars is the environment's whitelist, as one block of text
+	// (names separated by commas, spaces or newlines). A pointer for the same
+	// reason as Enabled: absent = keep the stored list — on create, where
+	// there is nothing to keep, it means the built-in default. An explicitly
+	// empty string is a decision: no host variable expands here.
+	AllowedEnvVars *string `json:"allowedEnvVars"`
 }
 
 // handleEnvironments routes /api/environments (list, create).
@@ -172,6 +186,13 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request, user 
 	if in.Enabled != nil {
 		env.Enabled = *in.Enabled
 	}
+	// A new environment starts on the built-in minimal list, stored rather
+	// than left unset so the form shows where it starts from.
+	list := store.DefaultAllowedEnvVars
+	if in.AllowedEnvVars != nil {
+		list = strings.TrimSpace(*in.AllowedEnvVars)
+	}
+	env.AllowedEnvVars = &list
 	if err := s.Store.CreateEnvironment(env); err != nil {
 		log.Printf("create environment: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -221,6 +242,10 @@ func (s *Server) updateEnvironment(w http.ResponseWriter, r *http.Request, user 
 	env.Tags = strings.Join(in.Tags, ",")
 	env.Description = in.Description
 	env.EnvScript = in.EnvScript
+	if in.AllowedEnvVars != nil {
+		list := strings.TrimSpace(*in.AllowedEnvVars)
+		env.AllowedEnvVars = &list
+	}
 	if in.Enabled != nil {
 		env.Enabled = *in.Enabled
 	}
@@ -421,6 +446,29 @@ func validateEnvironmentInput(in *environmentInput) string {
 	if !isPEMKey(in.PrivateKey) {
 		return "private key must be a PEM-encoded SSH key"
 	}
+	if in.AllowedEnvVars != nil {
+		if msg := validateAllowedEnvVars(*in.AllowedEnvVars); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateAllowedEnvVars reports why an environment's variable whitelist
+// cannot be stored, or "". Every entry has to name something a stage script
+// could actually export: a shell identifier, and not one of md-builder's own
+// MD_* variables (those always expand, so an entry for one would read as if
+// it granted something).
+func validateAllowedEnvVars(raw string) string {
+	for _, name := range store.ParseAllowedEnvVars(raw) {
+		if !runner.IsEnvName(name) {
+			return fmt.Sprintf("%q is not a valid environment variable name", name)
+		}
+		if strings.HasPrefix(name, runner.ReservedVarPrefix) {
+			return fmt.Sprintf("%q is reserved: the %s prefix belongs to md-builder's own variables, which always expand",
+				name, runner.ReservedVarPrefix)
+		}
+	}
 	return ""
 }
 
@@ -456,8 +504,13 @@ func toEnvironmentJSON(env *store.TestEnvironment, owner string, canEdit bool) e
 		Description: env.Description,
 		EnvScript:   env.EnvScript,
 		Enabled:     env.Enabled,
-		CreatedAt:   env.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
-		UpdatedAt:   env.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		// The whitelist is names, not values, so the whole list is visible
+		// with the rest of the row; only its owner (or an administrator) may
+		// change it, like every other field here.
+		AllowedEnvVars:        env.AllowedEnvList(),
+		AllowedEnvVarsDefault: store.ParseAllowedEnvVars(store.DefaultAllowedEnvVars),
+		CreatedAt:             env.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		UpdatedAt:             env.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 	}
 }
 

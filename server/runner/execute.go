@@ -144,6 +144,7 @@ func (rc *rootContext) scriptInput(stageCommand CommandList, workdir, caseName s
 		CodeDir:       rc.remoteCodeDir(),
 		EnvScriptName: rc.env.EnvScriptName(),
 		Entry:         rc.entry,
+		AllowedEnv:    rc.env.AllowedEnvList(),
 		StageCommand:  stageCommand,
 		Workdir:       workdir,
 		CaseName:      caseName,

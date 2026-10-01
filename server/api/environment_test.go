@@ -692,3 +692,189 @@ func TestEnvironmentOwnershipRights(t *testing.T) {
 		t.Fatal("admin delete must remove the row")
 	}
 }
+
+// The environment variable whitelist is per environment, not per site: each
+// host's owner decides which of that machine's environment variables a
+// md-builder.yaml `variables:` value may expand there. A site-wide list would
+// let one host's policy decide another's.
+func TestEnvironmentAllowedEnvVars(t *testing.T) {
+	apiServer, s := newTestServer(t)
+	seedUser(t, s, "owner", "owner@example.com", "ownerpass")
+	seedUser(t, s, "stranger", "stranger@example.com", "strangerpass")
+	seedUserWithRole(t, s, "root", "root@example.com", "rootpass", store.RoleAdmin)
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	ownerCookie := loginAndGetCookie(t, mux, "owner", "ownerpass")
+	strangerCookie := loginAndGetCookie(t, mux, "stranger", "strangerpass")
+	rootCookie := loginAndGetCookie(t, mux, "root", "rootpass")
+
+	authed := func(cookie, method, target, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		var req *http.Request
+		if body == "" {
+			req = httptest.NewRequest(method, target, nil)
+		} else {
+			req = httptest.NewRequest(method, target, strings.NewReader(body))
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	var env struct {
+		ID                    int64    `json:"id"`
+		Name                  string   `json:"name"`
+		AllowedEnvVars        []string `json:"allowedEnvVars"`
+		AllowedEnvVarsDefault []string `json:"allowedEnvVarsDefault"`
+	}
+	create := func(target, name, allowedEnvVars string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"name":%q,"host":"203.0.113.9","username":"runner","privateKey":%q`, name, testKey)
+		if allowedEnvVars != "" {
+			body += fmt.Sprintf(`,"allowedEnvVars":%q`, allowedEnvVars)
+		}
+		body += "}"
+		rec := authed(ownerCookie, http.MethodPost, target, body)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create %s: expected 201, got %d, body %s", name, rec.Code, rec.Body.String())
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatalf("decode created: %v", err)
+		}
+	}
+	read := func(cookie string, id int64) (out struct {
+		ID                    int64    `json:"id"`
+		Name                  string   `json:"name"`
+		AllowedEnvVars        []string `json:"allowedEnvVars"`
+		AllowedEnvVarsDefault []string `json:"allowedEnvVarsDefault"`
+	}) {
+		t.Helper()
+		rec := authed(cookie, http.MethodGet, fmt.Sprintf("/api/environments/%d", id), "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get environment: %d, body %s", rec.Code, rec.Body.String())
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode environment: %v", err)
+		}
+		return out
+	}
+	defaults := []string{"HOME", "USER", "LOGNAME", "PATH", "SHELL", "TMPDIR"}
+
+	// A new environment starts on the built-in minimal list, stored rather
+	// than left unset, so the form shows where it starts from.
+	create("/api/environments", "cpu-1", "")
+	cpuID := env.ID
+	cpuPath := fmt.Sprintf("/api/environments/%d", cpuID)
+	if got, want := strings.Join(env.AllowedEnvVars, "|"), strings.Join(defaults, "|"); got != want {
+		t.Fatalf("a new environment must start on the default list: want %q, got %q", want, got)
+	}
+	stored, err := s.GetEnvironment(cpuID)
+	if err != nil {
+		t.Fatalf("get from store: %v", err)
+	}
+	if stored.AllowedEnvVars == nil || *stored.AllowedEnvVars != store.DefaultAllowedEnvVars {
+		t.Fatalf("the default list must be stored on create, got %v", stored.AllowedEnvVars)
+	}
+	// A row written before the column existed reads as the default too.
+	if err := s.DB.Exec("update test_environments set allowed_env_vars = NULL where id = ?", env.ID).
+		Error; err != nil {
+		t.Fatalf("unset the column: %v", err)
+	}
+	if got := strings.Join(read(ownerCookie, env.ID).AllowedEnvVars, "|"); got != strings.Join(defaults, "|") {
+		t.Fatalf("an unset list must fall back to the default, got %q", got)
+	}
+
+	// Each environment carries its own list: narrowing one leaves the other
+	// alone. Commas, spaces and newlines all separate, and duplicates collapse.
+	rec := authed(ownerCookie, http.MethodPut, cpuPath,
+		`{"name":"cpu-1","host":"203.0.113.9","username":"runner","allowedEnvVars":"SCRATCH_DIR, PATH\nSCRATCH_DIR"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("narrow the list: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	create("/api/environments", "gpu-1", "CUDA_HOME")
+	gpuID := env.ID
+	if got := strings.Join(read(ownerCookie, cpuID).AllowedEnvVars, "|"); got != "SCRATCH_DIR|PATH" {
+		t.Fatalf("the narrowed list is wrong: %q", got)
+	}
+	if got := strings.Join(read(ownerCookie, gpuID).AllowedEnvVars, "|"); got != "CUDA_HOME" {
+		t.Fatalf("the second environment must keep its own list: %q", got)
+	}
+	// And the row is what the runner would read back for a task on that host.
+	if stored, err = s.GetEnvironment(cpuID); err != nil {
+		t.Fatalf("get from store: %v", err)
+	}
+	if got := strings.Join(stored.AllowedEnvList(), "|"); got != "SCRATCH_DIR|PATH" {
+		t.Fatalf("the runner's view of the whitelist is wrong: %q", got)
+	}
+
+	// An empty list is a decision, not "unset": nothing expands on this host
+	// any more, and it survives a form save that says nothing about it.
+	rec = authed(ownerCookie, http.MethodPut, cpuPath,
+		`{"name":"cpu-1","host":"203.0.113.9","username":"runner","allowedEnvVars":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear the list: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	rec = authed(ownerCookie, http.MethodPut, cpuPath,
+		`{"name":"cpu-1-renamed","host":"203.0.113.9","username":"runner"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update without the field: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if got := read(ownerCookie, cpuID); len(got.AllowedEnvVars) != 0 || got.Name != "cpu-1-renamed" {
+		t.Fatalf("an emptied list must stay empty across an unrelated save: %+v", got)
+	}
+	if got := strings.Join(read(ownerCookie, cpuID).AllowedEnvVarsDefault, "|"); got != strings.Join(defaults, "|") {
+		t.Fatalf("the default list must still be offered back: %q", got)
+	}
+
+	// Names that could never be exported are refused, naming the offender.
+	for _, tc := range []struct{ list, want string }{
+		{"HOME PATH", ""}, // separators mix freely
+		{"HOME,1BAD", "1BAD"},
+		{"HOME, not-a-name", "not-a-name"},
+		{"${HOME}", "${HOME}"},
+		{"MD_CODE_DIR", "MD_CODE_DIR"}, // reserved: always expands anyway
+		{"HOME,MD_SECRET_TOKEN", "MD_SECRET_TOKEN"},
+	} {
+		rec = authed(ownerCookie, http.MethodPut, fmt.Sprintf("/api/environments/%d", gpuID),
+			fmt.Sprintf(`{"name":"gpu-1","host":"203.0.113.9","username":"runner","allowedEnvVars":%q}`, tc.list))
+		if tc.want == "" {
+			if rec.Code != http.StatusOK {
+				t.Fatalf("update %q: expected 200, got %d, body %s", tc.list, rec.Code, rec.Body.String())
+			}
+			continue
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("update %q: expected 400, got %d, body %s", tc.list, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), tc.want) {
+			t.Errorf("the error for %q must name %q, got %s", tc.list, tc.want, rec.Body.String())
+		}
+	}
+
+	// The list is part of the environment row, so it follows that row's
+	// permissions: a stranger may read it but not change it, and an
+	// administrator may change any row.
+	rec = authed(ownerCookie, http.MethodPut, cpuPath,
+		`{"name":"cpu-1-renamed","host":"203.0.113.9","username":"runner","allowedEnvVars":"HOME,PATH"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore a list: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.Join(read(strangerCookie, cpuID).AllowedEnvVars, "|"); got != "HOME|PATH" {
+		t.Fatalf("a stranger must still read the list, got %q", got)
+	}
+	rec = authed(strangerCookie, http.MethodPut, cpuPath,
+		`{"name":"cpu-1","host":"203.0.113.9","username":"runner","allowedEnvVars":"HOME"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a stranger must not change the list: expected 403, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	rec = authed(rootCookie, http.MethodPut, cpuPath,
+		`{"name":"cpu-1","host":"203.0.113.9","username":"runner","allowedEnvVars":"HOME"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("an administrator may change it: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.Join(read(ownerCookie, cpuID).AllowedEnvVars, "|"); got != "HOME" {
+		t.Fatalf("the administrator's list was not stored: %q", got)
+	}
+}

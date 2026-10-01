@@ -1053,3 +1053,111 @@ func TestExecuteEnvScriptWrittenAndSourced(t *testing.T) {
 		t.Errorf("every stage script should source the env script: %d of %d", sourced, len(exec.scripts))
 	}
 }
+
+// execVarsYAML exercises the yaml `variables:` block through the real
+// dispatch path: the entry's variables reach every stage script (expanded),
+// and the site's whitelist decides which host names expand.
+const execVarsYAML = `version: 2
+defaults:
+  build:
+    command: "cmake -DEXEC=1 . && cmake --build ."
+  variables:
+    BUILD_ROOT: "$MD_CODE_DIR/build"
+matrix:
+  - tags: [cpu]
+    variables:
+      UNIT_XML: "$BUILD_ROOT/tests/unit.xml"
+      HOST_TMP: "$MDTEST_HOST_TMP/x"
+      TYPO: "$MD_CODEDIR/x"
+    unit:
+      command: "./build/unit_tests --gtest_output=xml:$UNIT_XML"
+`
+
+func TestExecuteStageVariablesExported(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, execVarsYAML)
+	// An env setup script, so the ordering claim below (variables are
+	// exported after it) has something to be checked against.
+	env, err := s.GetEnvironment(cloneTask.EnvironmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.EnvScript = "module load gcc/13\n"
+	if err := s.UpdateEnvironment(env); err != nil {
+		t.Fatal(err)
+	}
+
+	unitTask := runUntilStage(t, svc, s, cloneTask, store.TaskKindUnit)
+	if err := svc.ExecuteTask(context.Background(), unitTask); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stage script is the one running the unit command.
+	var script string
+	for _, sc := range exec.scripts {
+		if strings.Contains(sc, "unit_tests --gtest_output") {
+			script = sc
+		}
+	}
+	if script == "" {
+		t.Fatalf("no unit script recorded: %+v", exec.scripts)
+	}
+	// A variable is exported as one shell word: the expandable parts
+	// double-quoted, the literals single-quoted — and a variable that
+	// references another one comes after it.
+	for _, want := range []string{
+		`export BUILD_ROOT="${MD_CODE_DIR}"'/build'`,
+		`export UNIT_XML="${BUILD_ROOT}"'/tests/unit.xml'`,
+		// $MDTEST_HOST_TMP is not on the environment's whitelist, and
+		// $MD_CODEDIR is a typo: both stay literal, both are reported.
+		`export HOST_TMP='$MDTEST_HOST_TMP/x'`,
+		`export TYPO='$MD_CODEDIR/x'`,
+		"warning: variables.HOST_TMP: $MDTEST_HOST_TMP",
+		"warning: variables.TYPO: $MD_CODEDIR",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("unit script missing %q:\n%s", want, script)
+		}
+	}
+	// The variables come after the env script hook (they may build on what
+	// it exports) and before the cd.
+	envAt := strings.Index(script, "ENV_SCRIPT")
+	varsAt := strings.Index(script, "export BUILD_ROOT=")
+	cdAt := strings.Index(script, `cd "$MD_CODE_DIR"`)
+	if envAt < 0 || varsAt < envAt || cdAt < varsAt {
+		t.Errorf("variables must be exported after the env script and before the cd:\n%s", script)
+	}
+}
+
+// TestExecuteStageVariablesUseEnvironmentWhitelist is the positive half: with
+// the name on the whitelist of the environment the stage runs on, the same
+// template expands instead of staying literal. The list belongs to the
+// environment — the host decides what it exposes — so this is where it is set.
+func TestExecuteStageVariablesUseEnvironmentWhitelist(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, execVarsYAML)
+	allowed := "MDTEST_HOST_TMP, PATH"
+	env, err := s.GetEnvironment(cloneTask.EnvironmentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.AllowedEnvVars = &allowed
+	if err := s.UpdateEnvironment(env); err != nil {
+		t.Fatal(err)
+	}
+
+	unitTask := runUntilStage(t, svc, s, cloneTask, store.TaskKindUnit)
+	if err := svc.ExecuteTask(context.Background(), unitTask); err != nil {
+		t.Fatal(err)
+	}
+	var script string
+	for _, sc := range exec.scripts {
+		if strings.Contains(sc, "unit_tests --gtest_output") {
+			script = sc
+		}
+	}
+	if !strings.Contains(script, `export HOST_TMP="${MDTEST_HOST_TMP}"'/x'`) {
+		t.Errorf("a whitelisted host variable must expand:\n%s", script)
+	}
+	if strings.Contains(script, "warning: variables.HOST_TMP") {
+		t.Errorf("a whitelisted host variable must not warn:\n%s", script)
+	}
+}

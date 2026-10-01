@@ -291,6 +291,7 @@ POST /api/setup
 | GET    | `/api/jobs`                     | 最近的任务图(`?limit=`;监控;旧 job 形状)    |
 | GET    | `/api/tasks/{id}`               | 单个任务;root 附带子任务列表与提交/环境上下文 |
 | GET    | `/api/tasks/{id}/log?after=<seq>` | 给定序号之后的任务日志块(增量,实时跟随)   |
+| GET    | `/api/tasks/{id}/log/download`  | 该任务的完整日志,以 `text/plain` 文件附件返回(`Content-Disposition`) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook 接收器(无需会话:由 `X-Gitlab-Token` 请求头认证,见 [Webhooks](#/docs/webhooks)) |
 
 环境列表**不按 owner 过滤**:派发会把 yaml entry 与所有已启用环境逐一匹配,
@@ -300,10 +301,23 @@ POST /api/setup
 [测试环境](#/docs/environments)。
 
 环境的创建/更新请求体包含 `name`、`host`、`username`、`privateKey`、
-`tags`、`description`、`enabled` 和 `envScript`(在每个阶段之前被
-source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。与私钥
-不同(更新时留空 = 保留原值),`envScript` 省略或留空即清除脚本。两个
-字段的回显行为也不同:私钥永不回显,环境脚本会原样返回(它不是机密)。
+`tags`、`description`、`enabled`、`envScript`(在每个阶段之前被 source
+的环境设置脚本)和 `allowedEnvVars`(在这台机器上允许被 md-builder.yaml
+的 `variables:` 值展开的主机环境变量名单 —— 见
+[测试环境](#/docs/environments))。与私钥不同(更新时留空 = 保留原值),
+`envScript` 省略或留空即清除脚本。两个字段的回显行为也不同:私钥永不
+回显,环境脚本会原样返回(它不是机密)。
+
+`allowedEnvVars` 是这里唯一既不是机密也不是布尔值的项:它以一段文本提交
+(名字之间用逗号、空格或换行分隔),并且空字符串是一个明确的决定 —— 一个
+都不允许,因此它是普通字符串而不是"可省略"的指针形状。不传则保留已存
+名单,因此保存表单时没动这个输入框就不会改写它;创建时没有"已存名单"可
+保留,不传即表示内置默认名单(响应中的 `allowedEnvVarsDefault` 会报告它,
+新环境会把默认名单存下来,而不是留空)。名单是**每个环境**自己的,不是
+站点级的:同一站点的两台主机可以公开不同的名字。名单只有名字没有取值,
+因此对所有人可见,而该行自身的权限决定谁能改 —— 其所有者或管理员。名字在
+保存时校验:不是 shell 标识符、或以 `MD_` 开头的名字会被拒绝,返回 `400`
+并指出是哪个。
 
 站点配置里的几个 token 在“是否可读”上不同。`accessToken` 和
 `secretToken` 是只写的:接口只报告 `accessTokenSet` / `secretTokenSet`,

@@ -16,6 +16,7 @@ import (
 //	export MD_SECRET_TOKEN=...                                                # when the site has one
 //	export <entry env, sorted>
 //	[ -f "$MD_TASK_DIR/md-builder-env-<hash>.sh" ] && . ... || warn   # when the env has one
+//	export <entry variables, expanded, dependencies first>            # when the entry has any
 //	cd "<workdir>" || exit 1
 //	timeout N bash -c '<command>'
 //	exit $?                                                              # single command
@@ -26,6 +27,11 @@ import (
 // The MD_* exports and the env script land in every stage script because
 // each stage is its own SSH session: state set by one never leaks to the
 // next.
+//
+// The two yaml maps are deliberately different: env values are literals
+// (quoted so nothing in them expands), variables values are templates expanded
+// here into MD_*/variables/allowed-host-variable references plus literal runs.
+// See exportEnv and exportVariables.
 
 // DefaultStageTimeoutSeconds applies when a stage config carries no timeout.
 const DefaultStageTimeoutSeconds = 3600
@@ -43,9 +49,18 @@ type ScriptInput struct {
 	// has none.
 	EnvScriptName string
 
-	// Entry carries the root task's merged entry snapshot (build recipe +
-	// env map). The env map is exported by every script kind.
+	// Entry carries the root task's merged entry snapshot (build recipe + env
+	// map + variables). The env map is exported by every script kind, and the
+	// variables block is expanded and exported after the environment setup
+	// script.
 	Entry *MergedEntry
+
+	// AllowedEnv is the whitelist of host environment variable names of the
+	// environment the stage runs on (store.TestEnvironment.AllowedEnvList):
+	// the only names, besides the built-in MD_* variables and the entry's own
+	// variables, that a variables template may expand. Everything else stays
+	// literal. It is per environment, since each host decides what it exposes.
+	AllowedEnv []string
 
 	// StageCommand is the command list to run (all script kinds): one or
 	// several commands, each under its own `timeout` wrapper. They run in
@@ -118,6 +133,7 @@ func renderScript(in *ScriptInput, body scriptBody) (string, error) {
 	w("set -uo pipefail")
 	exportEnv(w, in)
 	sourceEnvScript(w, in)
+	exportVariables(w, in)
 	if err := writeCD(w, in); err != nil {
 		return "", err
 	}
@@ -161,7 +177,7 @@ func exportEnv(w func(format string, args ...any), in *ScriptInput) {
 			// (`export foo-bar=1` is an error in bash), so nothing that worked
 			// before stops working; the warning just says why the variable is
 			// missing.
-			if !isEnvName(k) {
+			if !IsEnvName(k) {
 				w("echo %s >&2", shq(fmt.Sprintf(
 					"warning: ignoring env %q: not a valid shell identifier", k)))
 				continue
@@ -172,6 +188,200 @@ func exportEnv(w func(format string, args ...any), in *ScriptInput) {
 		for _, k := range keys {
 			w("export %s=%s", k, shq(in.Entry.Env[k]))
 		}
+	}
+	w("")
+}
+
+// builtinVars are the variables md-builder exports itself (see exportEnv):
+// a variables value may reference them, and a variables entry may not be named
+// after one. MD_CASE exists in the regression case scripts only and
+// MD_SECRET_TOKEN only on a site that configured a secret token; referencing
+// an unset one expands to the empty string in the stages that lack it.
+var builtinVars = map[string]bool{
+	"MD_COMMIT":       true,
+	"MD_ENV_NAME":     true,
+	"MD_ENV_TAGS":     true,
+	"MD_TASK_DIR":     true,
+	"MD_CODE_DIR":     true,
+	"MD_CASE":         true,
+	"MD_SECRET_TOKEN": true,
+}
+
+// ReservedVarPrefix is the prefix md-builder's own variables use: a `variables`
+// entry (or an allow-listed host variable) may not be named with it, so a
+// future built-in can never collide with an existing yaml.
+const ReservedVarPrefix = "MD_"
+
+// varRef is one variable reference found in a template: the name, and the byte
+// range the whole reference occupies (from the `$` to just past the name).
+type varRef struct {
+	name       string
+	start, end int
+}
+
+// scanVarRefs finds the references of a template, in order, accepting both
+// $NAME and ${NAME}. "$$" is an escaped literal dollar and a '$' that starts
+// nothing name-like is plain text; neither is reported. A malformed "${NAME"
+// (no closing brace) is left alone as well — the value stays literal rather
+// than being rejected.
+func scanVarRefs(tpl string) []varRef {
+	var refs []varRef
+	for i := 0; i < len(tpl); {
+		if tpl[i] != '$' {
+			i++
+			continue
+		}
+		if i+1 < len(tpl) && tpl[i+1] == '$' {
+			i += 2
+			continue
+		}
+		j := i + 1
+		braced := false
+		if j < len(tpl) && tpl[j] == '{' {
+			braced = true
+			j++
+		}
+		nameStart := j
+		for j < len(tpl) && isNameByte(tpl[j], j == nameStart) {
+			j++
+		}
+		name := tpl[nameStart:j]
+		if name == "" {
+			i++ // a lone '$': literal text
+			continue
+		}
+		end := j
+		if braced {
+			if j >= len(tpl) || tpl[j] != '}' {
+				i++ // unterminated ${: literal text
+				continue
+			}
+			end = j + 1
+		}
+		refs = append(refs, varRef{name: name, start: i, end: end})
+		i = end
+	}
+	return refs
+}
+
+// isNameByte reports whether b may appear in a variable name (a digit may not
+// start one) — the byte-wise twin of IsEnvName.
+func isNameByte(b byte, first bool) bool {
+	switch {
+	case b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z':
+		return true
+	case b >= '0' && b <= '9':
+		return !first
+	}
+	return false
+}
+
+// renderVarValue renders a variable template as ONE shell word: every
+// expandable reference becomes a double-quoted "${NAME}" (resolved by the
+// shell when the line runs) and every run of literal text is single-quoted, so
+// a value can never splice shell syntax — a $(…) or a backtick in a template
+// stays text. "$$" renders as a literal '$'.
+//
+// References that are not expandable stay part of the literal run (as the
+// docs promise: an unknown name is kept as written); their names are returned
+// so the caller can warn about them, first occurrence, in template order.
+func renderVarValue(tpl string, expandable func(name string) bool) (value string, unknown []string) {
+	var b strings.Builder
+	last := 0
+	seen := map[string]bool{}
+	literal := func(s string) {
+		if s != "" {
+			b.WriteString(shq(strings.ReplaceAll(s, "$$", "$")))
+		}
+	}
+	for _, ref := range scanVarRefs(tpl) {
+		if !expandable(ref.name) {
+			if !seen[ref.name] {
+				seen[ref.name] = true
+				unknown = append(unknown, ref.name)
+			}
+			continue
+		}
+		literal(tpl[last:ref.start])
+		b.WriteString(`"${` + ref.name + `}"`)
+		last = ref.end
+	}
+	literal(tpl[last:])
+	if b.Len() == 0 {
+		return "''", unknown // an empty value still needs a word
+	}
+	return b.String(), unknown
+}
+
+// variableOrder returns the variables' names in dependency order: a variable
+// that references another one comes after it, so the shell expands it with the
+// referenced value already in place. Independent names keep alphabetical order,
+// so the same entry always renders the same script. Cycles are rejected when
+// the config is parsed, so this terminates.
+func variableOrder(vars map[string]string) []string {
+	names := make([]string, 0, len(vars))
+	for name := range vars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	done := map[string]bool{}
+	out := make([]string, 0, len(names))
+	var emit func(name string)
+	emit = func(name string) {
+		if done[name] {
+			return
+		}
+		done[name] = true // also breaks a cycle should one slip through
+		for _, ref := range scanVarRefs(vars[name]) {
+			if _, ok := vars[ref.name]; ok {
+				emit(ref.name)
+			}
+		}
+		out = append(out, name)
+	}
+	for _, name := range names {
+		emit(name)
+	}
+	return out
+}
+
+// exportVariables renders the entry's `variables` block. Unlike the env
+// exports above — literals, quoted so nothing in them can expand — a variable
+// is a template: the built-in MD_* variables, the entry's other variables and
+// the host environment variables the site allow-lists expand, everything else
+// stays literal and is reported as a warning in the task log (the yaml author
+// sees why a path came out with a "$" in it).
+//
+// It is emitted after the environment's setup script, so a variable can build
+// on what that script exports (module loads, host paths) — which also means a
+// variable wins over an env-script export of the same name. The cd below
+// follows the exports, so a workdir may reference a variable too.
+func exportVariables(w func(format string, args ...any), in *ScriptInput) {
+	if in.Entry == nil || len(in.Entry.Variables) == 0 {
+		return
+	}
+	allowed := make(map[string]bool, len(in.AllowedEnv))
+	for _, name := range in.AllowedEnv {
+		allowed[name] = true
+	}
+	expandable := func(name string) bool {
+		if builtinVars[name] {
+			return true
+		}
+		if _, ok := in.Entry.Variables[name]; ok {
+			return true
+		}
+		return allowed[name]
+	}
+	for _, name := range variableOrder(in.Entry.Variables) {
+		value, unknown := renderVarValue(in.Entry.Variables[name], expandable)
+		for _, ref := range unknown {
+			w("echo %s >&2", shq(fmt.Sprintf(
+				"warning: variables.%s: $%s is not a built-in variable, a variables entry or an allowed environment variable; kept literally",
+				name, ref)))
+		}
+		w("export %s=%s", name, value)
 	}
 	w("")
 }
@@ -212,9 +422,9 @@ func shq(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
-// isEnvName reports whether s is a shell identifier and so usable as the left
+// IsEnvName reports whether s is a shell identifier and so usable as the left
 // side of an `export name=value` line.
-func isEnvName(s string) bool {
+func IsEnvName(s string) bool {
 	if s == "" {
 		return false
 	}
@@ -274,4 +484,10 @@ func ShellQuote(s string) string { return shq(s) }
 // exported form used by tests).
 func ExportEnv(w func(format string, args ...any), in *ScriptInput) {
 	exportEnv(w, in)
+}
+
+// ExportVariables renders the entry's variables block (the exported form used
+// by tests).
+func ExportVariables(w func(format string, args ...any), in *ScriptInput) {
+	exportVariables(w, in)
 }

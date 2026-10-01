@@ -19,6 +19,8 @@ defaults:
   timeout: 3600                 # 单命令超时秒数(硬上限 4 小时)
   env:
     OMP_NUM_THREADS: "4"
+  variables:                    # 模板,在环境上展开
+    BUILD_ROOT: "$MD_CODE_DIR/build"
   build:
     # 一条普通 shell 命令 —— cmake/make/脚本,项目用什么就写什么。
     command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
@@ -44,8 +46,10 @@ matrix:
     env:
       CC: gcc
       CXX: g++
+    variables:                    # 按键合并到 defaults.variables 之上
+      CMAKE_FLAGS: "-DENABLE_MPI=OFF"
     build:
-      command: "cmake -DENABLE_MPI=OFF . && cmake --build ."
+      command: 'cmake -B "$BUILD_ROOT" $CMAKE_FLAGS . && cmake --build "$BUILD_ROOT"'
       description: "用 gcc 和 cmake 构建代码"
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
@@ -71,13 +75,14 @@ matrix:
 | 字段                         | 必填     | 说明                                                               |
 |------------------------------|----------|--------------------------------------------------------------------|
 | version                      | 是       | 必须为 2。                                                          |
-| defaults                     | 否       | 条目级默认值:timeout、env、build、unit、regression。                |
+| defaults                     | 否       | 条目级默认值:timeout、env、variables、build、unit、regression。     |
 | presets                      | 否       | 公共回归用例(见下)。                                               |
 | matrix                       | 是       | 一或多个条目;每个条目需要 tags 和至少一个阶段。                     |
 | matrix[].tags                | 是       | 选择环境的标签(见[测试环境](#/docs/environments))。每个条目内必须唯一。 |
 | matrix[].description         | 否       | 人类可读的标签。                                                    |
 | matrix[].timeout             | 否       | 默认阶段超时秒数(默认 3600,上限 14400)。                          |
-| matrix[].env                 | 否       | 为所有阶段导出的额外环境变量。                                      |
+| matrix[].env                 | 否       | 为所有阶段导出的额外环境变量 —— 字面量值。                          |
+| matrix[].variables           | 否       | 该条目各阶段的额外变量,合并到 defaults.variables 之上 —— 模板值(见[变量](#变量))。 |
 | matrix[].build               | 否       | 构建阶段(见下)。                                                   |
 | matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 description、workdir、timeout、artifacts。 |
 | matrix[].regression          | 否       | 回归测试选择:use / disable 引用预设;可选整个阶段的 description。  |
@@ -209,6 +214,10 @@ unit:
   command: "$MD_CODE_DIR/build/unit_tests --gtest_output=xml:$MD_CODE_DIR/build/test_detail.xml"
 ```
 
+这些引用之所以能展开,是因为命令本身运行在环境上的阶段脚本里,那里
+已经导出了 MD_*。相反,`env` 的值是**字面量**,永远不会被展开 ——
+需要展开请用[变量](#变量)。
+
 ### Secret token(MD_SECRET_TOKEN)
 
 命令经常需要凭证 —— 私有软件源、工件存储、付费软件的 license 服务器
@@ -233,6 +242,101 @@ presets:
 写入任务日志前把每一处出现都替换为 `REDACTED`。未配置时该变量为未设
 置状态。
 
+## 变量
+
+`defaults` 和每个矩阵条目都可以声明 **`variables`**:一组具名值,该条目
+的各阶段命令可以像普通 shell 变量一样使用。它们是 `env` 的*可展开*版本,
+区别很重要:
+
+- **`env`** 的值是字面量。`BUILD_ROOT: "$MD_CODE_DIR/build"` 写在 `env`
+  下,导出的就是这段文本(单引号包裹),没有任何东西会展开它:命令里读到
+  的 `$BUILD_ROOT` 是一个中间带 `$` 的路径。
+- **`variables`** 的值是模板,由阶段脚本在**环境上**、阶段运行时展开。
+
+展开时会替换三类引用:
+
+1. 内置的 `MD_*` 变量(`$MD_CODE_DIR`、`$MD_COMMIT` 等);
+2. 该条目的**其他变量** —— 按依赖顺序导出,因此一个变量可以写在另一个
+   变量之上;
+3. **该环境**允许的**主机**环境变量(*Runner Envs* → 该行的 **Edit**
+   表单 —— 在所有者修改之前是 `HOME`、`USER`、`LOGNAME`、`PATH`、
+   `SHELL`、`TMPDIR`)。每台主机公开自己的名字,因此同一份 yaml 可能
+   在一台机器上展开、在另一台机器上保持字面量。该条目自己的 `env`
+   导出的名字只要在名单上也算:变量在 `env` 之后导出。
+
+其余引用一律保持字面量:写成 `$MD_CODEDIR` 这类笔误,命令收到的就是
+`$MD_CODEDIR` 这段文本,同时阶段日志里会出现
+
+```
+warning: variables.<name>: $MD_CODEDIR is not a built-in variable, a variables entry or an allowed environment variable; kept literally
+```
+
+因此路径不会悄悄丢掉 `$`。
+
+```yaml
+defaults:
+  variables:
+    BUILD_ROOT: "$MD_CODE_DIR/build"
+
+matrix:
+  - tags: [cpu]
+    variables:
+      CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF"
+      UNIT_XML: "$BUILD_ROOT/tests/unit.xml"   # BUILD_ROOT 先展开
+    build:
+      command: 'cmake -B "$BUILD_ROOT" $CMAKE_FLAGS . && cmake --build "$BUILD_ROOT" -j8'
+    unit:
+      command: "./build/unit_tests --gtest_output=xml:$UNIT_XML"
+```
+
+条目按键继承 `defaults.variables`,冲突时条目优先,与 `env` 完全一致。
+
+### 值只是数据,不是代码
+
+一个值被渲染为**恰好一个 shell 词**:可展开的引用变成双引号包裹的
+`${NAME}`,其余部分单引号包裹。因此值里的 `$(…)`、反引号、引号或换行
+都只是文本:`INJECT: "$(touch /tmp/x)"` 导出的就是这段字符串,命令里
+`echo "$INJECT"` 会把它打印出来而不是执行它 —— yaml 无法借 `variables`
+把 shell 语法注入阶段脚本。
+
+值里想要一个字面 `$` 就写 `$$`(`PRICE: "5$$ per run"`);后面不构成
+变量名的 `$`(`50$`、`${ }`)原样保留。
+
+### 导言的导出顺序
+
+每个阶段脚本按以下顺序构建环境:
+
+1. 内置 `MD_*` 变量;
+2. 条目的 `env`(字面量,单引号包裹);
+3. **环境设置脚本**(source,见下);
+4. 条目的 `variables`(模板,在此展开);
+5. `cd` 进入工作目录。
+
+变量在环境设置脚本之后展开,因此变量可以建立在脚本导出的内容之上
+(module 加载、`module load` 推入的主机路径等)—— 同名时变量覆盖脚本的
+导出。`cd` 在最后,所以 `workdir` 也可以引用变量。
+
+### 允许哪些主机变量
+
+某个仓库的 yaml 可以读取主机的哪些环境变量,由**主机所有者**决定,而不是
+仓库决定:名单保存在环境本身上 —— *Runner Envs* → 该行的 **Edit** 表单,
+**Expandable host variables** —— 因此同一站点的两台机器可以公开不同的名字
+(见[测试环境](#/docs/environments))。新环境从一份最小默认名单开始
+(`HOME`、`USER`、`PATH` 等)。不在名单上的名字保持字面量,与写错名字完全
+相同;所有者也可以清空名单,表示一个都不允许。
+
+### 校验
+
+变量在读取 yaml 时就会校验,因此有问题的条目会让派发失败并指出出错的
+名字(commit 行上的 `dispatchError`),而不是生成一份取值依赖导出顺序的
+脚本:
+
+- 名字必须是 shell 标识符(`[A-Za-z_][A-Za-z0-9_]*`);
+- 不能以 `MD_` 开头 —— 该前缀保留给总是会展开的内置变量;
+- 不能与同一条目的 `env` 重名 —— 同一个名字会有两种语义不同的值,只能
+  留在其中一处;
+- 两个变量之间不能形成循环引用。
+
 ## 环境设置脚本
 
 每个**环境**(在站点上配置,而非 yaml 中)可以携带一个环境设置脚本 ——
@@ -241,8 +345,9 @@ presets:
 之前 source(module 加载、编译器导出、virtualenv 激活等):
 
 - **存在**:每个阶段脚本先执行 `. md-builder-env-<hash>.sh`;脚本导出的
-  一切对 build、unit 和回归命令可见(它在导言的最后运行,因此可以覆盖
-  内置变量和 yaml 变量)。
+  一切对 build、unit 和回归命令可见。它在内置 `MD_*` 和 yaml 的 `env`
+  之后、yaml 的 `variables` 之前运行:可以覆盖前两者,但同名的变量会
+  覆盖它(见[导言的导出顺序](#导言的导出顺序))。
 - **不存在**:阶段脚本记录一条警告后照常运行。
 
 见[测试环境](#/docs/environments)。
@@ -368,6 +473,8 @@ presets:
   `threads`)。
 - 每个预设必须带 `command`;`use` / `disable` 中的名称必须引用已定义
   的预设。
+- `variables` 的名字必须是 shell 标识符,不能以 `MD_` 开头,不能与同一
+  条目的 `env` 重名,也不能形成循环引用(见[变量](#变量))。
 
 非法的 YAML 会使派发失败:推送仍被记录,`dispatchError` 出现在 webhook
 响应中(见 [Webhooks](#/docs/webhooks)),但不会创建任何任务。同一条
@@ -388,7 +495,8 @@ presets:
    设置脚本被写入任务目录。
 2. **build**:生成的脚本导出 MD_COMMIT、MD_ENV_NAME、MD_ENV_TAGS、
    MD_TASK_DIR、MD_CODE_DIR 以及 yaml 的 env 变量,source 环境设置
-   脚本(如果存在),然后在它的工作目录中运行构建阶段。
+   脚本(如果存在),导出展开后的 yaml 变量,然后在它的工作目录中运行
+   构建阶段。
 3. 若构建(或克隆)失败,依赖它的测试阶段会被标记为 skipped,仪表板
    显示 ✗。
 4. **unit**:阶段命令在其工作目录中、受超时约束地运行;完整输出流入
