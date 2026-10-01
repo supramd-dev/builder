@@ -50,13 +50,19 @@ func objectCtx() (context.Context, context.CancelFunc) {
 }
 
 // putArtifacts uploads each artifact's bytes and returns the rows to insert.
+// taskID is the owning task's, denormalized onto the rows (see TestArtifact);
+// the caller reads it from the task or run it already has, never from the
+// database: an upload runs inside the caller's transaction, and a run created
+// by that very transaction (the retry path of FinishAttempt) is invisible to a
+// second connection — reading it there would either lose the owner or block on
+// the transaction's own lock.
 //
 // Uploading happens before the insert, inside the caller's transaction: a
 // failed upload aborts the transaction, so the database never references an
 // object that was not stored. The reverse (an object with no row) is possible
 // when a transaction rolls back after the upload; that leaves an unreferenced
 // object, which the orphan sweep reclaims.
-func (s *Store) putArtifacts(runID int64, artifacts []ArtifactInput) ([]TestArtifact, error) {
+func (s *Store) putArtifacts(runID, taskID int64, artifacts []ArtifactInput) ([]TestArtifact, error) {
 	if len(artifacts) == 0 {
 		// A report without artifacts needs no backend: most runs (and
 		// every store opened by adduser) have nothing to store.
@@ -97,6 +103,7 @@ func (s *Store) putArtifacts(runID int64, artifacts []ArtifactInput) ([]TestArti
 		}
 		rows = append(rows, TestArtifact{
 			RunID:     runID,
+			TaskID:    taskID,
 			Kind:      a.Kind,
 			Name:      a.Name,
 			ObjectKey: meta.Key,

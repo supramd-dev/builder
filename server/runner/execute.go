@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -43,7 +44,7 @@ func (s *Service) ExecuteTask(ctx context.Context, task *store.Task) error {
 		s.executeBuild(ctx, task)
 	case store.TaskKindUnit:
 		s.executeUnit(ctx, task)
-	case store.TaskKindRegression:
+	case store.TaskKindRegressionCase:
 		s.executeCase(ctx, task)
 	default:
 		s.failEarly(task, fmt.Sprintf("unknown task kind %q", task.Kind))
@@ -100,23 +101,18 @@ func (s *Service) loadRootContext(task *store.Task) (*rootContext, bool) {
 // failEarly marks a task failed for a reason that surfaced before any
 // command ran (invalid snapshot, broken lookups) and appends the reason to
 // the task log directly — the LogWriter-based failTaskLogged needs a root
-// context that may not exist yet. It also records a failed dashboard run so
-// the matrix cell carries the outcome (and a runId to click through) instead
-// of only the graph showing the failure.
+// context that may not exist yet. The attempt's run is failed with it, so the
+// matrix cell carries the outcome (and a runId to click through) instead of
+// only the graph showing the failure.
 func (s *Service) failEarly(task *store.Task, msg string) {
 	if cfg, err := s.Store.GetSiteConfig(); err == nil {
 		msg = Redact(msg, cfg.AccessToken)
 		msg = Redact(msg, cfg.SecretToken)
 	}
-	logw := NewLogWriter(s.Store, task.ID)
+	logw := NewLogWriter(s.Store, task)
 	fmt.Fprintf(logw, "task failed: %s\n", msg)
 	logw.Close()
-	if err := s.Store.FinishTask(task.ID, store.TaskFailed, msg); err != nil {
-		log.Printf("runner: task %d: finish failed: %v", task.ID, err)
-	}
-	// The snapshot may be the very thing that failed to parse; keep the
-	// dispatch-time description by passing an empty one.
-	s.recordStageRun(task, store.StatusFailed, truncateSummary(msg), "", 0, 0, 0, nil)
+	s.finishStage(task, store.StatusFailed, truncateSummary(msg), msg, stageCounts{}, nil)
 }
 
 // creds builds the git credentials from the site config.
@@ -128,7 +124,7 @@ func (rc *rootContext) creds() *GitCredentials {
 // (access token, MD_SECRET_TOKEN) armed for scrubbing — a stage command
 // echoing its environment would otherwise persist them in the log.
 func (s *Service) stageLogWriter(rc *rootContext, task *store.Task) *LogWriter {
-	logw := NewLogWriter(s.Store, task.ID)
+	logw := NewLogWriter(s.Store, task)
 	logw.SetSecrets(rc.cfg.AccessToken, rc.cfg.SecretToken)
 	return logw
 }
@@ -168,7 +164,7 @@ func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 	if !ok {
 		return
 	}
-	logw := NewLogWriter(s.Store, task.ID)
+	logw := NewLogWriter(s.Store, task)
 	defer logw.Close()
 
 	if rc.cfg.CodeRepo == "" {
@@ -198,9 +194,7 @@ func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 		return
 	}
 
-	if err := s.Store.FinishTask(task.ID, store.TaskDone, ""); err != nil {
-		log.Printf("runner: task %d: finish: %v", task.ID, err)
-	}
+	s.finishStage(task, store.StatusPassed, fmt.Sprintf("cloned %s", shortSHA(rc.sha)), "", stageCounts{}, nil)
 }
 
 // writeEnvScript materializes the environment's setup script on the remote
@@ -254,7 +248,7 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 
 	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, "", stage.Timeout))
 	if err != nil {
-		s.failScriptBuild(task, logw, err.Error())
+		s.failTaskLogged(task, logw, "stage script is invalid: "+err.Error())
 		return
 	}
 
@@ -267,18 +261,12 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	logw.Flush() // the build run's summary is derived from the persisted log
 
 	// Record the dashboard build run from the log tail (no per-case results).
-	output := s.readLogTail(task.ID)
-	status := store.StatusFailed
-	if res.ExitCode == 0 {
-		status = store.StatusPassed
-	}
+	output := s.readLogTail(task)
 	summary := ExtractSummary(output, res.ExitCode)
 	if res.ExitCode < 0 {
 		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
 	}
-	s.recordStageRun(task, status, summary, stage.Description, 0, 0, 0, artifacts)
-
-	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
+	s.finishCommand(task, logw, res.ExitCode, res.Stderr, summary, stageCounts{}, artifacts)
 }
 
 // executeUnit implements the unit test sub-task: run the stage command in
@@ -300,7 +288,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 
 	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, "", stage.Timeout))
 	if err != nil {
-		s.failScriptBuild(task, logw, err.Error())
+		s.failTaskLogged(task, logw, "stage script is invalid: "+err.Error())
 		return
 	}
 
@@ -312,11 +300,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 	logw.Flush() // the summary is derived from the persisted log
 
 	// The log holds the full output; the summary is derived from it.
-	output := s.readLogTail(task.ID)
-	status := store.StatusFailed
-	if res.ExitCode == 0 {
-		status = store.StatusPassed
-	}
+	output := s.readLogTail(task)
 	summary := ExtractSummary(output, res.ExitCode)
 	if res.ExitCode < 0 {
 		// Session-level failure (dial, timeout): surface the transport error.
@@ -329,8 +313,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 			summary = s
 		}
 	}
-	s.recordStageRun(task, status, summary, stage.Description, counts.total, counts.failed, counts.skipped, artifacts)
-	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
+	s.finishCommand(task, logw, res.ExitCode, res.Stderr, summary, counts, artifacts)
 }
 
 // executeCase implements one regression case sub-task: run the preset's
@@ -352,50 +335,37 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 
 	script, err := BuildStageScript(rc.scriptInput(stage.Command, stage.Workdir, stage.Case, stage.Timeout))
 	if err != nil {
-		s.failScriptBuild(task, logw, err.Error())
+		s.failTaskLogged(task, logw, "case script is invalid: "+err.Error())
 		return
 	}
 
 	h := envToSSHHost(rc.env)
-	started := time.Now()
 	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
-	finished := time.Now()
 
-	// The case's artifact files (when configured) are fetched back verbatim
-	// and attached to the case's own child run.
+	// The case's artifact files (when configured) are fetched back and
+	// attached to the case's own run — the browser parses them for the case's
+	// detail. Their tallies are not the case's result: a case's verdict is
+	// its command's exit status alone (docs/test-matrix.md), so the counts
+	// parsed here are dropped.
 	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindResults, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
-	logw.Flush() // the case message is derived from the persisted log
-	output := s.readLogTail(task.ID)
+	logw.Flush() // the case's summary is derived from the persisted log
+	output := s.readLogTail(task)
 
-	status := store.StatusFailed
-	if res.ExitCode == 0 {
-		status = store.StatusPassed
-	}
-	message := ExtractSummary(output, res.ExitCode)
+	summary := ExtractSummary(output, res.ExitCode)
 	if res.ExitCode < 0 {
-		message = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
+		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
 	}
 
-	// The case lands as a child TestRun (the run aggregates over its cases);
-	// its artifacts ride on the child.
-	if _, _, err := s.Store.UpsertCaseRun(&store.CaseRunInput{
-		EnvironmentID:  task.EnvironmentID,
-		CommitID:       task.CommitID,
-		TaskID:         task.ID,
-		Name:           stage.Case,
-		Description:    stage.Description,
-		Status:         status,
-		Message:        message,
-		DurationMillis: float64(finished.Sub(started).Milliseconds()),
-		StartedAt:      started,
-		FinishedAt:     finished,
-		Artifacts:      artifacts,
-	}); err != nil {
-		log.Printf("runner: task %d: record case %s: %v", task.ID, stage.Case, err)
+	// A case is one command and one test, so its run counts as that one test
+	// (0/1 when the command failed) — which is how the demo seeds a case and
+	// what the run page shows. Leaving the counts empty would print "0/0
+	// passed" on a case whose single test ran fine.
+	counts := stageCounts{total: 1, failed: 1}
+	if res.ExitCode == 0 {
+		counts.failed = 0
 	}
-
-	s.finishCommandTask(task, logw, res.ExitCode, res.Stderr)
+	s.finishCommand(task, logw, res.ExitCode, res.Stderr, summary, counts, artifacts)
 }
 
 // stageCounts is the aggregate a stage's results files yielded.
@@ -483,10 +453,14 @@ func (s *Service) fetchArtifactFile(ctx context.Context, h SSHHost, rc *rootCont
 	return content, nil
 }
 
-// readLogTail re-reads the persisted log tail (the LogWriter already closed
-// by defer ordering — read what landed) for summary extraction.
-func (s *Service) readLogTail(taskID int64) string {
-	logs, err := s.Store.ReadTaskLogs(taskID, 0)
+// readLogTail re-reads the persisted log tail of the task's current attempt
+// (the LogWriter already closed by defer ordering — read what landed) for
+// summary extraction. It reads the end of the log, not its beginning: the
+// summary line is the last thing a stage prints, and a long stage's output
+// runs past the page size ReadTaskLogs returns, so reading from zero would
+// derive the summary from the head of a log whose outcome is at its tail.
+func (s *Service) readLogTail(task *store.Task) string {
+	logs, err := s.Store.ReadTaskLogTail(task.ID, task.Attempts)
 	if err != nil {
 		return ""
 	}
@@ -497,105 +471,116 @@ func (s *Service) readLogTail(taskID int64) string {
 	return all
 }
 
-// recordStageRun upserts the dashboard TestRun for a finished (or failed to
-// even start) test stage. counts/artifacts carry the fetched results files'
-// summed aggregates and raw contents (nil when not configured or unfetchable).
-// description is the stage's yaml label re-stored with the outcome (empty
-// keeps the dispatch-time placeholder's description — see UpsertTestRun).
-func (s *Service) recordStageRun(task *store.Task, status, summary, description string,
-	total, failed, skipped int, artifacts []store.ArtifactInput) {
-	input := &store.RunInput{
-		EnvironmentID: task.EnvironmentID,
-		CommitID:      task.CommitID,
-		Kind:          task.Kind, // unit/regression match the run kinds
-		TaskID:        task.ID,
-		Description:   description,
-		Total:         total,
-		Failed:        failed,
-		Skipped:       skipped,
-		Summary:       summary,
-		StartedAt:     taskStart(task),
-		FinishedAt:    time.Now(),
+// finishStage records one real stage's attempt: it writes the attempt's run
+// (status, summary, counts, artifacts) and refreshes the task's cache from
+// the same values, then rolls the virtual nodes back up
+// (store.FinishAttempt) — the one write path a stage outcome takes, so the
+// node, the run and the containers can never disagree.
+//
+// counts/artifacts carry the fetched results files' summed aggregates and raw
+// contents (zero/nil when not configured or unfetchable). A stage whose counts
+// report failed cases is failed even when its command exited zero: a ctest
+// wrapper can swallow the test binary's result.
+func (s *Service) finishStage(task *store.Task, status, summary, errMsg string,
+	counts stageCounts, artifacts []store.ArtifactInput) {
+	if counts.failed > 0 {
+		status = store.StatusFailed
 	}
-	if len(artifacts) > 0 {
-		input.Passed = total - failed - skipped
-		input.Artifacts = artifacts
+	res := store.AttemptResult{
+		Status:     status,
+		Summary:    truncateSummary(summary),
+		Error:      errMsg,
+		Attempt:    task.Attempts, // the attempt this execution is; a re-dispatch must not take its result
+		Total:      counts.total,
+		Passed:     counts.total - counts.failed - counts.skipped,
+		Failed:     counts.failed,
+		Skipped:    counts.skipped,
+		StartedAt:  taskStart(task),
+		FinishedAt: time.Now(),
+		Artifacts:  artifacts,
 	}
-	// The command's exit code and the parsed counts both count: a failed
-	// command fails the run, and so do failed cases even when the command
-	// exited zero (ctest wrappers can swallow the test binary's result).
-	input.StatusFailed = status == store.StatusFailed || failed > 0
-	input.Status = store.StatusPassed
-	if _, err := s.Store.UpsertTestRun(input); err != nil {
-		log.Printf("runner: task %d: record %s run: %v", task.ID, task.Kind, err)
+	if err := s.finishAttempt(task, res); err != nil {
+		log.Printf("runner: task %d: finish %s attempt %d gave up after %d tries: %v "+
+			"(the node stays running; restart the service or re-dispatch its commit)",
+			task.ID, task.Kind, task.Attempts, finishAttemptTries, err)
 	}
 }
 
-// finishCommandTask maps an execution result to the task's terminal state:
-// exit 0 → done, else failed with a redacted error.
-func (s *Service) finishCommandTask(task *store.Task, logw *LogWriter, exitCode int, stderr string) {
-	if exitCode != 0 {
-		msg := stderr
-		if msg == "" {
-			msg = fmt.Sprintf("command exited with %d (see log)", exitCode)
+// finishAttemptTries bounds the retries of the attempt's closing write, and
+// finishAttemptBackoff is the first wait between them (it doubles).
+var (
+	finishAttemptTries   = 4
+	finishAttemptBackoff = 100 * time.Millisecond
+)
+
+// finishAttempt writes the attempt's outcome through the one write path that
+// ends it, retrying a failure that looks transient (a busy SQLite file, a
+// connection that dropped). Retrying matters because this write is the only
+// thing that ends the node: a single failed call leaves the task "running"
+// with no worker behind it, and nothing ever claims a running node again — it
+// would sit on the dashboard as running until the next restart resets it (the
+// retries are bounded so a database that is really down still lets the worker
+// go; the caller logs the give-up).
+func (s *Service) finishAttempt(task *store.Task, res store.AttemptResult) error {
+	delay := finishAttemptBackoff
+	var err error
+	for try := 1; try <= finishAttemptTries; try++ {
+		if _, err = s.Store.FinishAttempt(task.ID, res); err == nil {
+			return nil
 		}
-		s.failTaskLogged(task, logw, fmt.Sprintf("exit %d: %s", exitCode, tailLine(msg, 3)))
+		if try == finishAttemptTries {
+			break
+		}
+		if errors.Is(err, store.ErrVirtualTask) || errors.Is(err, store.ErrInvalidRunStatus) ||
+			errors.Is(err, store.ErrTestRunNotFound) {
+			// A refusal, not a flake: the store rejected the report itself
+			// (wrong kind of node, unknown status, attempt row gone), so
+			// repeating it changes nothing.
+			return err
+		}
+		log.Printf("runner: task %d: finish %s attempt %d: %v; retrying in %s",
+			task.ID, task.Kind, task.Attempts, err, delay)
+		time.Sleep(delay)
+		delay *= 2
+	}
+	return err
+}
+
+// finishCommand closes a stage whose command ran: exit 0 passes it, anything
+// else fails it with the redacted reason, which also lands in the log.
+func (s *Service) finishCommand(task *store.Task, logw *LogWriter, exitCode int, stderr, summary string,
+	counts stageCounts, artifacts []store.ArtifactInput) {
+	if exitCode == 0 {
+		s.finishStage(task, store.StatusPassed, summary, "", counts, artifacts)
 		return
 	}
-	if err := s.Store.FinishTask(task.ID, store.TaskDone, ""); err != nil {
-		log.Printf("runner: task %d: finish: %v", task.ID, err)
+	msg := stderr
+	if msg == "" {
+		msg = fmt.Sprintf("command exited with %d (see log)", exitCode)
 	}
+	msg = fmt.Sprintf("exit %d: %s", exitCode, tailLine(msg, 3))
+	s.writeFailure(task, logw, msg)
+	s.finishStage(task, store.StatusFailed, summary, truncateSummary(msg), counts, artifacts)
 }
 
-// failTaskLogged marks a task failed and appends the reason to its log.
-// Callers that already recorded the stage's dashboard run (the normal
-// command-exit path) must use this — recording again here would overwrite
-// the outcome with a bare failure.
+// failTaskLogged marks a task failed for a reason that surfaced outside the
+// command's exit code (clone/upload failure, env script upload, an invalid
+// stage script) and appends the reason to its log.
 func (s *Service) failTaskLogged(task *store.Task, logw *LogWriter, msg string) {
+	msg = s.writeFailure(task, logw, msg)
+	s.finishStage(task, store.StatusFailed, truncateSummary(msg), truncateSummary(msg), stageCounts{}, nil)
+}
+
+// writeFailure redacts the site's secrets out of msg, appends it to the task's
+// log and returns the redacted text (what gets stored on the task's error
+// column).
+func (s *Service) writeFailure(task *store.Task, logw *LogWriter, msg string) string {
 	if cfg, err := s.Store.GetSiteConfig(); err == nil {
 		msg = Redact(msg, cfg.AccessToken)
 		msg = Redact(msg, cfg.SecretToken)
 	}
 	fmt.Fprintf(logw, "task failed: %s\n", msg)
-	if err := s.Store.FinishTask(task.ID, store.TaskFailed, msg); err != nil {
-		log.Printf("runner: task %d: finish failed: %v", task.ID, err)
-	}
-}
-
-// failScriptBuild fails a stage whose remote script could not even be
-// generated (empty command, bad entry snapshot): nothing ran, so no run has
-// been recorded yet and the dispatch-time placeholder run (pending/running)
-// must be closed out here — otherwise the run detail page and matrix cell
-// spin on "running" forever.
-func (s *Service) failScriptBuild(task *store.Task, logw *LogWriter, msg string) {
-	s.failTaskLogged(task, logw, msg)
-	if task.Kind == store.TaskKindRegression {
-		// The case lands as a skipped child run under the regression run
-		// (UpsertCaseRun replaces the pending placeholder child); the
-		// aggregate then stops reading as in flight.
-		var stage CaseStageConfig
-		name := task.Name
-		desc := ""
-		if err := json.Unmarshal([]byte(task.Config), &stage); err == nil {
-			if stage.Case != "" {
-				name = stage.Case
-			}
-			desc = stage.Description
-		}
-		if _, _, err := s.Store.UpsertCaseRun(&store.CaseRunInput{
-			EnvironmentID: task.EnvironmentID,
-			CommitID:      task.CommitID,
-			TaskID:        task.ID,
-			Name:          name,
-			Description:   desc,
-			Status:        store.StatusSkipped,
-			Message:       truncateSummary(msg),
-		}); err != nil {
-			log.Printf("runner: task %d: record failed case %s: %v", task.ID, name, err)
-		}
-		return
-	}
-	s.recordStageRun(task, store.StatusFailed, truncateSummary("task failed: "+msg), "", 0, 0, 0, nil)
+	return msg
 }
 
 func taskStart(task *store.Task) time.Time {

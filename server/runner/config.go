@@ -345,7 +345,14 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 // expandRegression resolves the entry's use/disable against the presets into
 // the effective ordered case list. Empty use selects every preset (name
 // order for determinism); disable drops named cases from the selection.
-func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, defaults *EntryConfig) ([]RegressionCase, error) {
+//
+// A case's command timeout resolves like every other command's: the preset's
+// own timeout, else the matrix entry's timeout, else the defaults' one, else
+// the package default. The graph builder only falls back to the entry for a
+// case left at zero, so resolving without the entry here would silently mask
+// the entry's timeout (a case of an entry with `timeout: 60` would keep the
+// hour-long default).
+func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, defaults, entry *EntryConfig) ([]RegressionCase, error) {
 	if use == nil {
 		return nil, nil
 	}
@@ -381,7 +388,7 @@ func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, default
 			Artifacts:   p.Artifacts,
 		}
 		if c.Timeout == 0 {
-			c.Timeout = defaultTimeoutFor(defaults, nil)
+			c.Timeout = defaultTimeoutFor(defaults, entry)
 		}
 		if c.Timeout > MaxTimeoutSeconds {
 			c.Timeout = MaxTimeoutSeconds
@@ -500,7 +507,7 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 	}
 
 	var err error
-	m.Regression, err = expandRegression(presets, entry.Regression, defaults)
+	m.Regression, err = expandRegression(presets, entry.Regression, defaults, entry)
 	if err != nil {
 		return MergedEntry{}, err
 	}

@@ -206,6 +206,15 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("drop old commits unique index: %w", err)
 		}
 	}
+	// A run used to be identified by (environment, commit, kind, parent,
+	// name); runs are now identified by (task, attempt). AutoMigrate never
+	// drops indexes, and the old one would forbid a second case run on the
+	// same (environment, commit), so drop it by name when it still exists.
+	if s.DB.Migrator().HasIndex(&TestRun{}, "idx_test_runs_env_commit_kind_name") {
+		if err := s.DB.Migrator().DropIndex(&TestRun{}, "idx_test_runs_env_commit_kind_name"); err != nil {
+			return fmt.Errorf("drop old test_runs unique index: %w", err)
+		}
+	}
 	if err := s.DB.AutoMigrate(
 		&User{}, &Session{}, &TestEnvironment{}, &SiteConfig{},
 		&Commit{}, &TestRun{}, &TestArtifact{}, &Task{}, &TaskLog{},

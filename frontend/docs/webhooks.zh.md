@@ -30,6 +30,11 @@ Push、tag push 和 merge request 事件都会记录到 `commits` 表 ——
 | **tag push** | 被打的 SHA(`after`) | 事件 `tag_push`,ref = 标签名(如 `v1.0`) |
 | **merge request** | MR 源分支上的 `last_commit` | 事件 `merge_request`,ref = 源分支 |
 
+**删除事件会被丢弃。** 分支或标签删除没有可测试的提交:GitLab 在
+`after`(以及 merge request 的 `last_commit.id`)里传的是全零 SHA,
+因此这类事件只以 `status: ignored` 确认,不入库 —— 否则矩阵上会永久
+留下永远填不出来的格子。
+
 Merge request 事件在 `open`、`reopen` 和 `merge` 动作时派发
 (新的源状态或合并结果)。其他动作(`update`、`close`、`approved`
 等)只记录不派发 —— 被测试的 SHA 并未变化。

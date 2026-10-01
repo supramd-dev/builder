@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -22,19 +23,45 @@ func artifactText(t *testing.T, s *Store, a *TestArtifact) string {
 	return string(data)
 }
 
+// unitRun dispatches a one-node graph (a unit stage) on the seeded (commit,
+// environment) pair and returns its task together with the attempt's run. An
+// artifact hangs off a run, and a run is what a real task's attempt opens at
+// dispatch — so a test that wants to store bytes starts here.
+func unitRun(t *testing.T, s *Store, env *TestEnvironment, commit *Commit) (*Task, *TestRun) {
+	t.Helper()
+	stored, err := s.UpsertTaskGraph(graphRoot(commit.ID, env.ID), []TaskNode{
+		{Task: &Task{Kind: TaskKindUnit, NodeKey: TaskKindUnit, Name: "unit tests"}},
+	})
+	if err != nil {
+		t.Fatalf("dispatch graph: %v", err)
+	}
+	task := stored[1]
+	run, err := s.FindTaskRun(task.ID, task.Attempts)
+	if err != nil {
+		t.Fatalf("run of %s: %v", task.NodeKey, err)
+	}
+	return task, run
+}
+
+// reportArtifacts closes the task's current attempt with the given artifacts
+// and returns that attempt's run — the artifacts' owner.
+func reportArtifacts(t *testing.T, s *Store, task *Task, artifacts []ArtifactInput) *TestRun {
+	t.Helper()
+	run, err := s.FinishAttempt(task.ID, AttemptResult{Status: StatusPassed, Artifacts: artifacts})
+	if err != nil {
+		t.Fatalf("finish attempt of task %d: %v", task.ID, err)
+	}
+	return run
+}
+
 func TestArtifactsAreStoredInObjectStorage(t *testing.T) {
 	s, objs := newTestStoreWithObjects(t)
 	env, commit := seedEnvAndCommit(t, s)
+	task, _ := unitRun(t, s, env, commit)
 
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit,
-		Artifacts: []ArtifactInput{
-			{Kind: ArtifactKindResults, Name: "build/test_detail.xml", Content: "<testsuites/>"},
-		},
+	run := reportArtifacts(t, s, task, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "build/test_detail.xml", Content: "<testsuites/>"},
 	})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
 
 	artifacts, err := s.ListRunArtifacts(run.ID)
 	if err != nil {
@@ -56,6 +83,11 @@ func TestArtifactsAreStoredInObjectStorage(t *testing.T) {
 	if a.Content != "" {
 		t.Fatalf("inline content should be empty, got %q", a.Content)
 	}
+	// TaskID is denormalized onto the row so a container can list its
+	// descendants' files without joining runs.
+	if a.TaskID != task.ID {
+		t.Fatalf("TaskID = %d, want the owning task %d", a.TaskID, task.ID)
+	}
 
 	// The bytes really are in the object store, under a key that names the
 	// run and the artifact.
@@ -64,6 +96,55 @@ func TestArtifactsAreStoredInObjectStorage(t *testing.T) {
 	}
 	if got := artifactText(t, s, &a); got != "<testsuites/>" {
 		t.Fatalf("stored content = %q", got)
+	}
+}
+
+// The retry path: a report that arrives after the attempt ended opens the next
+// attempt, and that attempt's run row is created by the very transaction that
+// uploads the artifacts. The rows must carry the owning task all the same —
+// the owner is read from the task the report is about, never from the
+// database, because a run created by the open transaction is invisible to a
+// second connection: that read loses the owner or blocks on the transaction's
+// own lock.
+//
+// A file-backed database (WAL, as the server opens it) rather than the shared
+// in-memory one: it shows a lost owner as a wrong value instead of a hang.
+func TestRetryReportKeepsArtifactOwnership(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "retry.db"), WithObjects(storage.NewMemory()))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	env, commit := seedEnvAndCommit(t, s)
+	task, _ := unitRun(t, s, env, commit)
+
+	first := reportArtifacts(t, s, task, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "first.xml", Content: "<a/>"},
+	})
+	second := reportArtifacts(t, s, task, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "second.xml", Content: "<b/>"},
+	})
+	if second.Attempt != 2 {
+		t.Fatalf("the second report should open attempt 2: %+v", second)
+	}
+	for _, run := range []*TestRun{first, second} {
+		artifacts, err := s.ListRunArtifacts(run.ID)
+		if err != nil || len(artifacts) != 1 {
+			t.Fatalf("artifacts of run %d: %+v (err %v)", run.ID, artifacts, err)
+		}
+		if artifacts[0].TaskID != task.ID {
+			t.Errorf("the artifact of attempt %d lost its owner: TaskID=%d, want %d (%+v)",
+				run.Attempt, artifacts[0].TaskID, task.ID, artifacts[0])
+		}
+	}
+	// The task's bundle carries the current attempt (an earlier attempt's
+	// files stay readable on that attempt's run page).
+	refs, err := s.ListSubtreeArtifacts(task.ID)
+	if err != nil {
+		t.Fatalf("subtree artifacts: %v", err)
+	}
+	if len(refs) != 1 || refs[0].Artifact.RunID != second.ID || refs[0].TaskID != task.ID {
+		t.Errorf("the bundle should carry the current attempt's artifact: %+v", refs)
 	}
 }
 
@@ -76,14 +157,11 @@ func TestArtifactKeyLayout(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	env, commit := seedEnvAndCommit(t, s)
+	task, _ := unitRun(t, s, env, commit)
 
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit,
-		Artifacts: []ArtifactInput{{Kind: ArtifactKindResults, Name: "out.xml", Content: "x"}},
+	run := reportArtifacts(t, s, task, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "out.xml", Content: "x"},
 	})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
 	want := "artifacts/runs/" + strconv.FormatInt(run.ID, 10) + "/results/out.xml"
 	if got := objs.Keys(); len(got) != 1 || got[0] != want {
 		t.Fatalf("objects = %v, want [%s]", got, want)
@@ -95,17 +173,12 @@ func TestArtifactKeyLayout(t *testing.T) {
 func TestArtifactDuplicateNamesGetDistinctKeys(t *testing.T) {
 	s, objs := newTestStoreWithObjects(t)
 	env, commit := seedEnvAndCommit(t, s)
+	task, _ := unitRun(t, s, env, commit)
 
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit,
-		Artifacts: []ArtifactInput{
-			{Kind: ArtifactKindFile, Name: "out/a.log", Content: "first"},
-			{Kind: ArtifactKindFile, Name: "err/a.log", Content: "second"},
-		},
+	run := reportArtifacts(t, s, task, []ArtifactInput{
+		{Kind: ArtifactKindFile, Name: "out/a.log", Content: "first"},
+		{Kind: ArtifactKindFile, Name: "err/a.log", Content: "second"},
 	})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
 	artifacts, _ := s.ListRunArtifacts(run.ID)
 	if len(artifacts) != 2 {
 		t.Fatalf("expected 2 artifacts, got %d", len(artifacts))
@@ -124,28 +197,35 @@ func TestArtifactDuplicateNamesGetDistinctKeys(t *testing.T) {
 	}
 }
 
-// A re-report of the same run replaces its artifacts; the deterministic key
-// means the new bytes overwrite the old object instead of piling up.
-func TestReplaceRunArtifactsOverwritesInPlace(t *testing.T) {
+// A report replaces the attempt's artifacts rather than adding to them: the
+// deterministic key means the new bytes overwrite the old object instead of
+// piling up, and the run keeps the one artifact it now owns. The attempt is
+// still in flight here (nothing terminal was reported yet), so the report
+// lands on the same run — the retry path is a new attempt and a new key.
+func TestReportReplacesAttemptArtifactsInPlace(t *testing.T) {
 	s, objs := newTestStoreWithObjects(t)
 	env, commit := seedEnvAndCommit(t, s)
+	task, run := unitRun(t, s, env, commit)
 
-	in := &RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit,
-		Artifacts: []ArtifactInput{{Kind: ArtifactKindResults, Name: "out.xml", Content: "first"}},
-	}
-	run, err := s.UpsertTestRun(in)
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
+	// Files attached before the outcome lands (the runner's fetched-back
+	// artifacts ride on the attempt the report will close).
+	if err := s.AppendRunArtifactsByRun(run.ID, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "out.xml", Content: "first"},
+	}); err != nil {
+		t.Fatalf("append artifacts: %v", err)
 	}
 	first, _ := s.ListRunArtifacts(run.ID)
-
-	in.Artifacts = []ArtifactInput{{Kind: ArtifactKindResults, Name: "out.xml", Content: "second"}}
-	run, err = s.UpsertTestRun(in)
-	if err != nil {
-		t.Fatalf("re-upsert: %v", err)
+	if len(first) != 1 {
+		t.Fatalf("expected 1 artifact before the report, got %d", len(first))
 	}
-	second, _ := s.ListRunArtifacts(run.ID)
+
+	done := reportArtifacts(t, s, task, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "out.xml", Content: "second"},
+	})
+	if done.ID != run.ID {
+		t.Fatalf("the report closed run %d, want the in-flight attempt %d", done.ID, run.ID)
+	}
+	second, _ := s.ListRunArtifacts(done.ID)
 
 	if len(second) != 1 {
 		t.Fatalf("expected 1 artifact after replace, got %d", len(second))
@@ -170,9 +250,10 @@ func TestArtifactWriteWithoutObjectStorageFails(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	env, commit := seedEnvAndCommit(t, s)
+	task, _ := unitRun(t, s, env, commit)
 
-	_, err = s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit,
+	_, err = s.FinishAttempt(task.ID, AttemptResult{
+		Status:    StatusPassed,
 		Artifacts: []ArtifactInput{{Kind: ArtifactKindResults, Name: "out.xml", Content: "x"}},
 	})
 	if !errors.Is(err, storage.ErrNotConfigured) {
@@ -185,11 +266,16 @@ func TestArtifactWriteWithoutObjectStorageFails(t *testing.T) {
 	if artifacts != 0 {
 		t.Fatalf("expected the failed report to leave no artifacts, got %d", artifacts)
 	}
+	// The rolled-back report left the node alone too: still on its pending
+	// attempt, not on a half-written terminal one.
+	if got := reloadTask(t, s, task.ID); got.Status != StatusPending {
+		t.Fatalf("task status after the failed report = %q, want %q", got.Status, StatusPending)
+	}
 
 	// A run without artifacts is still fine: only artifacts need the
 	// backend.
-	if _, err := s.UpsertTestRun(&RunInput{EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit}); err != nil {
-		t.Fatalf("artifact-free upsert: %v", err)
+	if _, err := s.FinishAttempt(task.ID, AttemptResult{Status: StatusPassed}); err != nil {
+		t.Fatalf("artifact-free report: %v", err)
 	}
 }
 
@@ -198,10 +284,9 @@ func TestArtifactWriteWithoutObjectStorageFails(t *testing.T) {
 func TestLegacyInlineArtifactIsStillReadable(t *testing.T) {
 	s, _ := newTestStoreWithObjects(t)
 	env, commit := seedEnvAndCommit(t, s)
-	run, err := s.UpsertTestRun(&RunInput{EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
+	task, _ := unitRun(t, s, env, commit)
+	run := reportArtifacts(t, s, task, nil)
+
 	legacy := TestArtifact{RunID: run.ID, Kind: ArtifactKindResults, Name: "old.xml", Content: "<old/>"}
 	if err := s.DB.Create(&legacy).Error; err != nil {
 		t.Fatalf("insert legacy row: %v", err)
@@ -214,10 +299,9 @@ func TestLegacyInlineArtifactIsStillReadable(t *testing.T) {
 func TestMigrateInlineArtifacts(t *testing.T) {
 	s, objs := newTestStoreWithObjects(t)
 	env, commit := seedEnvAndCommit(t, s)
-	run, err := s.UpsertTestRun(&RunInput{EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
+	task, _ := unitRun(t, s, env, commit)
+	run := reportArtifacts(t, s, task, nil)
+
 	// Two legacy rows, one of them sharing a name with an artifact already
 	// in object storage.
 	fresh := TestArtifact{RunID: run.ID, Kind: ArtifactKindResults, Name: "new.xml", ObjectKey: "artifacts/runs/x/results/new.xml", Size: 3}
@@ -272,13 +356,11 @@ func TestMigrateInlineArtifacts(t *testing.T) {
 func TestSweepOrphanObjects(t *testing.T) {
 	s, objs := newTestStoreWithObjects(t)
 	env, commit := seedEnvAndCommit(t, s)
+	task, _ := unitRun(t, s, env, commit)
 
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit,
-		Artifacts: []ArtifactInput{{Kind: ArtifactKindResults, Name: "out.xml", Content: "x"}},
-	}); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
+	reportArtifacts(t, s, task, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "out.xml", Content: "x"},
+	})
 	keys := objs.Keys()
 	if len(keys) != 1 {
 		t.Fatalf("expected 1 object, got %v", keys)
@@ -293,10 +375,10 @@ func TestSweepOrphanObjects(t *testing.T) {
 		t.Fatal("a referenced object was swept")
 	}
 
-	// Delete the run and age the object past the grace period: now it is an
-	// orphan.
-	if err := s.DeleteTestRun(env.ID, commit.ID, RunKindUnit); err != nil {
-		t.Fatalf("delete run: %v", err)
+	// Delete the environment's tasks (and with them the run and its artifact
+	// rows) and age the object past the grace period: now it is an orphan.
+	if err := s.DeleteTasksForEnvironment(env.ID); err != nil {
+		t.Fatalf("delete environment tasks: %v", err)
 	}
 	objs.SetLastModified(keys[0], time.Now().Add(-2*artifactGracePeriod))
 	n, err := s.SweepOrphanObjects(context.Background())

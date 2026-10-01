@@ -1,3 +1,19 @@
+// ApiError is a failed request. It keeps the parsed response body: a dispatch
+// that fails part way down its work still reports what it managed to create
+// (e.g. the graphs already queued), and the caller can only show that by
+// reading the body of the error.
+export class ApiError extends Error {
+  readonly status: number
+  readonly body: unknown
+
+  constructor(message: string, status: number, body: unknown) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.body = body
+  }
+}
+
 // Minimal API client. Cookies (session token) are sent automatically since
 // /api is same-origin (via the Vite dev proxy or the Go server).
 // Dispatch endpoints (manual, manual-yaml, webhook replays) carry the
@@ -12,7 +28,11 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     | (T & { error?: string; dispatchError?: string })
     | null
   if (!res.ok) {
-    throw new Error(data?.error || data?.dispatchError || `Request failed (${res.status})`)
+    throw new ApiError(
+      data?.error || data?.dispatchError || `Request failed (${res.status})`,
+      res.status,
+      data,
+    )
   }
   return data as T
 }
@@ -382,51 +402,31 @@ export interface DashboardCommit {
   dispatchError?: string
 }
 
+// RunCell is one stage cell of the matrix: the state of that stage's task
+// node. runId is 0 when the node has no run of its own — the regression
+// node is a virtual container, so its counts are its cases' and its detail
+// is the task, not a run. taskId is always set, so the cell is clickable
+// either way.
 export interface RunCell {
   runId: number
   taskId?: number
-  // "skipped" marks the runner's recordSkippedRuns artifact: the stage
-  // never ran because an upstream task failed (stored status is failed,
-  // summary starts with "skipped:").
+  // "skipped" is a status of its own: the stage never ran because an
+  // upstream task failed, and its summary carries the reason.
   status: 'passed' | 'failed' | 'running' | 'pending' | 'skipped'
   total: number
   passed: number
   failed: number
+  skipped: number
+  // The node's summary line: the failure text when it failed, the skip
+  // reason when it was skipped.
+  summary?: string
   trigger?: number // the root graph's trigger: 1 = manual, 2 = manual yaml, 0/absent = webhook
   startedAt: string
   finishedAt: string
   error?: string
 }
 
-// --- Jobs ---
-
-export interface Job {
-  id: number
-  commitId: number
-  environmentId: number
-  tags: string
-  status: 'pending' | 'running' | 'done' | 'failed'
-  error: string
-  attempts: number
-  testInputRef: string
-  startedAt: string
-  finishedAt: string
-}
-
-export async function listJobs(limit = 20): Promise<Job[]> {
-  const res = await api<{ jobs: Job[] }>(`/api/jobs?limit=${limit}`)
-  return res.jobs
-}
-
-export async function triggerJobs(commitId: number): Promise<{
-  jobsCreated: number
-  entriesSkipped: number
-}> {
-  return api<{ jobsCreated: number; entriesSkipped: number }>('/api/jobs', {
-    method: 'POST',
-    body: JSON.stringify({ commitId }),
-  })
-}
+// --- Dispatch ---
 
 // ManualTestInput is the POST /api/jobs/manual body: one repository (empty
 // = the site-config default), an optional ref (empty = HEAD), the stage
@@ -449,6 +449,10 @@ export interface ManualTestRoot {
   environmentId: number
 }
 
+// triggerManualTest queues a manual test. The environments are dispatched one
+// after another, so a failure part way down the list is a 422 that still
+// reports the graphs created before it — the roots are in the ApiError body
+// (see api()), not in a return value.
 export async function triggerManualTest(
   input: ManualTestInput,
 ): Promise<{ roots: ManualTestRoot[] }> {
@@ -540,26 +544,6 @@ export async function getFullDashboard(
   return api<FullDashboard>(`/api/dashboard/full?commits=${commits}`)
 }
 
-// CaseResult is one case in a regression run's case list: a summary of the
-// case's own child TestRun — id doubles as the runId the UI navigates to.
-export interface CaseResult {
-  id: number
-  name: string
-  // Human label of the case (md-builder.yaml preset description); stored
-  // per trigger, so it always reflects the yaml at dispatch time.
-  description?: string
-  // "skipped" marks a case whose sub-task never ran (upstream failure);
-  // "pending"/"running" are dispatch-time placeholders — the case's stage
-  // sub-task has not reported yet.
-  status: 'passed' | 'failed' | 'skipped' | 'pending' | 'running'
-  message: string
-  durationMillis: number
-  // taskId: the stage sub-task that produced this case's log. The run detail
-  // page's log viewer follows the case the user picks; 0/absent means the
-  // case was reported without a task (no log to show).
-  taskId?: number
-}
-
 // TestArtifactRef references one stored result/log/series/file artifact of a
 // run; the content itself is fetched via getTestArtifact (or the download
 // endpoint, which serves the same bytes as a file).
@@ -578,36 +562,46 @@ export interface TestArtifactContent {
   content: string
 }
 
-export interface TestRunDetail {
+// Run is one stored attempt of one task — the unit of test history. A task
+// gets one run per dispatch and one more per retry, so a task's runs are its
+// attempts, newest first.
+export interface Run {
   id: number
-  kind: DashboardKind
-  // "pending"/"running" are dispatch-time placeholders: the run follows its
-  // stage sub-task live until the real outcome lands.
+  taskId: number
+  attempt: number
+  kind: TaskKind
+  // "pending"/"running" are live states: the attempt is open until the stage
+  // reports its outcome.
   status: 'passed' | 'failed' | 'skipped' | 'pending' | 'running'
+  // The task's summary line: the failure text, the skip reason, or what the
+  // stage printed for MD-BUILDER-SUMMARY.
   summary: string
-  // Human label of the stage (md-builder.yaml description: build/unit/
-  // regression stanza, or a preset for a case child run); stored per
-  // trigger, so it always reflects the yaml at dispatch time.
-  description?: string
-  // Child runs carry the case (preset) name and message; empty on
-  // top-level runs.
-  name: string
-  message: string
   total: number
   passed: number
   failed: number
   skipped: number
-  // Stage sub-task that produced the run (0 = external report); its log
-  // (stdout) is shown on the detail page.
-  taskId: number
-  // Root of the producing stage task (0 = external report) — the breadcrumb
-  // link to the graph page.
-  rootTaskId: number
-  // Parent regression run (0 = top-level run); a child's detail page links
-  // back up, parentName is the parent's preset name (usually null).
-  parentRunId: number
-  parentName: string | null
+  durationMillis: number
   environmentId: number
+  commitId: number
+  startedAt: string
+  finishedAt: string
+}
+
+// TestRunDetail is GET /api/test-runs/{id}: one attempt of one task, the
+// task's identity (the run itself only knows its task id) and every other
+// attempt of that same task. The pointer fields are null when the referenced
+// record was deleted.
+export interface TestRunDetail extends Run {
+  taskName: string | null
+  // Human label of the task from md-builder.yaml, when it set one.
+  taskDescription: string | null
+  // The node key: stable identity of the task inside its graph, so a retry
+  // after a yaml change still points at the same node.
+  taskKey: string | null
+  taskKind: TaskKind | null
+  // Root of the task's graph (0 = the task is its own root) — the graph-page
+  // link.
+  rootTaskId: number
   environmentName: string | null
   commitId: number
   commitSha: string | null
@@ -618,9 +612,9 @@ export interface TestRunDetail {
   // links to the commit on the hosting site.
   commitRepo: string | null
   commitRepoUrl: string | null
-  startedAt: string
-  finishedAt: string
-  cases: CaseResult[]
+  // Every attempt of this task, newest first. The current one is the run
+  // this page is about; the rest are its retry history.
+  attempts: Run[]
   artifacts: TestArtifactRef[]
 }
 
@@ -634,21 +628,64 @@ export async function getTestArtifact(id: number): Promise<TestArtifactContent> 
   return api<TestArtifactContent>(`/api/test-artifacts/${id}`)
 }
 
+// testArtifactDownloadUrl is one artifact's content as a file download (the
+// same bytes getTestArtifact returns). A plain link: the session cookie
+// authenticates it.
+export function testArtifactDownloadUrl(id: number): string {
+  return `/api/test-artifacts/${id}/download`
+}
+
+// runArtifactsZipUrl is one attempt's artifacts as a zip. The endpoint 404s
+// when the attempt produced none.
+export function runArtifactsZipUrl(runId: number): string {
+  return `/api/test-runs/${runId}/artifacts/zip`
+}
+
 // --- Tasks (runner component) ---
 
-export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+// TaskStatus is one vocabulary for tasks and runs: a task's status is its
+// latest attempt's (a virtual node's is rolled up from its children).
+export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped'
 
-export type TaskKind = 'root' | 'clone' | 'build' | 'unit' | 'regression'
+// TaskKind is a node's role in the graph: the virtual root per (commit,
+// environment), the three real stages, the virtual regression container and
+// the real case tasks under it.
+export type TaskKind =
+  | 'root'
+  | 'clone'
+  | 'build'
+  | 'unit'
+  | 'regression'
+  | 'regression_case'
 
-// SubTask is one node of a task graph (clone/build/unit/...). Test stages
-// carry runId: the recorded test run for the stage-detail link.
-export interface SubTask {
+// TaskNode is one node of a task graph. A real node (virtual false) is one
+// that has runs of its own; runId is its latest attempt's run, for the
+// detail link. A virtual node's counts are its children's.
+export interface TaskNode {
   id: number
+  // parentId nests the node in the tree (0 = directly under the root); the
+  // graph view draws the edges of dependsOn instead — the scheduling order.
+  parentId?: number
   kind: TaskKind
+  // nodeKey is the node's identity inside its graph, stable across
+  // dispatches: "build", "unit", "regression:<case>".
+  nodeKey: string
   name: string
+  description?: string
+  virtual?: boolean
+  // retired marks a node a later dispatch dropped from the yaml: it keeps
+  // its runs, logs and artifacts as history, and is never scheduled again.
+  retired?: boolean
   status: TaskStatus
-  error: string
+  summary?: string
+  error?: string
   dependsOn: number[]
+  total: number
+  passed: number
+  failed: number
+  skipped: number
+  // attempts counts the dispatches of a real task (its runs).
+  attempts: number
   runId?: number
   startedAt: string
   finishedAt: string
@@ -674,15 +711,26 @@ export interface TaskEnvironment {
   enabled: boolean
 }
 
-// TaskDetail is GET /api/tasks/{id}: the task plus, for a root, its
-// sub-tasks and commit/environment context.
+// TaskDetail is GET /api/tasks/{id}: the task itself (root or node), its
+// runs, and — for a root — the graph's nodes: the current ones and the
+// retired ones a later dispatch dropped.
 export interface TaskDetail {
   id: number
   rootId: number
+  parentId?: number
   kind: TaskKind
+  nodeKey: string
   name: string
+  description?: string
+  virtual?: boolean
+  retired?: boolean
   status: TaskStatus
-  error: string
+  summary?: string
+  error?: string
+  total: number
+  passed: number
+  failed: number
+  skipped: number
   attempts: number
   commitId: number
   environmentId: number
@@ -690,17 +738,23 @@ export interface TaskDetail {
   trigger?: number // 1 = manual, 2 = manual yaml, 0/absent = webhook
   startedAt: string
   finishedAt: string
-  subTasks?: SubTask[]
+  // runs: a real task's attempts, newest first.
+  runs?: Run[]
+  // subTasks: a root's current nodes (the graph). retiredTasks: the history.
+  subTasks?: TaskNode[]
+  retiredTasks?: TaskNode[]
   commit?: TaskCommit | null
   environment?: TaskEnvironment | null
-  // regressionRunId: the stage-wide regression run of a root. Each case
-  // sub-task carries its own runId (its case run); the graph's derived
-  // "reg test" node opens this one instead.
-  regressionRunId?: number
 }
 
 export async function getTask(id: number): Promise<TaskDetail> {
   return api<TaskDetail>(`/api/tasks/${id}`)
+}
+
+// getTaskRuns lists a real task's attempts, newest first.
+export async function getTaskRuns(id: number): Promise<Run[]> {
+  const res = await api<{ runs: Run[] }>(`/api/tasks/${id}/runs`)
+  return res.runs ?? []
 }
 
 // LogChunk is one stored chunk of a task's incremental log.
@@ -710,25 +764,42 @@ export interface LogChunk {
 }
 
 export interface TaskLogs {
+  // attempt is the attempt the chunks come from: the task's current one
+  // unless the caller asked for another (a retry's log stays readable).
+  attempt: number
   chunks: LogChunk[]
   lastSeq: number
 }
 
 // getTaskLogs returns log chunks after the given sequence (0 = from the
-// beginning) — poll with the lastSeq to follow a running task.
+// beginning) — poll with the lastSeq to follow a running task. attempt
+// selects one of the task's attempts; omit it for the current one.
 export async function getTaskLogs(
   id: number,
   after = 0,
+  attempt?: number,
 ): Promise<TaskLogs> {
-  return api<TaskLogs>(`/api/tasks/${id}/log?after=${after}`)
+  const q = new URLSearchParams({ after: String(after) })
+  if (attempt !== undefined) q.set('attempt', String(attempt))
+  return api<TaskLogs>(`/api/tasks/${id}/log?${q}`)
 }
 
-// taskLogDownloadUrl is the task's whole log as a downloadable text file. The
-// viewer follows the stream incrementally and keeps only its tail, so the
+// taskLogDownloadUrl is one attempt's whole log as a downloadable text file.
+// The viewer follows the stream incrementally and keeps only its tail, so the
 // file is assembled server-side and fetched by the browser itself (a plain
-// link — the session cookie authenticates it).
-export function taskLogDownloadUrl(id: number): string {
-  return `/api/tasks/${id}/log/download`
+// link — the session cookie authenticates it). The filename gains an
+// -attempt-N suffix when the caller asks for an attempt other than the
+// current one.
+export function taskLogDownloadUrl(id: number, attempt?: number): string {
+  const q = attempt === undefined ? '' : `?attempt=${attempt}`
+  return `/api/tasks/${id}/log/download${q}`
+}
+
+// taskArtifactsZipUrl is a task's artifacts — its own and every node's below
+// it, each under a directory named from that node — as a zip. The endpoint
+// 404s when the subtree stored none.
+export function taskArtifactsZipUrl(id: number): string {
+  return `/api/tasks/${id}/artifacts/zip`
 }
 
 // ServerHealth is the unauthenticated health probe; version is the served

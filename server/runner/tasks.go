@@ -77,7 +77,7 @@ func (s *Service) DispatchForRef(ctx context.Context, ref string) (store.Commit,
 	}
 
 	creds := &GitCredentials{AccessToken: cfg.AccessToken}
-	sha, err := s.resolveRef(ctx, repo, ref, creds)
+	sha, err := s.resolveRefBounded(ctx, repo, ref, creds)
 	if err != nil {
 		return commit, DispatchResult{Err: err}
 	}
@@ -152,7 +152,7 @@ func (s *Service) dispatchYAML(ctx context.Context, commit *store.Commit, trigge
 			res.EntriesSkipped++
 			continue
 		}
-		if err := s.createGraph(commit, &entry, env, cfg, trigger); err != nil {
+		if err := s.createGraph(commit, &entry, env, trigger); err != nil {
 			res.Err = err
 			return res
 		}
@@ -230,9 +230,11 @@ func (s *Service) DispatchManual(in ManualDispatch) (roots []*store.Task, err er
 	}
 
 	// The caller chooses repo; the site's token is only attached when that
-	// repository is on the configured host (see CredsForRepo).
+	// repository is on the configured host (see CredsForRepo). The lookup is
+	// bounded like the matrix read: the repository is the caller's, and this
+	// runs on a request handler's goroutine.
 	creds := CredsForRepo(cfg.CodeRepo, repo, cfg.AccessToken)
-	sha, err := s.resolveRef(context.Background(), repo, in.Ref, creds)
+	sha, err := s.resolveRefBounded(context.Background(), repo, in.Ref, creds)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +266,7 @@ func (s *Service) DispatchManual(in ManualDispatch) (roots []*store.Task, err er
 		if !env.Enabled {
 			return roots, fmt.Errorf("environment %s is disabled", env.Name)
 		}
-		root, err := s.createManualGraph(commit, env, cfg, in)
+		root, err := s.createManualGraph(commit, env, in)
 		if err != nil {
 			return roots, err
 		}
@@ -277,9 +279,9 @@ func (s *Service) DispatchManual(in ManualDispatch) (roots []*store.Task, err er
 // manual stage commands: build, then the requested test stages — an empty
 // stage command means that stage is skipped (the graph omits its node).
 // The manual regression command becomes a single case named "regression".
-// An existing root for the (commit, environment) pair is redeployed,
+// An existing root for the (commit, environment) pair is re-dispatched,
 // mirroring the webhook requeue path.
-func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnvironment, cfg *store.SiteConfig, in ManualDispatch) (*store.Task, error) {
+func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnvironment, in ManualDispatch) (*store.Task, error) {
 	entry := MergedEntry{
 		Tags:    env.TagList(),
 		Timeout: DefaultTimeoutSeconds,
@@ -303,119 +305,38 @@ func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnviron
 		}}
 	}
 
-	graph, err := BuildTaskGraph(&entry)
-	if err != nil {
-		return nil, err
-	}
-	entryJSON, err := json.Marshal(RootConfig{Entry: entry})
-	if err != nil {
-		return nil, err
-	}
-
-	root, err := s.Store.FindRootTaskByCommitEnv(commit.ID, env.ID)
-	if err != nil && err != store.ErrTaskNotFound {
-		return nil, err
-	}
-	if err == nil {
-		// Requeue: refresh the snapshot, drop the old graph, reset state.
-		root.Config = string(entryJSON)
-		root.Tags = SortedTagString(entry.Tags)
-		if err := s.Store.RedeployRootTask(root); err != nil {
-			return nil, err
-		}
-		if err := s.Store.UpdateTaskConfig(root.ID, root.Config, root.Tags); err != nil {
-			return nil, err
-		}
-		if err := s.dropStaleStageRuns(root, graph); err != nil {
-			return nil, err
-		}
-		// The regression run aggregates case rows of the OLD dispatch; the
-		// rebuilt graph re-records its own cases, so clear the stale ones.
-		if err := s.Store.ResetRegressionRun(root.EnvironmentID, root.CommitID); err != nil {
-			return nil, err
-		}
-		return root, s.createSubTasks(root, graph)
-	}
-
-	root = &store.Task{
-		Kind:          store.TaskKindRoot,
-		Name:          "test " + shortSHA(commit.SHA),
-		CommitID:      commit.ID,
-		EnvironmentID: env.ID,
-		Tags:          SortedTagString(entry.Tags),
-		Trigger:       store.TaskTriggerManual,
-		Config:        string(entryJSON),
-	}
-	if err := s.Store.CreateTask(root); err != nil {
-		return nil, err
-	}
-	return root, s.createSubTasks(root, graph)
+	return s.persistGraph(commit, &entry, env, store.TaskTriggerManual)
 }
 
-// dropStaleStageRuns removes the recorded test runs of stages the rebuilt
-// graph no longer contains (e.g. a re-dispatch without the unit stage):
-// without this, the matrix would keep showing the dropped stage's stale
-// result forever.
-func (s *Service) dropStaleStageRuns(root *store.Task, graph []GraphTask) error {
-	present := map[string]bool{}
-	for i := range graph {
-		switch graph[i].Kind {
-		case store.TaskKindBuild, store.TaskKindUnit, store.TaskKindRegression:
-			present[graph[i].Kind] = true
-		}
-	}
-	for _, kind := range []string{store.TaskKindBuild, store.TaskKindUnit, store.TaskKindRegression} {
-		if present[kind] {
-			continue
-		}
-		if err := s.Store.DeleteTestRun(root.EnvironmentID, root.CommitID, kind); err != nil {
-			return fmt.Errorf("drop stale %s run: %w", kind, err)
-		}
-	}
-	return nil
+// createGraph persists one yaml entry's task graph (root + nodes) for the
+// (commit, environment) pair with the given trigger source.
+func (s *Service) createGraph(commit *store.Commit, entry *MergedEntry, env *store.TestEnvironment, trigger int) error {
+	_, err := s.persistGraph(commit, entry, env, trigger)
+	return err
 }
 
-// createGraph persists one entry's task graph (root + sub-tasks) for the
-// (commit, environment) pair with the given trigger source, requeueing an
-// existing root (delete old sub-tasks, rebuild from the fresh snapshot).
-func (s *Service) createGraph(commit *store.Commit, entry *MergedEntry, env *store.TestEnvironment, cfg *store.SiteConfig, trigger int) error {
+// persistGraph turns one merged entry into the task graph of one (commit,
+// environment) pair and persists it.
+//
+// A re-dispatch reuses the pair's root and matches nodes by node key: the
+// stages and cases the entry still defines are refreshed and re-armed (a new
+// attempt each), the ones it no longer defines are retired with their runs,
+// logs and artifacts kept as history (store.UpsertTaskGraph). Nothing is
+// deleted, and every real node comes out of it with the attempt's pending
+// run, so the matrix cell and the run page exist from dispatch time on.
+func (s *Service) persistGraph(commit *store.Commit, entry *MergedEntry, env *store.TestEnvironment, trigger int) (*store.Task, error) {
 	graph, err := BuildTaskGraph(entry)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
 	entryJSON, err := json.Marshal(RootConfig{Entry: *entry})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	root, err := s.Store.FindRootTaskByCommitEnv(commit.ID, env.ID)
-	if err != nil && err != store.ErrTaskNotFound {
-		return err
-	}
-	if err == nil {
-		// Requeue: refresh the snapshot, drop the old graph, reset state.
-		root.Config = string(entryJSON)
-		root.Tags = SortedTagString(entry.Tags)
-		if err := s.Store.RedeployRootTask(root); err != nil {
-			return err
-		}
-		if err := s.Store.UpdateTaskConfig(root.ID, root.Config, root.Tags); err != nil {
-			return err
-		}
-		if err := s.dropStaleStageRuns(root, graph); err != nil {
-			return err
-		}
-		// The regression run aggregates case rows of the OLD dispatch; the
-		// rebuilt graph re-records its own cases, so clear the stale ones.
-		if err := s.Store.ResetRegressionRun(root.EnvironmentID, root.CommitID); err != nil {
-			return err
-		}
-		return s.createSubTasks(root, graph)
-	}
-
-	root = &store.Task{
+	root := &store.Task{
 		Kind:          store.TaskKindRoot,
+		NodeKey:       store.TaskKindRoot,
 		Name:          "test " + shortSHA(commit.SHA),
 		CommitID:      commit.ID,
 		EnvironmentID: env.ID,
@@ -423,127 +344,25 @@ func (s *Service) createGraph(commit *store.Commit, entry *MergedEntry, env *sto
 		Trigger:       trigger,
 		Config:        string(entryJSON),
 	}
-	// A concurrent dispatch may have created the root meanwhile; treat a
-	// unique-style failure by requeueing instead.
-	if err := s.Store.CreateTask(root); err != nil {
-		existing, ferr := s.Store.FindRootTaskByCommitEnv(commit.ID, env.ID)
-		if ferr != nil {
-			return err
-		}
-		root = existing
-		root.Config = string(entryJSON)
-		root.Tags = SortedTagString(entry.Tags)
-		if err := s.Store.RedeployRootTask(root); err != nil {
-			return err
-		}
-		if err := s.Store.UpdateTaskConfig(root.ID, root.Config, root.Tags); err != nil {
-			return err
-		}
-		if err := s.Store.ResetRegressionRun(root.EnvironmentID, root.CommitID); err != nil {
-			return err
+	nodes := make([]store.TaskNode, len(graph))
+	for i := range graph {
+		g := graph[i]
+		nodes[i] = store.TaskNode{
+			Task: &store.Task{
+				Kind:        g.Kind,
+				NodeKey:     g.NodeKey,
+				Name:        g.Name,
+				Description: g.Description,
+				Config:      g.Config,
+			},
+			Deps:      g.Deps,
+			ParentKey: g.ParentKey,
 		}
 	}
-	return s.createSubTasks(root, graph)
-}
-
-// createSubTasks materializes the graph nodes under the root and seeds a
-// placeholder run per test stage so the dashboard cell and the run detail
-// page exist from dispatch time on (status pending/running, following the
-// stage live — the real outcome later replaces the placeholder).
-func (s *Service) createSubTasks(root *store.Task, graph []GraphTask) error {
-	subs := make([]*store.Task, len(graph))
-	deps := make([][]int64, len(graph))
-	for i, g := range graph {
-		subs[i] = &store.Task{
-			Kind:          g.Kind,
-			Name:          g.Name,
-			CommitID:      root.CommitID,
-			EnvironmentID: root.EnvironmentID,
-			Config:        g.Config,
-		}
-		deps[i] = g.Deps
+	if _, err := s.Store.UpsertTaskGraph(root, nodes); err != nil {
+		return nil, err
 	}
-	stored, err := store.CreateTaskGraph(s.Store, root, subs, deps)
-	if err != nil {
-		return err
-	}
-	return s.seedStageRuns(root, stored[1:])
-}
-
-// seedStageRuns writes the dispatch-time placeholder runs for the graph's
-// test stages: build/unit get one pending top-level run; regression gets a
-// pending parent with one pending child run per case (the detail page lists
-// every case from the start). TaskID links each run to the FIRST sub-task of
-// its kind; the stage overwrites it (the case runs update their own child)
-// when it executes. A regression child is linked to its OWN sub-task, so its
-// status and log follow that task as it is scheduled.
-func (s *Service) seedStageRuns(root *store.Task, subs []*store.Task) error {
-	// The regression parent run's description lives on the root snapshot
-	// (the merged entry), not on the per-case sub-tasks.
-	var rootCfg RootConfig
-	if err := json.Unmarshal([]byte(root.Config), &rootCfg); err != nil {
-		return fmt.Errorf("seed runs: parse root config: %w", err)
-	}
-
-	// Group by run kind: regression expands to several sub-tasks (one per
-	// case) that all aggregate under ONE parent run.
-	taskID := map[string]int64{}
-	desc := map[string]string{store.RunKindRegression: rootCfg.Entry.RegressionDescription}
-	cases := map[string][]store.CaseInput{}
-	for _, sub := range subs {
-		var kind string
-		switch sub.Kind {
-		case store.TaskKindBuild:
-			kind = store.RunKindBuild
-			var stage BuildStageConfig
-			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
-				return fmt.Errorf("seed build run: %w", err)
-			}
-			desc[kind] = stage.Description
-		case store.TaskKindUnit:
-			kind = store.RunKindUnit
-			var stage StageConfig
-			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
-				return fmt.Errorf("seed unit run: %w", err)
-			}
-			desc[kind] = stage.Description
-		case store.TaskKindRegression:
-			kind = store.RunKindRegression
-			var stage CaseStageConfig
-			if err := json.Unmarshal([]byte(sub.Config), &stage); err != nil {
-				return fmt.Errorf("seed regression run: %w", err)
-			}
-			// TaskID ties the case's child run to its own sub-task: the
-			// child's status follows that task (pending until the scheduler
-			// claims it — MarkCaseRunRunning), and the case's detail page
-			// reads its log by it.
-			cases[kind] = append(cases[kind], store.CaseInput{
-				Name:        stage.Case,
-				Description: stage.Description,
-				TaskID:      sub.ID,
-			})
-		default:
-			continue // clone has no run
-		}
-		if _, ok := taskID[kind]; !ok {
-			taskID[kind] = sub.ID // first sub-task of the kind
-		}
-	}
-	for kind, id := range taskID {
-		_, err := s.Store.UpsertPlaceholderRun(&store.RunInput{
-			EnvironmentID: root.EnvironmentID,
-			CommitID:      root.CommitID,
-			Kind:          kind,
-			TaskID:        id,
-			Status:        store.StatusPending,
-			Description:   desc[kind],
-			Cases:         cases[kind],
-		})
-		if err != nil {
-			return fmt.Errorf("seed %s run: %w", kind, err)
-		}
-	}
-	return nil
+	return root, nil
 }
 
 // shortSHA abbreviates a commit id for display.

@@ -10,14 +10,14 @@ import (
 
 func TestLogWriterChunksBySize(t *testing.T) {
 	s := openTestStore(t)
-	lw := NewLogWriter(s, 42)
+	lw := NewLogWriter(s, logTask(42))
 
 	// One big write (≥ flushBytes) flushes immediately.
 	big := strings.Repeat("a", flushBytes+10)
 	if n, err := lw.Write([]byte(big)); err != nil || n != len(big) {
 		t.Fatalf("write: %d %v", n, err)
 	}
-	logs, err := s.ReadTaskLogs(42, 0)
+	logs, err := s.ReadTaskLogs(42, 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,12 +31,12 @@ func TestLogWriterChunksBySize(t *testing.T) {
 	// A small write stays buffered until Close.
 	small := "hello\n"
 	lw.Write([]byte(small))
-	logs, _ = s.ReadTaskLogs(42, 0)
+	logs, _ = s.ReadTaskLogs(42, 1, 0)
 	if len(logs) != 1 {
 		t.Fatalf("small write should stay buffered, got %d chunks", len(logs))
 	}
 	lw.Close()
-	logs, _ = s.ReadTaskLogs(42, 0)
+	logs, _ = s.ReadTaskLogs(42, 1, 0)
 	if len(logs) != 2 {
 		t.Fatalf("Close should flush the remainder, got %d chunks", len(logs))
 	}
@@ -51,7 +51,7 @@ func TestLogWriterChunksBySize(t *testing.T) {
 
 func TestLogWriterCapsHugeOutput(t *testing.T) {
 	s := openTestStore(t)
-	lw := NewLogWriter(s, 7)
+	lw := NewLogWriter(s, logTask(7))
 
 	// Far more than maxLogBytes: everything past the cap is dropped.
 	payload := strings.Repeat("x", 1<<20) // 1 MiB
@@ -62,7 +62,7 @@ func TestLogWriterCapsHugeOutput(t *testing.T) {
 	}
 	lw.Close()
 
-	logs, _ := s.ReadTaskLogs(7, 0)
+	logs, _ := s.ReadTaskLogs(7, 1, 0)
 	var total int
 	var last string
 	for _, l := range logs {
@@ -79,7 +79,7 @@ func TestLogWriterCapsHugeOutput(t *testing.T) {
 
 func TestLogWriterAfterCloseDrops(t *testing.T) {
 	s := openTestStore(t)
-	lw := NewLogWriter(s, 9)
+	lw := NewLogWriter(s, logTask(9))
 	lw.Write([]byte("before close\n"))
 	lw.Close()
 
@@ -87,7 +87,7 @@ func TestLogWriterAfterCloseDrops(t *testing.T) {
 	lw.Write([]byte("after close\n"))
 	lw.Close() // double close is a no-op
 
-	logs, _ := s.ReadTaskLogs(9, 0)
+	logs, _ := s.ReadTaskLogs(9, 1, 0)
 	var all string
 	for _, l := range logs {
 		all += l.Content
@@ -98,6 +98,13 @@ func TestLogWriterAfterCloseDrops(t *testing.T) {
 	if !strings.Contains(all, "before close") {
 		t.Errorf("pre-close output missing: %q", all)
 	}
+}
+
+// logTask is the minimal task a LogWriter needs: its ID (the log's owner) and
+// its current attempt (the sequence it appends to). The log tests need no task
+// rows — task_logs is keyed by task ID, not by a foreign key.
+func logTask(id int64) *store.Task {
+	return &store.Task{ID: id, Attempts: 1}
 }
 
 // openTestStore is a plain store fixture for the log tests (no task rows
@@ -124,7 +131,7 @@ func min(a, b int) int {
 // environment must not persist the site's secrets.
 func TestLogWriterRedactsSecrets(t *testing.T) {
 	s := openTestStore(t)
-	lw := NewLogWriter(s, 43)
+	lw := NewLogWriter(s, logTask(43))
 	lw.SetSecrets("glpat-tok", "s3cr't-value", "  ") // last one is blank: ignored
 
 	out := "env: MD_SECRET_TOKEN=s3cr't-value\nauth: glpat-tok\nplain: untouched\n"
@@ -133,7 +140,7 @@ func TestLogWriterRedactsSecrets(t *testing.T) {
 	}
 	lw.Close()
 
-	logs, err := s.ReadTaskLogs(43, 0)
+	logs, err := s.ReadTaskLogs(43, 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,10 +157,10 @@ func TestLogWriterRedactsSecrets(t *testing.T) {
 
 	// Before SetSecrets, output passes through untouched (failEarly's
 	// pre-redacted messages, plain clone output).
-	lw2 := NewLogWriter(s, 44)
+	lw2 := NewLogWriter(s, logTask(44))
 	lw2.Write([]byte("raw token glpat-tok here\n"))
 	lw2.Close()
-	logs, _ = s.ReadTaskLogs(44, 0)
+	logs, _ = s.ReadTaskLogs(44, 1, 0)
 	all = ""
 	for _, l := range logs {
 		all += l.Content

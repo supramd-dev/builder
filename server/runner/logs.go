@@ -31,9 +31,11 @@ const (
 // that contains the site's secrets (the access token, the MD_SECRET_TOKEN
 // value) is replaced with REDACTED before it is stored.
 type LogWriter struct {
-	store  *store.Store
-	taskID int64
-	redact func(string) string // built once at construction; nil = nothing to scrub
+	store   *store.Store
+	taskID  int64
+	attempt int
+	runID   int64
+	redact  func(string) string // built once at construction; nil = nothing to scrub
 
 	mu        sync.Mutex
 	buf       []byte
@@ -45,10 +47,19 @@ type LogWriter struct {
 	lastFlush time.Time
 }
 
-// NewLogWriter returns a LogWriter appending to the task's log. A background
-// timer flushes partial buffers every flushInterval until Close.
-func NewLogWriter(s *store.Store, taskID int64) *LogWriter {
-	lw := &LogWriter{store: s, taskID: taskID, lastFlush: time.Now()}
+// NewLogWriter returns a LogWriter appending to a task's CURRENT attempt, so a
+// retried task (or one re-executed after a restart, which keeps its attempt —
+// see store.ResetStaleRunning) writes after the output already stored and
+// never duplicates a sequence number. A background timer flushes partial
+// buffers every flushInterval until Close.
+func NewLogWriter(s *store.Store, task *store.Task) *LogWriter {
+	lw := &LogWriter{store: s, taskID: task.ID, attempt: task.Attempts, lastFlush: time.Now()}
+	if run, err := s.FindTaskRun(task.ID, task.Attempts); err == nil {
+		lw.runID = run.ID
+	}
+	if max, err := s.MaxTaskLogSeq(task.ID, task.Attempts); err == nil {
+		lw.seq = max
+	}
 	lw.timer = time.AfterFunc(flushInterval, lw.tick)
 	return lw
 }
@@ -145,11 +156,14 @@ func (lw *LogWriter) flushLocked() {
 	content := string(lw.buf)
 	lw.buf = lw.buf[:0]
 	lw.seq++
-	if err := lw.store.AppendTaskLog(lw.taskID, lw.seq, content); err != nil {
+	if err := lw.store.AppendTaskLog(&store.TaskLog{
+		TaskID: lw.taskID, Attempt: lw.attempt, RunID: lw.runID,
+		Seq: lw.seq, Content: content,
+	}); err != nil {
 		// A failed chunk is dropped (with its sequence number) — the next
 		// chunk still lands; log persistence must never kill a task.
 		lw.seq--
-		log.Printf("tasklog: append task %d seq %d: %v", lw.taskID, lw.seq+1, err)
+		log.Printf("tasklog: append task %d attempt %d seq %d: %v", lw.taskID, lw.attempt, lw.seq+1, err)
 		return
 	}
 	lw.lastFlush = time.Now()

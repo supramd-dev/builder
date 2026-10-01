@@ -95,7 +95,7 @@ matrix:
 	if roots[0].Trigger != store.TaskTriggerManualYAML {
 		t.Errorf("trigger: %d, want %d", roots[0].Trigger, store.TaskTriggerManualYAML)
 	}
-	subs, err := s.ListSubTasks(roots[0].ID)
+	subs, err := s.ListActiveNodes(roots[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ matrix:
 	for _, sub := range subs {
 		kinds = append(kinds, sub.Kind)
 	}
-	if len(subs) != 4 || // clone, build (from yaml build.command), unit, regression
+	if len(subs) != 5 || // clone, build (from yaml build.command), unit, regression stage, one case
 		!strings.Contains(strings.Join(kinds, ","), store.TaskKindUnit) {
 		t.Errorf("sub-tasks wrong: %v", kinds)
 	}
@@ -188,42 +188,44 @@ matrix:
 		t.Fatalf("tasks created: %d, want 1", res.TasksCreated)
 	}
 
-	// The seeded placeholder runs carry the descriptions.
-	runs, err := s.FindRunsByCommits(store.RunKindBuild, []int64{env.ID}, []int64{commit.ID})
+	// The dispatched nodes carry the descriptions: build, unit, the virtual
+	// regression container and the case node under it.
+	root, err := s.FindRootTaskByCommitEnv(commit.ID, env.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	build := runs[store.EnvCommit{Env: env.ID, Commit: commit.ID}]
-	if build.Description != "Build the code with gcc and cmake" {
-		t.Errorf("build run description: %q", build.Description)
-	}
-	if build.Status != store.StatusPending {
-		t.Errorf("build run should be the pending placeholder: %q", build.Status)
-	}
-	runs, err = s.FindRunsByCommits(store.RunKindUnit, []int64{env.ID}, []int64{commit.ID})
+	nodes, err := s.ListActiveNodes(root.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	unit := runs[store.EnvCommit{Env: env.ID, Commit: commit.ID}]
-	if unit.Description != "Run unit tests" {
-		t.Errorf("unit run description: %q", unit.Description)
+	byKey := make(map[string]*store.Task, len(nodes))
+	for i := range nodes {
+		byKey[nodes[i].NodeKey] = &nodes[i]
 	}
-	runs, err = s.FindRunsByCommits(store.RunKindRegression, []int64{env.ID}, []int64{commit.ID})
-	if err != nil {
-		t.Fatal(err)
+	build := byKey[store.TaskKindBuild]
+	if build == nil || build.Description != "Build the code with gcc and cmake" {
+		t.Errorf("build node description: %+v", build)
 	}
-	reg := runs[store.EnvCommit{Env: env.ID, Commit: commit.ID}]
-	if reg.Description != "Run regression tests" {
-		t.Errorf("regression parent description: %q", reg.Description)
+	if build != nil && build.Status != store.StatusPending {
+		t.Errorf("build node should be the pending placeholder: %q", build.Status)
 	}
-	children, err := s.ListChildRuns(reg.ID)
+	unit := byKey[store.TaskKindUnit]
+	if unit == nil || unit.Description != "Run unit tests" {
+		t.Errorf("unit node description: %+v", unit)
+	}
+	reg := byKey[RegressionStageKey]
+	if reg == nil || reg.Description != "Run regression tests" {
+		t.Errorf("regression node description: %+v", reg)
+	}
+	children, err := s.ListChildren(reg.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(children) != 1 {
 		t.Fatalf("want 1 case child, got %d", len(children))
 	}
-	if children[0].Name != "simple" || children[0].Description != "Simple regression test" {
+	simple := RegressionCaseKey("simple")
+	if children[0].NodeKey != simple || children[0].Description != "Simple regression test" {
 		t.Errorf("case child: %+v", children[0])
 	}
 	if children[0].Status != store.StatusPending {

@@ -163,7 +163,7 @@ matrix:
 				!strings.Contains(script, "timeout 3600 bash -c 'ctest -L unit'") {
 				t.Errorf("unit script wrong:\n%s", script)
 			}
-		case "regression":
+		case "regression_case": // the case node, not the virtual container
 			var cc CaseStageConfig
 			if err := json.Unmarshal([]byte(sub.Config), &cc); err != nil {
 				t.Fatal(err)

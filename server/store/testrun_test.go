@@ -4,8 +4,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	"gorm.io/gorm"
 )
 
 func seedEnvAndCommit(t *testing.T, s *Store) (*TestEnvironment, *Commit) {
@@ -25,389 +23,375 @@ func seedEnvAndCommit(t *testing.T, s *Store) (*TestEnvironment, *Commit) {
 	return env, commit
 }
 
-func TestUpsertTestRunCreates(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
-
-	in := &RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindRegression,
-		Cases: []CaseInput{
-			{Name: "lj-argon-nve", Status: StatusPassed, Message: "max rel err"},
-			{Name: "water-tip4p-npt", Status: StatusFailed, Message: "drift above threshold"},
-			{Name: "argon-liquid-nvt", Status: StatusPassed},
-		},
+// caseStageGraph dispatches a regression-only graph — a clone, the virtual
+// regression stage and one real task per named case — and returns the stored
+// nodes. The cases hang off the clone (a container can never gate its
+// children), so a test that wants to claim one reports the clone first.
+//
+// It is the shape the run-level tests work on: every case is a task of its
+// own with its own attempt, its own run and its own log, and the stage is the
+// container that rolls those up — which is what the old per-case child runs
+// used to model in one row.
+func caseStageGraph(t *testing.T, s *Store, name string, names ...string) (root, clone, stage *Task, cases []*Task) {
+	t.Helper()
+	env, commit := newGraphFixture(t, s, name)
+	nodes := []TaskNode{
+		{Task: &Task{Kind: TaskKindClone, NodeKey: TaskKindClone, Name: "clone repositories"}},
+		{Task: &Task{Kind: TaskKindRegressionStage, NodeKey: TaskKindRegressionStage, Name: "regression"}},
 	}
-	run, err := s.UpsertTestRun(in)
+	for _, c := range names {
+		nodes = append(nodes, TaskNode{
+			Task:      &Task{Kind: TaskKindRegressionCase, NodeKey: caseNodeKey(c), Name: "regression: " + c},
+			Deps:      []int64{TaskSubPlaceholderBase + 0},
+			ParentKey: TaskKindRegressionStage,
+		})
+	}
+	stored, err := s.UpsertTaskGraph(graphRoot(commit.ID, env.ID), nodes)
 	if err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf("dispatch graph: %v", err)
 	}
-	if run.ID == 0 {
-		t.Fatal("expected run ID set")
-	}
-	if run.Total != 3 || run.Passed != 2 || run.Failed != 1 {
-		t.Fatalf("unexpected counts: %+v", run)
-	}
-	if run.Status != StatusFailed {
-		t.Fatalf("expected failed status, got %q", run.Status)
-	}
+	cases = append(cases, stored[3:]...)
+	return stored[0], stored[1], stored[2], cases
+}
 
-	// Each case became a child run in submission order.
-	children, err := s.ListChildRuns(run.ID)
+// caseRun returns the run of a case's current attempt, failing the test when
+// the node has none.
+func caseRun(t *testing.T, s *Store, task *Task) *TestRun {
+	t.Helper()
+	run, err := s.FindTaskRun(task.ID, task.Attempts)
 	if err != nil {
-		t.Fatalf("list children: %v", err)
+		t.Fatalf("run of %s (attempt %d): %v", task.NodeKey, task.Attempts, err)
 	}
-	if len(children) != 3 {
-		t.Fatalf("expected 3 child runs, got %d", len(children))
-	}
-	if children[0].Name != "lj-argon-nve" || children[0].Position != 0 {
-		t.Fatalf("unexpected first child: %+v", children[0])
-	}
-	if children[1].Position != 1 || children[2].Position != 2 {
-		t.Fatal("children not in submission order")
-	}
-	if children[0].Message != "max rel err" || children[1].Status != StatusFailed {
-		t.Fatalf("child fields not carried over: %+v", children)
-	}
-	for _, c := range children {
-		if c.ParentID != run.ID || c.Kind != RunKindRegression {
-			t.Fatalf("child should link its parent run: %+v", c)
+	return run
+}
+
+// A regression case's report lands on the case's own run, and the virtual
+// stage above it aggregates the cases: the container is the matrix cell, and
+// its counts are the cases' tallies, so the dashboard reads one row per
+// stage without joining runs.
+func TestFinishAttemptRollsCaseRunsUp(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, _, stage, cases := caseStageGraph(t, s, "rollup",
+		"lj-argon-nve", "water-tip4p-npt", "argon-liquid-nvt")
+
+	reportTask(t, s, cases[0].ID, StatusPassed, "max rel err 2e-9")
+	reportTask(t, s, cases[1].ID, StatusFailed, "drift above threshold")
+	reportTask(t, s, cases[2].ID, StatusPassed, "")
+
+	// Each case reports one unit of its own: one attempt, one run, its own
+	// outcome.
+	for i, want := range []struct {
+		status string
+		passed int
+	}{
+		{StatusPassed, 1}, {StatusFailed, 0}, {StatusPassed, 1},
+	} {
+		task := reloadTask(t, s, cases[i].ID)
+		if task.Status != want.status || task.Attempts != 1 {
+			t.Errorf("case %d after its report: %+v", i, task)
 		}
-		if c.Total != 1 || c.Passed != boolInt(c.Status == StatusPassed) {
-			t.Fatalf("child counts should reflect its own status: %+v", c)
+		run := caseRun(t, s, task)
+		if run.Attempt != 1 || run.Status != want.status || run.Total != 1 || run.Passed != want.passed {
+			t.Errorf("case %d run: %+v", i, run)
+		}
+		if run.Kind != RunKindRegression || run.TaskID != task.ID {
+			t.Errorf("case %d run should be this case's regression run: %+v", i, run)
+		}
+		if run.EnvironmentID == 0 || run.CommitID == 0 {
+			t.Errorf("a run carries its graph's env/commit so the matrix needs no join: %+v", run)
 		}
 	}
-}
 
-// Descriptions are stored on every trigger (they may change between
-// dispatches): the placeholder seed carries them, execution reports refresh
-// them, and an empty report description keeps the stored one.
-func TestRunDescriptionPersistence(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
-
-	// Dispatch-time placeholder: top-level and per-case descriptions.
-	run, err := s.UpsertPlaceholderRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindRegression,
-		TaskID:        7,
-		Status:        StatusPending,
-		Description:   "Run regression tests",
-		Cases: []CaseInput{
-			{Name: "simple", Description: "Simple regression test"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("placeholder: %v", err)
+	// The stage is a container: three cases, two green, one red — and the
+	// failure is named, so the cell explains itself.
+	got := reloadTask(t, s, stage.ID)
+	if got.Total != 3 || got.Passed != 2 || got.Failed != 1 || got.Skipped != 0 {
+		t.Errorf("stage counts = %d/%d passed (%d failed): %+v", got.Passed, got.Total, got.Failed, got)
 	}
-	if run.Description != "Run regression tests" {
-		t.Errorf("placeholder description: %q", run.Description)
+	if got.Status != StatusFailed {
+		t.Errorf("stage status = %q, want %q", got.Status, StatusFailed)
 	}
-	children, err := s.ListChildRuns(run.ID)
-	if err != nil {
-		t.Fatalf("children: %v", err)
+	if !strings.Contains(got.Summary, "water-tip4p-npt") {
+		t.Errorf("stage summary should name the failed case, got %q", got.Summary)
 	}
-	if len(children) != 1 || children[0].Description != "Simple regression test" {
-		t.Errorf("case placeholder description: %+v", children)
+	// And the root above it follows.
+	if rootGot := reloadTask(t, s, root.ID); rootGot.Status != StatusFailed {
+		t.Errorf("root status = %q, want %q", rootGot.Status, StatusFailed)
 	}
-
-	// Execution report: UpsertCaseRun replaces the child with the case's
-	// (possibly changed) description.
-	if _, child, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		TaskID:        8,
-		Name:          "simple",
-		Description:   "Simple regression test (v2)",
-		Status:        StatusPassed,
-	}); err != nil {
-		t.Fatalf("case run: %v", err)
-	} else if child.Description != "Simple regression test (v2)" {
-		t.Errorf("case description not refreshed: %q", child.Description)
-	}
-
-	// A report WITHOUT a description keeps the stored one (skipped-stage
-	// paths and external reporters may not know it).
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindUnit,
-		Status:        StatusPassed,
-		Description:   "Run unit tests",
-	}); err != nil {
-		t.Fatalf("unit run: %v", err)
-	}
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindUnit,
-		Status:        StatusPassed,
-	}); err != nil {
-		t.Fatalf("unit re-run: %v", err)
-	}
-	runs, err := s.FindRunsByCommits(RunKindUnit, []int64{env.ID}, []int64{commit.ID})
-	if err != nil {
-		t.Fatalf("find runs: %v", err)
-	}
-	unit := runs[EnvCommit{Env: env.ID, Commit: commit.ID}]
-	if unit.Description != "Run unit tests" {
-		t.Errorf("empty report description should keep the stored one: %q", unit.Description)
-	}
-
-	// A re-dispatch placeholder overwrites with the fresh yaml description.
-	if _, err := s.UpsertPlaceholderRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindRegression,
-		TaskID:        9,
-		Status:        StatusPending,
-		Description:   "Run regression tests (new yaml)",
-	}); err != nil {
-		t.Fatalf("re-dispatch: %v", err)
-	}
-	again, err := s.GetTestRun(run.ID)
-	if err != nil {
-		t.Fatalf("get run: %v", err)
-	}
-	if again.Description != "Run regression tests (new yaml)" {
-		t.Errorf("re-dispatch should overwrite the description: %q", again.Description)
+	// The container itself never recorded a run: a run is what makes a task
+	// real.
+	if _, err := s.FindTaskRun(stage.ID, 1); !errors.Is(err, ErrTestRunNotFound) {
+		t.Errorf("virtual stage run = %v, want %v", err, ErrTestRunNotFound)
 	}
 }
 
-func TestUpsertTestRunAllPassed(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+// Descriptions are dispatch data now: they live on the node (the stage's and
+// the case's label from md-builder.yaml) and a re-dispatch refreshes them on
+// the same rows, because the yaml may have changed between dispatches.
+func TestNodeDescriptionsFollowTheDispatch(t *testing.T) {
+	s := newTestTaskStore(t)
+	env, commit := newGraphFixture(t, s, "describe")
 
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindRegression,
-		Cases: []CaseInput{
-			{Name: "TestForce", Status: StatusPassed},
-			{Name: "TestIntegrate", Status: StatusPassed},
-		},
-	})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
+	dispatch := func(stageDesc, caseDesc string) []*Task {
+		t.Helper()
+		stored, err := s.UpsertTaskGraph(graphRoot(commit.ID, env.ID), []TaskNode{
+			{Task: &Task{Kind: TaskKindClone, NodeKey: TaskKindClone, Name: "clone repositories"}},
+			{Task: &Task{Kind: TaskKindRegressionStage, NodeKey: TaskKindRegressionStage, Name: "regression", Description: stageDesc}},
+			{
+				Task:      &Task{Kind: TaskKindRegressionCase, NodeKey: caseNodeKey("simple"), Name: "regression: simple", Description: caseDesc},
+				Deps:      []int64{TaskSubPlaceholderBase + 0},
+				ParentKey: TaskKindRegressionStage,
+			},
+		})
+		if err != nil {
+			t.Fatalf("dispatch: %v", err)
+		}
+		return []*Task{stored[2], stored[3]}
 	}
-	if run.Status != StatusPassed || run.Total != 2 || run.Passed != 2 || run.Failed != 0 {
-		t.Fatalf("unexpected run: %+v", run)
+
+	nodes := dispatch("Run regression tests", "Simple regression test")
+	stage, simple := nodes[0], nodes[1]
+	if stage.Description != "Run regression tests" {
+		t.Errorf("stage description: %q", stage.Description)
+	}
+	if simple.Description != "Simple regression test" {
+		t.Errorf("case description: %q", simple.Description)
+	}
+
+	// The yaml changed: the re-dispatch overwrites the labels on the same rows
+	// (nothing was retired, nothing was recreated).
+	again := dispatch("Run regression tests (v2)", "Simple regression test (v2)")
+	if again[0].ID != stage.ID || again[1].ID != simple.ID {
+		t.Fatalf("a re-dispatch must reuse the node rows: %d/%d -> %d/%d",
+			stage.ID, simple.ID, again[0].ID, again[1].ID)
+	}
+	if got := reloadTask(t, s, stage.ID); got.Description != "Run regression tests (v2)" {
+		t.Errorf("stage description not refreshed: %q", got.Description)
+	}
+	if got := reloadTask(t, s, simple.ID); got.Description != "Simple regression test (v2)" {
+		t.Errorf("case description not refreshed: %q", got.Description)
 	}
 }
 
-func TestUpsertTestRunNoCases(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+func TestFinishAttemptAllPassed(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, clone, _, cases := caseStageGraph(t, s, "allpass", "TestForce", "TestIntegrate")
 
-	// A case-less report (e.g. unit tests reported as counts only) is valid.
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindUnit,
-	})
+	reportTask(t, s, clone.ID, StatusPassed, "cloned")
+	for _, c := range cases {
+		reportTask(t, s, c.ID, StatusPassed, "")
+	}
+
+	// A stage whose cases all passed is green, and so is the root above it.
+	stageID := cases[0].ParentID
+	got := reloadTask(t, s, stageID)
+	if got.Status != StatusPassed || got.Total != 2 || got.Passed != 2 || got.Failed != 0 {
+		t.Fatalf("unexpected stage: %+v", got)
+	}
+	if got := reloadTask(t, s, root.ID); got.Status != StatusPassed {
+		t.Fatalf("unexpected root: %+v", got)
+	}
+}
+
+// A report without case results is valid (a command-only stage, or a test
+// binary that only yields its counts): it derives its status from the counts
+// it was given, and an empty report is a pass of nothing rather than a
+// failure.
+func TestFinishAttemptWithoutResults(t *testing.T) {
+	s := newTestTaskStore(t)
+	_, clone, _, _ := caseStageGraph(t, s, "nocases")
+
+	run, err := s.FinishAttempt(clone.ID, AttemptResult{})
 	if err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf("finish: %v", err)
 	}
 	if run.Total != 0 || run.Status != StatusPassed {
 		t.Fatalf("unexpected empty run: %+v", run)
 	}
-	if children, _ := s.ListChildRuns(run.ID); len(children) != 0 {
-		t.Fatalf("case-less run should have no children: %+v", children)
+	if got := reloadTask(t, s, clone.ID); got.Total != 0 || got.Status != StatusPassed {
+		t.Fatalf("unexpected empty task: %+v", got)
+	}
+	// Nothing was invented: the node's one attempt is the one the dispatch
+	// opened, and no other run hangs off it.
+	runs, err := s.ListTaskRuns(clone.ID)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("want the one attempt, got %+v (err %v)", runs, err)
 	}
 }
 
-func TestUpsertTestRunReplaces(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+// A report for a task whose attempt already ended opens the next attempt
+// instead of overwriting the previous one: that is the retry path, and both
+// attempts stay readable — the node, however, is a cache of the newest.
+func TestReReportOpensANewAttempt(t *testing.T) {
+	s := newTestTaskStore(t)
+	_, clone, _, cases := caseStageGraph(t, s, "retry", "a")
 
-	first, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindRegression,
-		Cases: []CaseInput{
-			{Name: "a", Status: StatusFailed},
-			{Name: "b", Status: StatusFailed},
-		},
-	})
+	first := reportTask(t, s, clone.ID, StatusFailed, "clone/upload failed")
+	second := reportTask(t, s, clone.ID, StatusPassed, "cloned")
+
+	if second.ID == first.ID {
+		t.Fatal("the retry must not overwrite the previous attempt's run")
+	}
+	if second.Attempt != 2 {
+		t.Fatalf("retry attempt = %d, want 2", second.Attempt)
+	}
+	if got := reloadTask(t, s, clone.ID); got.Attempts != 2 || got.Status != StatusPassed ||
+		got.Total != 1 || got.Failed != 0 {
+		t.Fatalf("the task caches its newest attempt: %+v", got)
+	}
+
+	runs, err := s.ListTaskRuns(clone.ID)
 	if err != nil {
-		t.Fatalf("first upsert: %v", err)
+		t.Fatalf("list runs: %v", err)
+	}
+	if len(runs) != 2 || runs[0].Attempt != 2 || runs[1].Attempt != 1 {
+		t.Fatalf("attempts should be listed newest first: %+v", runs)
+	}
+	if runs[1].Status != StatusFailed || runs[1].Summary != "clone/upload failed" {
+		t.Fatalf("the first attempt keeps its outcome: %+v", runs[1])
 	}
 
-	// Re-report for the same triple: same row, replaced child runs.
-	second, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindRegression,
-		Cases:         []CaseInput{{Name: "a", Status: StatusPassed}},
-	})
-	if err != nil {
-		t.Fatalf("second upsert: %v", err)
+	// A different node is a different identity, so it has its own attempt 1.
+	other := caseRun(t, s, reloadTask(t, s, cases[0].ID))
+	if other.ID == first.ID || other.TaskID == clone.ID || other.Attempt != 1 {
+		t.Fatalf("a case must not share the clone's run: %+v", other)
 	}
-	if second.ID != first.ID {
-		t.Fatalf("expected same run row (%d), got %d", first.ID, second.ID)
+	// Reading one attempt back by (task, attempt) is the run page's lookup.
+	got, err := s.FindTaskRun(clone.ID, 1)
+	if err != nil || got.Status != StatusFailed {
+		t.Fatalf("FindTaskRun(clone, 1) = %+v (err %v)", got, err)
 	}
-	if second.Total != 1 || second.Passed != 1 || second.Status != StatusPassed {
-		t.Fatalf("unexpected replacement: %+v", second)
-	}
-
-	children, err := s.ListChildRuns(second.ID)
-	if err != nil {
-		t.Fatalf("list children: %v", err)
-	}
-	if len(children) != 1 || children[0].Name != "a" {
-		t.Fatalf("expected old children replaced, got %+v", children)
-	}
-
-	// A different kind creates a separate run.
-	unit, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindUnit,
-		Cases:         []CaseInput{{Name: "TestX", Status: StatusPassed}},
-	})
-	if err != nil {
-		t.Fatalf("unit upsert: %v", err)
-	}
-	if unit.ID == first.ID {
-		t.Fatal("expected separate row for different kind")
-	}
-
-	// Top-level run count for the triple's environment: 2 (regression + unit);
-	// child runs are rows too but not top-level ones.
-	var count int64
-	s.DB.Model(&TestRun{}).Where("environment_id = ? AND parent_id = 0", env.ID).Count(&count)
-	if count != 2 {
-		t.Fatalf("expected 2 top-level runs, got %d", count)
+	if _, err := s.FindTaskRun(clone.ID, 3); !errors.Is(err, ErrTestRunNotFound) {
+		t.Fatalf("an attempt that never happened = %v, want %v", err, ErrTestRunNotFound)
 	}
 }
 
-func TestUpsertTestRunValidation(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+func TestFinishAttemptValidation(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, clone, stage, cases := caseStageGraph(t, s, "validate", "a")
 
-	// Invalid kind.
-	if _, err := s.UpsertTestRun(&RunInput{EnvironmentID: env.ID, CommitID: commit.ID, Kind: "perf"}); !errors.Is(err, ErrInvalidRunKind) {
-		t.Fatalf("expected ErrInvalidRunKind, got %v", err)
+	// Only passed/failed/skipped end an attempt: "running" and a typo are
+	// rejected before anything is written.
+	for _, status := range []string{StatusPending, StatusRunning, "bogus"} {
+		if _, err := s.FinishAttempt(clone.ID, AttemptResult{Status: status}); !errors.Is(err, ErrInvalidRunStatus) {
+			t.Fatalf("status %q: err = %v, want %v", status, err, ErrInvalidRunStatus)
+		}
 	}
-	// Invalid case status.
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindRegression,
-		Cases: []CaseInput{{Name: "a", Status: "pending"}},
-	}); !errors.Is(err, ErrInvalidCaseStatus) {
-		t.Fatalf("expected ErrInvalidCaseStatus, got %v", err)
+	if got := reloadTask(t, s, clone.ID); got.Status != StatusPending {
+		t.Fatalf("a rejected report must leave the node alone: %+v", got)
 	}
-	// Missing case name.
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindRegression,
-		Cases: []CaseInput{{Status: StatusPassed}},
-	}); err == nil {
-		t.Fatal("expected error for missing case name")
+
+	// Containers never execute: a report for one, or an attempt opened for one,
+	// is refused. (The rollup derives their state from the children.)
+	for _, id := range []int64{root.ID, stage.ID} {
+		if _, err := s.FinishAttempt(id, AttemptResult{Status: StatusPassed}); !errors.Is(err, ErrVirtualTask) {
+			t.Errorf("finish on virtual task %d = %v, want %v", id, err, ErrVirtualTask)
+		}
+		if _, err := s.BeginAttempt(id); !errors.Is(err, ErrVirtualTask) {
+			t.Errorf("begin on virtual task %d = %v, want %v", id, err, ErrVirtualTask)
+		}
 	}
-	// Duplicate case names collide on the (parent, name) unique index.
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindRegression,
-		Cases: []CaseInput{
-			{Name: "dup", Status: StatusPassed},
-			{Name: "dup", Status: StatusPassed},
-		},
-	}); err == nil {
-		t.Fatal("duplicate case names should error")
+
+	// An unknown task is not a run target either.
+	if _, err := s.FinishAttempt(cases[0].ID+9999, AttemptResult{Status: StatusPassed}); !errors.Is(err, ErrTaskNotFound) {
+		t.Errorf("unknown task = %v, want %v", err, ErrTaskNotFound)
+	}
+
+	// Two cases with one name would fight over one node key (the identity a
+	// re-dispatch matches on), so the graph is rejected before any of it is
+	// stored.
+	env, commit := newGraphFixture(t, s, "validate-dup")
+	_, err := s.UpsertTaskGraph(graphRoot(commit.ID, env.ID), []TaskNode{
+		{Task: &Task{Kind: TaskKindClone, NodeKey: TaskKindClone, Name: "clone"}},
+		{Task: &Task{Kind: TaskKindRegressionCase, NodeKey: caseNodeKey("dup"), Name: "regression: dup"}},
+		{Task: &Task{Kind: TaskKindRegressionCase, NodeKey: caseNodeKey("dup"), Name: "regression: dup"}},
+	})
+	if err == nil {
+		t.Fatal("duplicate case names should collide on the (root, node key) index")
+	}
+	if _, err := s.FindRootTaskByCommitEnv(commit.ID, env.ID); !errors.Is(err, ErrTaskNotFound) {
+		t.Errorf("the rejected dispatch left a root behind: %v", err)
 	}
 }
 
-func TestFindRunsByCommits(t *testing.T) {
-	s := newTestStore(t)
-	env, c1 := seedEnvAndCommit(t, s)
-	c2 := &Commit{Repo: "group/code", SHA: "deadbee"}
-	if _, err := s.GetOrCreateCommit(c2); err != nil {
-		t.Fatalf("create c2: %v", err)
+// LatestRunsByTaskIDs is the lookup behind a matrix cell: it resolves the
+// nodes of a (commit, environment) graph to the run each one shows. Containers
+// and unknown ids have no run and are simply absent, and a retried node
+// resolves to its newest attempt.
+func TestLatestRunsByTaskIDs(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, subs := seedTaskGraph(t, s, "matrix")
+	clone, build, unit, stage := subs[0], subs[1], subs[2], subs[3]
+	cases := caseNodes(t, s, stage)
+
+	reportTask(t, s, clone.ID, StatusPassed, "cloned")
+	reportTask(t, s, unit.ID, StatusFailed, "1/4 tests failed")
+	// The webhook re-dispatched the commit: the clone's cell is attempt 2.
+	reportTask(t, s, clone.ID, StatusPassed, "cloned again")
+
+	runs, err := s.LatestRunsByTaskIDs([]int64{clone.ID, build.ID, unit.ID, stage.ID, cases[0].ID, root.ID, 9999})
+	if err != nil {
+		t.Fatalf("latest runs: %v", err)
+	}
+	if len(runs) != 4 {
+		t.Fatalf("want the four real nodes, got %+v", runs)
+	}
+	if got := runs[clone.ID]; got.Attempt != 2 || got.Status != StatusPassed {
+		t.Errorf("the newest attempt is the cell: %+v", got)
+	}
+	if got := runs[unit.ID]; got.Kind != RunKindUnit || got.Status != StatusFailed {
+		t.Errorf("unit cell: %+v", got)
+	}
+	if got := runs[build.ID]; got.Status != StatusPending || got.Attempt != 1 {
+		t.Errorf("a node nobody reported yet shows its dispatch-time attempt: %+v", got)
+	}
+	if got := runs[cases[0].ID]; got.Kind != RunKindRegression || got.Status != StatusPending {
+		t.Errorf("case cell: %+v", got)
+	}
+	for _, absent := range []int64{root.ID, stage.ID, 9999} {
+		if r, ok := runs[absent]; ok {
+			t.Errorf("task %d should have no run, got %+v", absent, r)
+		}
 	}
 
-	// Runs for (env, c1, regression) and (env, c2, regression).
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: c1.ID, Kind: RunKindRegression,
-		Cases: []CaseInput{{Name: "a", Status: StatusPassed}},
+	// No ids at all is not an error, just an empty lookup.
+	if empty, err := s.LatestRunsByTaskIDs(nil); err != nil || len(empty) != 0 {
+		t.Fatalf("empty lookup: %v (%v)", empty, err)
+	}
+}
+
+// Deleting an environment takes its tasks, runs, logs and artifacts with it:
+// the dashboard shows site-wide history, so a dangling row would outlive the
+// machine it ran on.
+func TestDeleteEnvironmentCascadesTasksAndRuns(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, clone, _, cases := caseStageGraph(t, s, "cascade", "a")
+
+	run := reportTask(t, s, clone.ID, StatusPassed, "cloned")
+	if err := s.AppendRunArtifactsByRun(run.ID, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "out.xml", Content: "<x/>"},
 	}); err != nil {
-		t.Fatalf("upsert c1: %v", err)
+		t.Fatalf("append artifact: %v", err)
 	}
-	run2, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: c2.ID, Kind: RunKindRegression,
-		Cases: []CaseInput{{Name: "a", Status: StatusFailed}},
-	})
-	if err != nil {
-		t.Fatalf("upsert c2: %v", err)
-	}
-	// A unit run with one child: the child is a test_runs row too, but must
-	// never surface as a matrix cell.
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: c1.ID, Kind: RunKindUnit,
-		Cases: []CaseInput{{Name: "TestX", Status: StatusPassed}},
-	}); err != nil {
-		t.Fatalf("upsert unit: %v", err)
-	}
+	caseRunRow := caseRun(t, s, reloadTask(t, s, cases[0].ID))
 
-	runs, err := s.FindRunsByCommits(RunKindRegression, []int64{env.ID}, []int64{c1.ID, c2.ID})
-	if err != nil {
-		t.Fatalf("find: %v", err)
-	}
-	if len(runs) != 2 {
-		t.Fatalf("expected 2 regression runs, got %d", len(runs))
-	}
-	if runs[EnvCommit{Env: env.ID, Commit: c1.ID}].Status != StatusPassed {
-		t.Fatal("expected passed run at (env, c1)")
-	}
-	if runs[EnvCommit{Env: env.ID, Commit: c2.ID}].ID != run2.ID {
-		t.Fatal("expected failed run at (env, c2)")
-	}
-
-	// Child runs are excluded: only the unit parent matches, not "TestX".
-	unitRuns, err := s.FindRunsByCommits(RunKindUnit, []int64{env.ID}, []int64{c1.ID})
-	if err != nil {
-		t.Fatalf("find unit: %v", err)
-	}
-	if len(unitRuns) != 1 {
-		t.Fatalf("expected 1 unit run (child excluded), got %d", len(unitRuns))
-	}
-
-	// Empty inputs short-circuit without error.
-	runs, err = s.FindRunsByCommits(RunKindRegression, nil, []int64{c1.ID})
-	if err != nil || len(runs) != 0 {
-		t.Fatalf("expected empty map for empty envs, got %v (%v)", runs, err)
-	}
-}
-
-func TestDeleteEnvironmentCascadesRuns(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
-	u := &User{Username: "findowner", Email: "find@example.com", PasswordHash: "hash"}
-	if err := s.CreateUser(u); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindRegression,
-		Cases: []CaseInput{{Name: "a", Status: StatusPassed}},
-	})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	children, err := s.ListChildRuns(run.ID)
-	if err != nil || len(children) != 1 {
-		t.Fatalf("expected 1 child, got %d (%v)", len(children), err)
-	}
-
-	if err := s.DeleteEnvironment(env.ID); err != nil {
+	if err := s.DeleteEnvironment(root.EnvironmentID); err != nil {
 		t.Fatalf("delete env: %v", err)
 	}
 
-	// The run and its children are gone.
-	if _, err := s.GetTestRun(run.ID); !errors.Is(err, gorm.ErrRecordNotFound) {
+	// The run and its artifacts are gone; so is the case's own run and the
+	// node row it belonged to.
+	if _, err := s.GetTestRun(run.ID); !errors.Is(err, ErrTestRunNotFound) {
 		t.Fatalf("expected run gone, got %v", err)
 	}
-	if _, err := s.GetTestRun(children[0].ID); !errors.Is(err, gorm.ErrRecordNotFound) {
-		t.Fatalf("expected child run gone, got %v", err)
+	if artifacts, err := s.ListRunArtifacts(run.ID); err != nil || len(artifacts) != 0 {
+		t.Fatalf("artifacts should be deleted with the run: %+v (err %v)", artifacts, err)
+	}
+	if _, err := s.GetTestRun(caseRunRow.ID); !errors.Is(err, ErrTestRunNotFound) {
+		t.Fatalf("expected the case run gone, got %v", err)
+	}
+	if _, err := s.GetTask(clone.ID); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("expected the node gone, got %v", err)
 	}
 }
 
@@ -443,36 +427,33 @@ func TestListAllEnvironments(t *testing.T) {
 	}
 }
 
-func TestUpsertTestRunAggregateWithArtifact(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+// The unit path: counts and a stored results file, with no case tasks at all.
+// A reporter that knows better than its counts passes the status explicitly
+// (ctest exited non-zero while the parsed counts still look green).
+func TestFinishAttemptCountsAndArtifacts(t *testing.T) {
+	s := newTestTaskStore(t)
+	_, clone, _, _ := caseStageGraph(t, s, "unitcounts")
 
-	// The unit path: counts + a stored results file, no child runs.
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindUnit,
-		TaskID:        42,
-		Total:         12,
-		Passed:        9,
-		Failed:        2,
-		Skipped:       1,
-		StatusFailed:  true, // e.g. ctest exited non-zero
+	run, err := s.FinishAttempt(clone.ID, AttemptResult{
+		Status: StatusFailed, // e.g. ctest exited non-zero
+		Total:  12, Passed: 9, Failed: 2, Skipped: 1,
 		Artifacts: []ArtifactInput{
 			{Kind: ArtifactKindResults, Name: "build/test_detail.xml", Content: "<testsuites/>"},
 		},
 	})
 	if err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf("finish: %v", err)
 	}
 	if run.Total != 12 || run.Passed != 9 || run.Failed != 2 || run.Skipped != 1 {
 		t.Fatalf("counts wrong: %+v", run)
 	}
 	if run.Status != StatusFailed {
-		t.Fatalf("StatusFailed override should force failed: %+v", run)
+		t.Fatalf("the explicit status should win over the counts: %+v", run)
 	}
-	if run.TaskID != 42 {
-		t.Fatalf("TaskID = %d", run.TaskID)
+	// The node caches the same values, so the graph and the run never disagree.
+	if got := reloadTask(t, s, clone.ID); got.Total != 12 || got.Passed != 9 ||
+		got.Failed != 2 || got.Skipped != 1 || got.Status != StatusFailed {
+		t.Fatalf("task should mirror its newest attempt: %+v", got)
 	}
 
 	artifacts, err := s.ListRunArtifacts(run.ID)
@@ -484,91 +465,54 @@ func TestUpsertTestRunAggregateWithArtifact(t *testing.T) {
 		t.Fatalf("artifact wrong: %+v", artifacts)
 	}
 
-	// Re-report without an artifact: the old artifact is replaced (gone).
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindUnit,
-		Total:         3,
-		Passed:        3,
-	}); err != nil {
-		t.Fatalf("second upsert: %v", err)
-	}
-	artifacts, err = s.ListRunArtifacts(run.ID)
+	// The next attempt starts clean: it keeps no artifact of the previous one,
+	// which in turn keeps its own — an attempt is history, not a scratch row.
+	next, err := s.FinishAttempt(clone.ID, AttemptResult{Total: 3, Passed: 3})
 	if err != nil {
-		t.Fatalf("list artifacts after replace: %v", err)
+		t.Fatalf("second report: %v", err)
 	}
-	if len(artifacts) != 0 {
-		t.Fatalf("old artifacts should be replaced: %+v", artifacts)
+	if next.ID == run.ID || next.Attempt != 2 {
+		t.Fatalf("the second report should open attempt 2: %+v", next)
+	}
+	if artifacts, err := s.ListRunArtifacts(next.ID); err != nil || len(artifacts) != 0 {
+		t.Fatalf("the new attempt carries no artifacts: %+v (err %v)", artifacts, err)
+	}
+	if artifacts, err := s.ListRunArtifacts(run.ID); err != nil || len(artifacts) != 1 {
+		t.Fatalf("the first attempt keeps its artifacts: %+v (err %v)", artifacts, err)
 	}
 }
 
-func TestUpsertTestRunInvalidArtifactKind(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
-	_, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindUnit,
-		Artifacts:     []ArtifactInput{{Kind: "screenshot"}},
-	})
-	if err == nil {
+func TestFinishAttemptInvalidArtifactKind(t *testing.T) {
+	s := newTestTaskStore(t)
+	_, clone, _, _ := caseStageGraph(t, s, "badart")
+
+	if _, err := s.FinishAttempt(clone.ID, AttemptResult{
+		Status:    StatusPassed,
+		Artifacts: []ArtifactInput{{Kind: "screenshot"}},
+	}); err == nil {
 		t.Fatal("invalid artifact kind should error")
 	}
-}
-
-func TestDeleteTestRunRemovesArtifacts(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindUnit,
-		Total:         1,
-		Artifacts:     []ArtifactInput{{Kind: ArtifactKindResults, Name: "r.xml", Content: "x"}},
-	})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
+	// The rejected report left neither the artifact nor the outcome behind.
+	var artifacts int64
+	if err := s.DB.Model(&TestArtifact{}).Count(&artifacts).Error; err != nil {
+		t.Fatalf("count: %v", err)
 	}
-	if err := s.DeleteTestRun(env.ID, commit.ID, RunKindUnit); err != nil {
-		t.Fatalf("delete: %v", err)
+	if artifacts != 0 {
+		t.Fatalf("no artifact should have been stored, got %d", artifacts)
 	}
-	artifacts, err := s.ListRunArtifacts(run.ID)
-	if err != nil {
-		t.Fatalf("list after delete: %v", err)
-	}
-	if len(artifacts) != 0 {
-		t.Fatalf("artifacts should be deleted with the run: %+v", artifacts)
-	}
-
-	// Deleting a regression run also removes its child runs.
-	reg, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindRegression,
-		Cases: []CaseInput{{Name: "a", Status: StatusPassed}},
-	})
-	if err != nil {
-		t.Fatalf("reg upsert: %v", err)
-	}
-	children, _ := s.ListChildRuns(reg.ID)
-	if err := s.DeleteTestRun(env.ID, commit.ID, RunKindRegression); err != nil {
-		t.Fatalf("reg delete: %v", err)
-	}
-	if _, err := s.GetTestRun(children[0].ID); !errors.Is(err, gorm.ErrRecordNotFound) {
-		t.Fatalf("expected child run gone with the parent, got %v", err)
+	if got := reloadTask(t, s, clone.ID); got.Status != StatusPending {
+		t.Fatalf("the node should still be queued: %+v", got)
 	}
 }
 
 func TestGetArtifact(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID,
-		CommitID:      commit.ID,
-		Kind:          RunKindUnit,
-		Artifacts:     []ArtifactInput{{Kind: ArtifactKindResults, Name: "r.json", Content: "{}"}},
-	})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
+	s := newTestTaskStore(t)
+	_, clone, _, _ := caseStageGraph(t, s, "getartifact")
+	run := reportTask(t, s, clone.ID, StatusPassed, "ok")
+	if err := s.AppendRunArtifactsByRun(run.ID, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "r.json", Content: "{}"},
+	}); err != nil {
+		t.Fatalf("append: %v", err)
 	}
 	list, _ := s.ListRunArtifacts(run.ID)
 	a, err := s.GetArtifact(list[0].ID)
@@ -580,315 +524,201 @@ func TestGetArtifact(t *testing.T) {
 	}
 }
 
-func TestUpsertCaseRunAggregatesIncrementally(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+// A case's outcome is recorded on the case, and the stage aggregates the
+// cases' tallies incrementally: the container is never written directly, it
+// is derived (store.rollupTx).
+func TestCaseRunsRollUpIntoTheStage(t *testing.T) {
+	s := newTestTaskStore(t)
+	_, _, stage, cases := caseStageGraph(t, s, "aggregate", "heat", "poisson", "laplace")
 
-	// First case creates the parent run.
-	parent, child, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "heat", Status: StatusPassed, Message: "max rel err 2e-9",
-		DurationMillis: 1200,
-	})
-	if err != nil {
-		t.Fatalf("upsert case: %v", err)
-	}
-	if child.ID == 0 || child.ParentID != parent.ID || child.Name != "heat" {
-		t.Fatalf("child run should link the parent: %+v", child)
-	}
-	if child.Total != 1 || child.Position != 0 {
-		t.Fatalf("first child wrong: %+v", child)
-	}
-	if parent.Total != 1 || parent.Passed != 1 || parent.Status != StatusPassed {
-		t.Fatalf("first case aggregate wrong: %+v", parent)
+	// First case: green. The container counts it and stays queued for the two
+	// cases nobody has started yet.
+	reportTask(t, s, cases[0].ID, StatusPassed, "max rel err 2e-9")
+	got := reloadTask(t, s, stage.ID)
+	if got.Total != 3 || got.Passed != 1 || got.Failed != 0 || got.Status != StatusPending {
+		t.Fatalf("one green case: %+v", got)
 	}
 
-	// Second case aggregates into the same parent row.
-	parentID := parent.ID
-	parent, _, err = s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "poisson", Status: StatusFailed, Message: "err 1e-3 > 1e-5",
-	})
-	if err != nil {
-		t.Fatalf("upsert case: %v", err)
+	// Second case: red, and the failure is named in the container's summary.
+	reportTask(t, s, cases[1].ID, StatusFailed, "err 1e-3 > 1e-5")
+	got = reloadTask(t, s, stage.ID)
+	if got.Total != 3 || got.Passed != 1 || got.Failed != 1 || got.Status != StatusFailed {
+		t.Fatalf("two-case aggregate: %+v", got)
 	}
-	if parent.ID != parentID {
-		t.Fatalf("expected same parent row (%d), got %d", parentID, parent.ID)
-	}
-	if parent.Total != 2 || parent.Passed != 1 || parent.Failed != 1 || parent.Status != StatusFailed {
-		t.Fatalf("two-case aggregate wrong: %+v", parent)
-	}
-	if !strings.Contains(parent.Summary, "poisson") {
-		t.Fatalf("summary should name the failed case: %q", parent.Summary)
+	if !strings.Contains(got.Summary, "poisson") {
+		t.Fatalf("summary should name the failed case: %q", got.Summary)
 	}
 
-	// A skipped case (upstream failure) counts as skipped, not failed.
-	parent, _, err = s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "laplace", Status: StatusSkipped, Message: "build failed",
-	})
-	if err != nil {
-		t.Fatalf("upsert case: %v", err)
-	}
-	if parent.Total != 3 || parent.Skipped != 1 || parent.Failed != 1 {
-		t.Fatalf("mixed aggregate wrong: %+v", parent)
+	// The last case passes: the shared counts settle, the failure does not.
+	reportTask(t, s, cases[2].ID, StatusPassed, "")
+	got = reloadTask(t, s, stage.ID)
+	if got.Total != 3 || got.Passed != 2 || got.Failed != 1 {
+		t.Fatalf("three-case aggregate wrong: %+v", got)
 	}
 
-	// Re-running one case replaces its child run (no duplicate).
-	parent, child, err = s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "poisson", Status: StatusPassed,
-	})
-	if err != nil {
-		t.Fatalf("upsert case: %v", err)
+	// Re-running one case is a new attempt on that case, and the container
+	// follows: the case's tally is its newest attempt's, so the stage goes
+	// green without any of its rows having been rewritten by hand.
+	reportTask(t, s, cases[1].ID, StatusPassed, "")
+	got = reloadTask(t, s, stage.ID)
+	if got.Total != 3 || got.Passed != 3 || got.Failed != 0 || got.Status != StatusPassed {
+		t.Fatalf("re-run aggregate wrong: %+v", got)
 	}
-	if parent.Total != 3 || parent.Passed != 2 || parent.Failed != 0 || parent.Status != StatusPassed {
-		t.Fatalf("replace-by-name aggregate wrong: %+v", parent)
+	runs, err := s.ListTaskRuns(cases[1].ID)
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("the re-run should be a second attempt: %+v (err %v)", runs, err)
 	}
-	children, err := s.ListChildRuns(parent.ID)
-	if err != nil {
-		t.Fatalf("list children: %v", err)
+	// The other cases were not touched by it.
+	if other, err := s.ListTaskRuns(cases[0].ID); err != nil || len(other) != 1 {
+		t.Fatalf("an unrelated case keeps its single attempt: %+v (err %v)", other, err)
 	}
-	if len(children) != 3 {
-		t.Fatalf("expected 3 child runs after replace, got %d", len(children))
-	}
-	// The replaced case keeps its original slot; the others are untouched.
-	if children[0].Name != "heat" || children[0].Position != 0 ||
-		children[1].Name != "poisson" || children[1].Position != 1 ||
-		children[2].Name != "laplace" || children[2].Position != 2 {
-		t.Fatalf("unexpected child order after replace: %+v", children)
-	}
-	if child.ID == 0 || child.Status != StatusPassed {
-		t.Fatalf("re-reported child wrong: %+v", child)
-	}
-
-	// Validation: empty name and invalid status are rejected.
-	if _, _, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "", Status: StatusPassed,
-	}); err == nil {
-		t.Fatal("empty case name should error")
-	}
-	if _, _, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "x", Status: "bogus",
-	}); !errors.Is(err, ErrInvalidCaseStatus) {
-		t.Fatalf("invalid case status should error, got %v", err)
+	if other := reloadTask(t, s, cases[0].ID); other.Status != StatusPassed || other.Attempts != 1 {
+		t.Fatalf("an unrelated case keeps its outcome: %+v", other)
 	}
 }
 
-// A regression case runs as its own sub-task, so the child run it will
-// report has to follow that task: pending while it is queued, running from
-// the moment the scheduler claims it, terminal once the outcome lands. The
-// run page (case list, detail, live log) reads this row, so a case stuck on
-// the dispatch-time placeholder shows up as pending while it executes.
-func TestMarkCaseRunRunning(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+// A case runs as its own sub-task, so the attempt its dispatch opened has to
+// follow the task: pending while it is queued, running from the moment the
+// scheduler claims it, terminal once the outcome lands. The run page (case
+// list, detail, live log) reads this row, and the container above follows it.
+func TestClaimFlipsTheCaseAttemptToRunning(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, clone, stage, cases := caseStageGraph(t, s, "claim", "heat", "poisson")
 
-	// Dispatch placeholders, as seedStageRuns writes them: one case child
-	// per case sub-task, each linked to its own task.
-	const heatTask, poissonTask int64 = 71, 72
-	parent, err := s.UpsertPlaceholderRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindRegression,
-		TaskID: heatTask, Status: StatusPending,
-		Cases: []CaseInput{
-			{Name: "heat", Description: "thermal", TaskID: heatTask},
-			{Name: "poisson", TaskID: poissonTask},
-		},
-	})
-	if err != nil {
-		t.Fatalf("placeholder: %v", err)
-	}
-	children, err := s.ListChildRuns(parent.ID)
-	if err != nil {
-		t.Fatalf("list children: %v", err)
-	}
-	if len(children) != 2 || children[0].Status != StatusPending || children[1].Status != StatusPending {
-		t.Fatalf("children should start pending: %+v", children)
-	}
-	if children[0].TaskID != heatTask || children[1].TaskID != poissonTask {
-		t.Fatalf("case children should carry their own sub-task: %+v", children)
+	// Both cases are queued until the clone they depend on is done: reporting
+	// the clone is what makes them ready.
+	reportTask(t, s, clone.ID, StatusPassed, "cloned")
+	for _, c := range cases {
+		if got := caseRun(t, s, c); got.Status != StatusPending || !got.StartedAt.IsZero() {
+			t.Fatalf("a queued case starts pending: %+v", got)
+		}
 	}
 
-	// The scheduler claims the second case's task.
-	if err := s.MarkRunRunning(env.ID, commit.ID, RunKindRegression); err != nil {
-		t.Fatalf("mark run running: %v", err)
+	// The scheduler claims the oldest ready node: the first case.
+	claimed := claimTask(t, s)
+	if claimed.ID != cases[0].ID {
+		t.Fatalf("claimed %s, want the first case", claimed.NodeKey)
 	}
-	if err := s.MarkCaseRunRunning(poissonTask); err != nil {
-		t.Fatalf("mark case running: %v", err)
+	run := caseRun(t, s, claimed)
+	if run.Status != StatusRunning || run.StartedAt.IsZero() {
+		t.Fatalf("claimed case should be running: %+v", run)
 	}
-	children, _ = s.ListChildRuns(parent.ID)
-	if children[1].Status != StatusRunning || children[1].StartedAt.IsZero() {
-		t.Fatalf("claimed case should be running: %+v", children[1])
+	if other := caseRun(t, s, cases[1]); other.Status != StatusPending {
+		t.Fatalf("the queued case stays pending: %+v", other)
 	}
-	if children[0].Status != StatusPending {
-		t.Fatalf("the queued case stays pending: %+v", children[0])
+	// The container follows a running child: containers are derived, so the
+	// rollup is what turns "a case is running" into "the stage is running"
+	// (the claim itself only moves the node and its run).
+	if err := s.RollupTaskTree(root.ID); err != nil {
+		t.Fatalf("rollup: %v", err)
 	}
-	// The parent aggregate stays in flight while a case runs.
-	if got, _ := s.GetTestRun(parent.ID); got.Status != StatusRunning {
-		t.Fatalf("parent should be running: %+v", got)
+	if got := reloadTask(t, s, stage.ID); got.Status != StatusRunning {
+		t.Fatalf("stage should be running: %+v", got)
 	}
-
-	// A second claim (or a duplicate mark) changes nothing.
-	if err := s.MarkCaseRunRunning(poissonTask); err != nil {
-		t.Fatalf("re-mark: %v", err)
+	if got := reloadTask(t, s, root.ID); got.Status != StatusRunning {
+		t.Fatalf("root should be running: %+v", got)
 	}
 
 	// The case finishes: the recorded outcome replaces the running row, and
-	// the mark is a no-op afterwards.
-	if _, _, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, TaskID: poissonTask,
-		Name: "poisson", Status: StatusPassed, Message: "max rel err 2e-9",
-	}); err != nil {
-		t.Fatalf("record case: %v", err)
-	}
-	if err := s.MarkCaseRunRunning(poissonTask); err != nil {
-		t.Fatalf("mark after finish: %v", err)
-	}
-	children, _ = s.ListChildRuns(parent.ID)
-	if children[1].Status != StatusPassed {
-		t.Fatalf("recorded case should stay passed: %+v", children[1])
+	// the container follows.
+	reportTask(t, s, claimed.ID, StatusPassed, "max rel err 2e-9")
+	run = caseRun(t, s, reloadTask(t, s, claimed.ID))
+	if run.Status != StatusPassed || run.FinishedAt.IsZero() {
+		t.Fatalf("recorded case should be terminal: %+v", run)
 	}
 
-	// Reporting the other case completes the aggregate.
-	if _, _, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, TaskID: heatTask,
-		Name: "heat", Status: StatusPassed,
-	}); err != nil {
-		t.Fatalf("record case: %v", err)
+	// Reporting the other case completes the container.
+	reportTask(t, s, cases[1].ID, StatusPassed, "")
+	if got := reloadTask(t, s, stage.ID); got.Status != StatusPassed || got.Passed != 2 {
+		t.Fatalf("container should be green: %+v", got)
 	}
-	got, _ := s.GetTestRun(parent.ID)
-	if got.Status != StatusPassed || got.Passed != 2 {
-		t.Fatalf("aggregate should be passed: %+v", got)
-	}
-
-	// Unknown or absent tasks are a no-op, not an error (a report without a
-	// task, or a stage whose child run never materialized).
-	for _, id := range []int64{0, 4242} {
-		if err := s.MarkCaseRunRunning(id); err != nil {
-			t.Fatalf("mark task %d: %v", id, err)
-		}
+	if got := reloadTask(t, s, root.ID); got.Status != StatusPassed {
+		t.Fatalf("root should be green: %+v", got)
 	}
 }
 
-// FindCaseRunsByTasks resolves each stage sub-task to the case run it
-// recorded (the graph node's link), leaving tasks without one out.
-func TestFindCaseRunsByTasks(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+// An all-skipped stage is skipped — the real status, not a summary
+// convention: the stage never ran because something upstream failed, and the
+// container reads exactly that instead of looking green.
+func TestSkippedCasesRollUpAsSkipped(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, clone, stage, cases := caseStageGraph(t, s, "allskip", "heat", "poisson")
 
-	if _, _, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, TaskID: 71,
-		Name: "heat", Status: StatusPassed,
-	}); err != nil {
-		t.Fatalf("record case: %v", err)
+	reportTask(t, s, clone.ID, StatusPassed, "cloned")
+	for _, c := range cases {
+		reportTask(t, s, c.ID, StatusSkipped, "clone failed: no route to host")
 	}
-	// A top-level run keyed by the same task id must not be picked up: only
-	// case children are.
-	if _, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit,
-		TaskID: 72, Status: StatusPassed,
-	}); err != nil {
-		t.Fatalf("record unit run: %v", err)
+	if got := reloadTask(t, s, cases[0].ID); got.Status != StatusSkipped {
+		t.Fatalf("a skipped case is skipped: %+v", got)
 	}
-
-	runs, err := s.FindCaseRunsByTasks([]int64{71, 72, 73})
-	if err != nil {
-		t.Fatalf("find case runs: %v", err)
+	got := reloadTask(t, s, stage.ID)
+	if got.Total != 2 || got.Skipped != 2 || got.Passed != 0 || got.Failed != 0 {
+		t.Fatalf("all-skipped aggregate wrong: %+v", got)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("want one case run, got %+v", runs)
+	if got.Status != StatusSkipped {
+		t.Fatalf("an all-skipped stage must not read as green: %+v", got)
 	}
-	if r, ok := runs[71]; !ok || r.Name != "heat" || r.ParentID == 0 {
-		t.Fatalf("case run 71 wrong: %+v", runs)
+	if !strings.Contains(got.Summary, "skipped") {
+		t.Fatalf("summary should say the cases were skipped: %q", got.Summary)
 	}
-	if empty, err := s.FindCaseRunsByTasks(nil); err != nil || len(empty) != 0 {
-		t.Fatalf("no tasks should return an empty map: %v %v", empty, err)
+	// Nothing about the skipped cases is a failure, so the root above them is
+	// skipped too — not green.
+	if got := reloadTask(t, s, root.ID); got.Status != StatusSkipped {
+		t.Fatalf("the root follows: %+v", got)
 	}
 }
 
-func TestUpsertCaseRunAllSkipped(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+// A case's fetched files ride its own attempt's run: the case is the task, so
+// its artifacts belong to the run of that task — the case detail page reads
+// them straight off the node's run.
+func TestCaseArtifactsRideTheCasesRun(t *testing.T) {
+	s := newTestTaskStore(t)
+	_, _, stage, cases := caseStageGraph(t, s, "caseart", "heat")
+	heat := cases[0]
 
-	_, _, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "heat", Status: StatusSkipped, Message: "clone failed: no route to host",
-	})
+	reportTask(t, s, heat.ID, StatusPassed, "ok")
+	run := caseRun(t, s, reloadTask(t, s, heat.ID))
+	if err := s.AppendRunArtifactsByRun(run.ID, []ArtifactInput{
+		{Kind: ArtifactKindResults, Name: "out.xml", Content: "<x/>"},
+	}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	artifacts, err := s.ListRunArtifacts(run.ID)
 	if err != nil {
-		t.Fatalf("upsert case: %v", err)
-	}
-	parent, _, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "poisson", Status: StatusSkipped, Message: "clone failed: no route to host",
-	})
-	if err != nil {
-		t.Fatalf("upsert case: %v", err)
-	}
-	if parent.Total != 2 || parent.Skipped != 2 || parent.Passed != 0 {
-		t.Fatalf("all-skipped aggregate wrong: %+v", parent)
-	}
-	// The all-skipped placeholder must not read as a green cell: the stored
-	// status stays failed so the dashboard's "skipped:" translation kicks in.
-	if parent.Status != StatusFailed {
-		t.Fatalf("all-skipped run should stay failed (⤼ via the skipped summary): %+v", parent)
-	}
-	if !strings.HasPrefix(parent.Summary, "skipped: ") {
-		t.Fatalf("summary should carry the skipped prefix: %q", parent.Summary)
-	}
-}
-
-func TestUpsertCaseRunChildArtifacts(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
-
-	// The case's fetched artifacts ride its own child run.
-	_, child, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "heat", Status: StatusPassed,
-		Artifacts: []ArtifactInput{
-			{Kind: ArtifactKindResults, Name: "out.xml", Content: "<x/>"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("upsert case: %v", err)
-	}
-	artifacts, err := s.ListRunArtifacts(child.ID)
-	if err != nil {
-		t.Fatalf("list child artifacts: %v", err)
+		t.Fatalf("list artifacts: %v", err)
 	}
 	if len(artifacts) != 1 || artifacts[0].Name != "out.xml" || artifactText(t, s, &artifacts[0]) != "<x/>" {
-		t.Fatalf("child artifacts wrong: %+v", artifacts)
+		t.Fatalf("case artifacts wrong: %+v", artifacts)
 	}
-	oldChildID := child.ID
 
-	// Re-reporting the case replaces the child run and its artifacts.
-	_, child, err = s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "heat", Status: StatusFailed,
-	})
+	// The container lists its subtree's files: a stage's bundle is its cases'.
+	refs, err := s.ListSubtreeArtifacts(stage.ID)
 	if err != nil {
-		t.Fatalf("re-upsert case: %v", err)
+		t.Fatalf("subtree artifacts: %v", err)
 	}
-	if child.ID == oldChildID {
-		t.Fatal("expected a fresh child run row")
+	if len(refs) != 1 || refs[0].TaskID != heat.ID || refs[0].Artifact.Name != "out.xml" {
+		t.Fatalf("a stage's bundle should carry its cases' files: %+v", refs)
 	}
-	if artifacts, _ := s.ListRunArtifacts(oldChildID); len(artifacts) != 0 {
-		t.Fatalf("old child artifacts should be gone: %+v", artifacts)
+
+	// Re-running the case is a new attempt: the new run starts with no
+	// artifact, and the old attempt keeps its file as history.
+	reportTask(t, s, heat.ID, StatusFailed, "")
+	next := caseRun(t, s, reloadTask(t, s, heat.ID))
+	if next.ID == run.ID {
+		t.Fatal("expected a fresh attempt")
+	}
+	if artifacts, err := s.ListRunArtifacts(next.ID); err != nil || len(artifacts) != 0 {
+		t.Fatalf("the new attempt starts clean: %+v (err %v)", artifacts, err)
+	}
+	if artifacts, err := s.ListRunArtifacts(run.ID); err != nil || len(artifacts) != 1 {
+		t.Fatalf("the previous attempt keeps its artifacts: %+v (err %v)", artifacts, err)
 	}
 }
 
 func TestAppendRunArtifactsByRun(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
-
-	run, err := s.UpsertTestRun(&RunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID, Kind: RunKindUnit,
-	})
-	if err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
+	s := newTestTaskStore(t)
+	_, clone, _, _ := caseStageGraph(t, s, "appendart")
+	run := reportTask(t, s, clone.ID, StatusPassed, "ok")
 
 	if err := s.AppendRunArtifactsByRun(run.ID, []ArtifactInput{
 		{Kind: ArtifactKindResults, Name: "all.log", Content: "log"},
@@ -903,6 +733,11 @@ func TestAppendRunArtifactsByRun(t *testing.T) {
 	if len(artifacts) != 2 {
 		t.Fatalf("expected 2 artifacts, got %d", len(artifacts))
 	}
+	// Appending does not touch the run's result.
+	got, err := s.GetTestRun(run.ID)
+	if err != nil || got.Status != StatusPassed || got.Total != 1 {
+		t.Fatalf("appending must not change the outcome: %+v (err %v)", got, err)
+	}
 
 	// Unknown kind is rejected.
 	if err := s.AppendRunArtifactsByRun(run.ID, []ArtifactInput{
@@ -916,54 +751,86 @@ func TestAppendRunArtifactsByRun(t *testing.T) {
 	}
 }
 
-func TestResetRegressionRun(t *testing.T) {
-	s := newTestStore(t)
-	env, commit := seedEnvAndCommit(t, s)
+// A re-dispatch of the same (commit, environment) pair re-arms the nodes: the
+// stage's cases are queued again on a fresh attempt, and the outcome of the
+// previous attempt stays on its own run — which is what replaced the old
+// "reset the regression run" path.
+func TestRedispatchQueuesFreshCaseAttempts(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, clone, stage, cases := caseStageGraph(t, s, "redispatch", "heat", "poisson")
 
-	parent, child, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "heat", Status: StatusPassed,
-		Artifacts: []ArtifactInput{{Kind: ArtifactKindResults, Name: "out.xml", Content: "<x/>"}},
-	})
+	reportTask(t, s, clone.ID, StatusPassed, "cloned")
+	reportTask(t, s, cases[0].ID, StatusPassed, "ok")
+	if got := reloadTask(t, s, stage.ID); got.Passed != 1 || got.Total != 2 {
+		t.Fatalf("container in flight: %+v", got)
+	}
+
+	// The same graph is dispatched again (the yaml did not change).
+	env, commit := root.EnvironmentID, root.CommitID
+	nodes := []TaskNode{
+		{Task: &Task{Kind: TaskKindClone, NodeKey: TaskKindClone, Name: "clone repositories"}},
+		{Task: &Task{Kind: TaskKindRegressionStage, NodeKey: TaskKindRegressionStage, Name: "regression"}},
+		{
+			Task:      &Task{Kind: TaskKindRegressionCase, NodeKey: caseNodeKey("heat"), Name: "regression: heat"},
+			Deps:      []int64{TaskSubPlaceholderBase + 0},
+			ParentKey: TaskKindRegressionStage,
+		},
+		{
+			Task:      &Task{Kind: TaskKindRegressionCase, NodeKey: caseNodeKey("poisson"), Name: "regression: poisson"},
+			Deps:      []int64{TaskSubPlaceholderBase + 0},
+			ParentKey: TaskKindRegressionStage,
+		},
+	}
+	again, err := s.UpsertTaskGraph(graphRoot(commit, env), nodes)
 	if err != nil {
-		t.Fatalf("upsert case: %v", err)
+		t.Fatalf("re-dispatch: %v", err)
 	}
-	if _, _, err := s.UpsertCaseRun(&CaseRunInput{
-		EnvironmentID: env.ID, CommitID: commit.ID,
-		Name: "poisson", Status: StatusFailed,
-	}); err != nil {
-		t.Fatalf("upsert case: %v", err)
+	if again[0].ID != root.ID {
+		t.Fatalf("the re-dispatch should reuse the root: %d != %d", again[0].ID, root.ID)
 	}
-	if err := s.AppendRunArtifactsByRun(parent.ID, []ArtifactInput{
-		{Kind: ArtifactKindResults, Name: "all.log", Content: "log"},
-	}); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	childID := child.ID
 
-	if err := s.ResetRegressionRun(env.ID, commit.ID); err != nil {
-		t.Fatalf("reset: %v", err)
+	// The heat case is queued on attempt 2; its attempt 1 is untouched.
+	heat := reloadTask(t, s, cases[0].ID)
+	if heat.Status != StatusPending || heat.Attempts != 2 {
+		t.Fatalf("a re-dispatch re-arms the case: %+v", heat)
 	}
-	got, err := s.GetTestRun(parent.ID)
+	runs, err := s.ListTaskRuns(heat.ID)
+	if err != nil || len(runs) != 2 {
+		t.Fatalf("want two attempts, got %+v (err %v)", runs, err)
+	}
+	if runs[0].Attempt != 2 || runs[0].Status != StatusPending {
+		t.Errorf("the newest attempt is the queued one: %+v", runs[0])
+	}
+	if runs[1].Attempt != 1 || runs[1].Status != StatusPassed {
+		t.Errorf("the first attempt keeps its outcome: %+v", runs[1])
+	}
+	// Nothing was retired, and every node is on its second attempt.
+	if retired, err := s.ListRetiredNodes(root.ID); err != nil || len(retired) != 0 {
+		t.Fatalf("a re-dispatch retires nothing: %+v (err %v)", retired, err)
+	}
+	for _, node := range []*Task{clone, stage} {
+		if got := reloadTask(t, s, node.ID); got.Attempts != 2 {
+			t.Errorf("%s attempts = %d, want 2", node.NodeKey, got.Attempts)
+		}
+	}
+}
+
+// GetTestRunWithTask is the run page's lookup: the run and the task it
+// belongs to, so the page can title itself without a second call.
+func TestGetTestRunWithTask(t *testing.T) {
+	s := newTestTaskStore(t)
+	_, _, _, cases := caseStageGraph(t, s, "withtask", "heat")
+	reportTask(t, s, cases[0].ID, StatusPassed, "ok")
+	run := caseRun(t, s, reloadTask(t, s, cases[0].ID))
+
+	gotRun, gotTask, err := s.GetTestRunWithTask(run.ID)
 	if err != nil {
-		t.Fatalf("get: %v", err)
+		t.Fatalf("get run with task: %v", err)
 	}
-	if got.Total != 0 || got.Passed != 0 || got.Summary != "" {
-		t.Fatalf("run should be reset: %+v", got)
+	if gotRun.ID != run.ID || gotTask.ID != cases[0].ID || gotTask.Name != "regression: heat" {
+		t.Fatalf("run/task mismatch: %+v %+v", gotRun, gotTask)
 	}
-	if children, _ := s.ListChildRuns(got.ID); len(children) != 0 {
-		t.Fatalf("child runs should be gone, got %d", len(children))
-	}
-	if artifacts, _ := s.ListRunArtifacts(got.ID); len(artifacts) != 0 {
-		t.Fatalf("artifacts should be gone, got %d", len(artifacts))
-	}
-	// The reset child's artifacts are gone with the child row.
-	if artifacts, _ := s.ListRunArtifacts(childID); len(artifacts) != 0 {
-		t.Fatalf("child artifacts should be gone, got %d", len(artifacts))
-	}
-
-	// Resetting a never-recorded run is a no-op, not an error.
-	if err := s.ResetRegressionRun(env.ID, commit.ID+999); err != nil {
-		t.Fatalf("reset missing run: %v", err)
+	if _, _, err := s.GetTestRunWithTask(run.ID + 9999); !errors.Is(err, ErrTestRunNotFound) {
+		t.Fatalf("unknown run = %v, want %v", err, ErrTestRunNotFound)
 	}
 }

@@ -3,8 +3,11 @@ package store
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // SiteConfig holds the site-wide repository configuration. There is exactly
@@ -145,10 +148,43 @@ func (s *Store) ensureWebhookToken(cfg *SiteConfig) (*SiteConfig, error) {
 	return cfg, nil
 }
 
+// UpdateSiteConfig writes the named columns of the singleton configuration row
+// from cfg, and leaves every other column as it is. It is the write path for
+// readers that changed one part of the configuration: the row is loaded,
+// edited and saved back, so saving the whole row would also write back the
+// values that were read — reverting anything another writer changed in
+// between (a rotated webhook token, for one; see ensureWebhookToken). Selected
+// fields are written even when they are zero, so a field can be cleared.
+//
+// The columns are Go field names (see SiteConfig); the row is created on the
+// way if it does not exist yet.
+func (s *Store) UpdateSiteConfig(cfg *SiteConfig, columns ...string) error {
+	if len(columns) == 0 {
+		return nil
+	}
+	// A name that is not a field would be dropped silently, and the column it
+	// was meant for would quietly stop updating. Refuse it instead.
+	stmt := &gorm.Statement{DB: s.DB}
+	if err := stmt.Parse(&SiteConfig{}); err != nil {
+		return err
+	}
+	for _, name := range columns {
+		if stmt.Schema.LookUpField(name) == nil {
+			return fmt.Errorf("site config has no field %q", name)
+		}
+	}
+	if _, err := s.GetSiteConfig(); err != nil {
+		return err
+	}
+	cfg.ID = 1
+	return s.DB.Model(&SiteConfig{}).Where("id = ?", 1).Select(columns).Updates(cfg).Error
+}
+
 // SaveSiteConfig upserts the singleton configuration row. It writes every
 // column, so a cfg built from scratch (rather than loaded first) carries no
 // webhook token and clears the stored one — the next GetSiteConfig generates
-// a replacement.
+// a replacement. For a config that was loaded and edited, UpdateSiteConfig is
+// the safer write: this one reverts whatever a concurrent writer changed.
 func (s *Store) SaveSiteConfig(cfg *SiteConfig) error {
 	cfg.ID = 1
 	// GetSiteConfig ensures the row exists; save over it either way.

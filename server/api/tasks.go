@@ -14,48 +14,71 @@ import (
 	"gorm.io/gorm"
 )
 
-// --- GET /api/tasks/{id}, /log and /log/download ---
+// --- GET /api/tasks/{id}, /log, /runs and /artifacts/zip ---
 
-// subTaskJSON is the wire representation of one sub-task.
+// subTaskJSON is the wire representation of one node of a task graph. A node is
+// either a real task (it has attempts and runs) or a virtual container whose
+// status and counts are its children's aggregate; retired nodes are the ones
+// the current md-builder.yaml no longer defines, kept as history.
 type subTaskJSON struct {
-	ID         int64   `json:"id"`
-	Kind       string  `json:"kind"`
-	Name       string  `json:"name"`
-	Status     string  `json:"status"`
-	Error      string  `json:"error"`
-	DependsOn  []int64 `json:"dependsOn"`
-	RunID      int64   `json:"runId,omitempty"` // test stages: the recorded run (for the detail link)
-	StartedAt  string  `json:"startedAt"`
-	FinishedAt string  `json:"finishedAt"`
+	ID          int64   `json:"id"`
+	ParentID    int64   `json:"parentId,omitempty"` // the tree: where the node nests (0 = directly under the root)
+	Kind        string  `json:"kind"`
+	NodeKey     string  `json:"nodeKey"` // stable identity across dispatches
+	Name        string  `json:"name"`
+	Description string  `json:"description,omitempty"`
+	Virtual     bool    `json:"virtual,omitempty"`
+	Retired     bool    `json:"retired,omitempty"`
+	Status      string  `json:"status"`
+	Summary     string  `json:"summary,omitempty"`
+	Error       string  `json:"error,omitempty"`
+	DependsOn   []int64 `json:"dependsOn"`
+	Total       int     `json:"total"`
+	Passed      int     `json:"passed"`
+	Failed      int     `json:"failed"`
+	Skipped     int     `json:"skipped"`
+	Attempts    int     `json:"attempts"`
+	RunID       int64   `json:"runId,omitempty"` // the latest attempt's run (for the detail link)
+	StartedAt   string  `json:"startedAt"`
+	FinishedAt  string  `json:"finishedAt"`
 }
 
-// taskDetailJSON is GET /api/tasks/{id}'s response: the task (root or
-// sub-task) plus, for a root, its sub-task list (the graph view).
+// taskDetailJSON is GET /api/tasks/{id}'s response: the task (root or node)
+// plus, for a root, its node list (the graph view). Every node's own task
+// detail carries the attempts of the test it stands for.
 type taskDetailJSON struct {
 	ID            int64             `json:"id"`
 	RootID        int64             `json:"rootId"`
+	ParentID      int64             `json:"parentId,omitempty"`
 	Kind          string            `json:"kind"`
+	NodeKey       string            `json:"nodeKey"`
 	Name          string            `json:"name"`
+	Description   string            `json:"description,omitempty"`
+	Virtual       bool              `json:"virtual,omitempty"`
+	Retired       bool              `json:"retired,omitempty"`
 	Status        string            `json:"status"`
-	Error         string            `json:"error"`
-	Attempts      int               `json:"attempts"`
+	Summary       string            `json:"summary,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	Total         int               `json:"total"`
+	Passed        int               `json:"passed"`
+	Failed        int               `json:"failed"`
+	Skipped       int               `json:"skipped"`
+	Attempts      int               `json:"attempts"` // dispatches: for a real task, its attempt count
 	CommitID      int64             `json:"commitId"`
 	EnvironmentID int64             `json:"environmentId"`
 	Tags          string            `json:"tags"`
-	Trigger       int               `json:"trigger"` // 0 = webhook, 1 = manual
+	Trigger       int               `json:"trigger"` // 0 = webhook, 1 = manual, 2 = manual-yaml
 	StartedAt     string            `json:"startedAt"`
 	FinishedAt    string            `json:"finishedAt"`
-	SubTasks      []subTaskJSON     `json:"subTasks,omitempty"` // roots only
+	Runs          []runJSON         `json:"runs,omitempty"`         // real tasks: every attempt, newest first
+	SubTasks      []subTaskJSON     `json:"subTasks,omitempty"`     // roots: the current nodes
+	RetiredTasks  []subTaskJSON     `json:"retiredTasks,omitempty"` // roots: nodes a later dispatch dropped
 	Commit        *commitJSON       `json:"commit,omitempty"`
 	Environment   *dashboardEnvJSON `json:"environment,omitempty"`
-
-	// RegressionRunID is the stage-wide regression run of a root: the graph
-	// page's derived "reg test" node opens it, since each case node opens its
-	// own case run instead.
-	RegressionRunID int64 `json:"regressionRunId,omitempty"`
 }
 
-// handleTaskItem routes /api/tasks/{id} (and /log).
+// handleTaskItem routes /api/tasks/{id} and its sub-resources: /log,
+// /log/download, /runs and /artifacts/zip.
 func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	rest := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
@@ -69,20 +92,27 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request, user *st
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid task id"})
 		return
 	}
-	if len(parts) == 2 && (parts[1] == "log" || parts[1] == "log/download") {
+	if len(parts) == 2 {
+		if parts[1] == "" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+			return
+		}
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		if parts[1] == "log" {
+		switch parts[1] {
+		case "log":
 			s.taskLogs(w, r, id)
-		} else {
-			s.taskLogDownload(w, id)
+		case "log/download":
+			s.taskLogDownload(w, r, id)
+		case "runs":
+			s.taskRuns(w, id)
+		case "artifacts/zip":
+			s.downloadTaskArtifactsZip(w, r, id)
+		default:
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		}
-		return
-	}
-	if len(parts) != 1 {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -94,24 +124,28 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request, user *st
 
 // taskDetail handles GET /api/tasks/{id}.
 func (s *Server) taskDetail(w http.ResponseWriter, id int64) {
-	task, err := s.Store.GetTask(id)
-	if err != nil {
-		if errors.Is(err, store.ErrTaskNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
-			return
-		}
-		log.Printf("task detail: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+	task, ok := s.loadTask(w, id, "task detail")
+	if !ok {
 		return
 	}
 
 	detail := taskDetailJSON{
 		ID:            task.ID,
 		RootID:        task.RootID,
+		ParentID:      task.ParentID,
 		Kind:          task.Kind,
+		NodeKey:       task.NodeKey,
 		Name:          task.Name,
+		Description:   task.Description,
+		Virtual:       task.Virtual,
+		Retired:       task.Retired,
 		Status:        task.Status,
+		Summary:       task.Summary,
 		Error:         task.Error,
+		Total:         task.Total,
+		Passed:        task.Passed,
+		Failed:        task.Failed,
+		Skipped:       task.Skipped,
 		Attempts:      task.Attempts,
 		CommitID:      task.CommitID,
 		EnvironmentID: task.EnvironmentID,
@@ -141,63 +175,83 @@ func (s *Server) taskDetail(w http.ResponseWriter, id int64) {
 		detail.Environment = &ev
 	}
 
-	// For a root, attach the sub-task list.
-	if task.Kind == store.TaskKindRoot {
-		subs, err := s.Store.ListSubTasks(task.ID)
+	// A real task's attempts: the run page of each one is where its log and
+	// artifacts live, so the task detail lists them.
+	if !task.Virtual {
+		runs, err := s.Store.ListTaskRuns(task.ID)
 		if err != nil {
-			log.Printf("task detail subs: %v", err)
+			log.Printf("task detail runs: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 			return
 		}
-		// Test stages link to their recorded run (the stage detail view).
-		var buildRuns, unitRuns, regRuns map[store.EnvCommit]store.TestRun
-		if task.CommitID != 0 && task.EnvironmentID != 0 {
-			ec := []int64{task.EnvironmentID}
-			cc := []int64{task.CommitID}
-			buildRuns, _ = s.Store.FindRunsByCommits(store.RunKindBuild, ec, cc)
-			unitRuns, _ = s.Store.FindRunsByCommits(store.RunKindUnit, ec, cc)
-			regRuns, _ = s.Store.FindRunsByCommits(store.RunKindRegression, ec, cc)
+		detail.Runs = make([]runJSON, 0, len(runs))
+		for i := range runs {
+			detail.Runs = append(detail.Runs, toRunJSON(&runs[i]))
 		}
-		// A regression stage is one sub-task per case, and each case records
-		// its own child run: resolve every case node to the run it produced,
-		// so clicking a node opens that case rather than the whole stage.
-		// (The parent regression run stays the fallback for a node whose case
-		// never recorded one — an old dispatch, or a report without cases.)
-		var caseRuns map[int64]store.TestRun
-		if regIDs := regressionSubTaskIDs(subs); len(regIDs) > 0 {
-			caseRuns, _ = s.Store.FindCaseRunsByTasks(regIDs)
+	}
+
+	// For a root, attach the node list: the current graph plus the nodes an
+	// earlier dispatch defined and a later one dropped.
+	if task.Kind == store.TaskKindRoot {
+		active, err := s.Store.ListActiveNodes(task.ID)
+		if err != nil {
+			log.Printf("task detail nodes: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
 		}
-		detail.SubTasks = make([]subTaskJSON, 0, len(subs))
-		for i := range subs {
-			sj := toSubTaskJSON(&subs[i])
-			key := store.EnvCommit{Env: subs[i].EnvironmentID, Commit: subs[i].CommitID}
-			switch subs[i].Kind {
-			case store.TaskKindBuild:
-				if r, ok := buildRuns[key]; ok {
-					sj.RunID = r.ID
-				}
-			case store.TaskKindUnit:
-				if r, ok := unitRuns[key]; ok {
-					sj.RunID = r.ID
-				}
-			case store.TaskKindRegression:
-				if r, ok := caseRuns[subs[i].ID]; ok {
-					sj.RunID = r.ID
-				} else if r, ok := regRuns[key]; ok {
-					sj.RunID = r.ID
-				}
-			}
-			detail.SubTasks = append(detail.SubTasks, sj)
+		retired, err := s.Store.ListRetiredNodes(task.ID)
+		if err != nil {
+			log.Printf("task detail retired nodes: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
 		}
-		if r, ok := regRuns[store.EnvCommit{Env: task.EnvironmentID, Commit: task.CommitID}]; ok {
-			detail.RegressionRunID = r.ID
+		// Each node links to the run of its latest attempt (the node's log and
+		// artifacts); a virtual node has none.
+		runs, err := s.Store.LatestRunsByTaskIDs(taskIDsOf(active, retired))
+		if err != nil {
+			log.Printf("task detail node runs: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		detail.SubTasks = make([]subTaskJSON, 0, len(active))
+		for i := range active {
+			detail.SubTasks = append(detail.SubTasks, toSubTaskJSON(&active[i], runOf(runs, active[i].ID)))
+		}
+		detail.RetiredTasks = make([]subTaskJSON, 0, len(retired))
+		for i := range retired {
+			detail.RetiredTasks = append(detail.RetiredTasks, toSubTaskJSON(&retired[i], runOf(runs, retired[i].ID)))
 		}
 	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
-// taskLogs handles GET /api/tasks/{id}/log?after=<seq>: log chunks after
-// the given sequence, for incremental (live-following) reads.
+// taskRuns handles GET /api/tasks/{id}/runs: the task's attempts, newest
+// first (one run per attempt), for the log viewer's attempt switcher.
+func (s *Server) taskRuns(w http.ResponseWriter, id int64) {
+	task, ok := s.loadTask(w, id, "task runs")
+	if !ok {
+		return
+	}
+	if task.Virtual {
+		writeJSON(w, http.StatusOK, map[string]any{"runs": []runJSON{}})
+		return
+	}
+	runs, err := s.Store.ListTaskRuns(task.ID)
+	if err != nil {
+		log.Printf("task runs: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	out := make([]runJSON, 0, len(runs))
+	for i := range runs {
+		out = append(out, toRunJSON(&runs[i]))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": out})
+}
+
+// taskLogs handles GET /api/tasks/{id}/log?after=<seq>&attempt=<n>: log chunks
+// after the given sequence, for incremental (live-following) reads. Without an
+// attempt the current one is read — what a viewer following a task live wants.
 func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, id int64) {
 	after := 0
 	if v := r.URL.Query().Get("after"); v != "" {
@@ -208,16 +262,15 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, id int64) {
 		}
 		after = n
 	}
-	if _, err := s.Store.GetTask(id); err != nil {
-		if errors.Is(err, store.ErrTaskNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
-			return
-		}
-		log.Printf("task logs: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+	task, ok := s.loadTask(w, id, "task logs")
+	if !ok {
 		return
 	}
-	logs, err := s.Store.ReadTaskLogs(id, after)
+	attempt, ok := s.readAttemptParam(w, r, task)
+	if !ok {
+		return
+	}
+	logs, err := s.Store.ReadTaskLogs(id, attempt, after)
 	if err != nil {
 		log.Printf("task logs read: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -232,6 +285,7 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, id int64) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"attempt": attempt,
 		"chunks":  chunks,
 		"lastSeq": lastSeq,
 	})
@@ -243,28 +297,31 @@ type logChunkJSON struct {
 	Content string `json:"content"`
 }
 
-// taskLogDownload handles GET /api/tasks/{id}/log/download: the task's whole
-// log as one text file. The log viewer in the browser keeps only the tail of
-// the stream it followed, so the file is produced from the stored chunks
-// here, streamed batch by batch (ReadTaskLogs caps how many it returns).
-func (s *Server) taskLogDownload(w http.ResponseWriter, id int64) {
-	task, err := s.Store.GetTask(id)
-	if err != nil {
-		if errors.Is(err, store.ErrTaskNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
-			return
-		}
-		log.Printf("task log download: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+// taskLogDownload handles GET /api/tasks/{id}/log/download[?attempt=<n>]: the
+// attempt's whole log as one text file. The log viewer in the browser keeps
+// only the tail of the stream it followed, so the file is produced from the
+// stored chunks here, streamed batch by batch (ReadTaskLogs caps how many it
+// returns).
+func (s *Server) taskLogDownload(w http.ResponseWriter, r *http.Request, id int64) {
+	task, ok := s.loadTask(w, id, "task log download")
+	if !ok {
 		return
 	}
+	attempt, ok := s.readAttemptParam(w, r, task)
+	if !ok {
+		return
+	}
+	name := fmt.Sprintf("task-%d", task.ID)
+	if attempt != task.Attempts {
+		name = fmt.Sprintf("%s-attempt-%d", name, attempt)
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("task-%d.log", task.ID)))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".log"))
 	// Walk the log by sequence: each batch continues after the last chunk
 	// written, so a long build's output never has to fit in memory.
 	after := 0
 	for {
-		logs, err := s.Store.ReadTaskLogs(task.ID, after)
+		logs, err := s.Store.ReadTaskLogs(task.ID, attempt, after)
 		if err != nil {
 			// The status line is already out: the download is cut short and
 			// the reason stays in the server log.
@@ -283,29 +340,75 @@ func (s *Server) taskLogDownload(w http.ResponseWriter, id int64) {
 	}
 }
 
-// regressionSubTaskIDs collects the ids of a root's regression case
-// sub-tasks (each case is its own task and records its own child run).
-func regressionSubTaskIDs(subs []store.Task) []int64 {
+// loadTask loads a task by id and answers the request itself on failure
+// (404/500); ok reports whether the caller should carry on.
+func (s *Server) loadTask(w http.ResponseWriter, id int64, what string) (*store.Task, bool) {
+	task, err := s.Store.GetTask(id)
+	if err != nil {
+		if errors.Is(err, store.ErrTaskNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return nil, false
+		}
+		log.Printf("%s: %v", what, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return nil, false
+	}
+	return task, true
+}
+
+// readAttemptParam resolves an attempt number off the query string, defaulting
+// to the task's current attempt (what a live viewer wants). An unknown attempt
+// is not an error: an attempt that never logged anything reads as empty, and
+// the caller can tell which one it asked for from the response.
+func (s *Server) readAttemptParam(w http.ResponseWriter, r *http.Request, task *store.Task) (int, bool) {
+	v := r.URL.Query().Get("attempt")
+	if v == "" {
+		return task.Attempts, true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attempt must be a positive integer"})
+		return 0, false
+	}
+	return n, true
+}
+
+// taskIDsOf collects the ids of one or more node lists.
+func taskIDsOf(lists ...[]store.Task) []int64 {
 	var ids []int64
-	for i := range subs {
-		if subs[i].Kind == store.TaskKindRegression {
-			ids = append(ids, subs[i].ID)
+	for _, list := range lists {
+		for i := range list {
+			ids = append(ids, list[i].ID)
 		}
 	}
 	return ids
 }
 
-func toSubTaskJSON(t *store.Task) subTaskJSON {
+func toSubTaskJSON(t *store.Task, run *store.TestRun) subTaskJSON {
 	out := subTaskJSON{
-		ID:        t.ID,
-		Kind:      t.Kind,
-		Name:      t.Name,
-		Status:    t.Status,
-		Error:     t.Error,
-		DependsOn: t.DependsOnIDs(),
+		ID:          t.ID,
+		ParentID:    t.ParentID,
+		Kind:        t.Kind,
+		NodeKey:     t.NodeKey,
+		Name:        t.Name,
+		Description: t.Description,
+		Virtual:     t.Virtual,
+		Retired:     t.Retired,
+		Status:      t.Status,
+		Summary:     t.Summary,
+		Error:       t.Error,
+		DependsOn:   t.DependsOnIDs(),
+		Total:       t.Total,
+		Passed:      t.Passed,
+		Failed:      t.Failed,
+		Skipped:     t.Skipped,
+		Attempts:    t.Attempts,
 	}
 	if out.DependsOn == nil {
 		out.DependsOn = []int64{}
+	}
+	if run != nil {
+		out.RunID = run.ID
 	}
 	if t.StartedAt != nil {
 		out.StartedAt = t.StartedAt.UTC().Format(timeFormat)

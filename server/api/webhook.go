@@ -47,6 +47,32 @@ type gitlabEventPayload struct {
 	} `json:"object_attributes"`
 }
 
+// nullSHA is the all-zero object id GitLab sends as a push's "after" when a
+// branch or a tag is deleted: there is no commit the event points at.
+const nullSHA = "0000000000000000000000000000000000000000"
+
+// isNullSHA reports whether sha is that null object id (all zeros).
+func isNullSHA(sha string) bool {
+	return sha != "" && strings.Trim(sha, "0") == ""
+}
+
+// eventKind maps the X-Gitlab-Event header to the payload's object_kind
+// vocabulary. The header names the event GitLab's own way ("Push Hook", "Tag
+// Push Hook", "Merge Request Hook"), which is not what object_kind carries, so
+// the header cannot simply stand in for it: an unmapped value would match no
+// case below and the event would be ignored. "" for an unrecognised header.
+func eventKind(header string) string {
+	switch header {
+	case "Push Hook":
+		return "push"
+	case "Tag Push Hook":
+		return "tag_push"
+	case "Merge Request Hook":
+		return "merge_request"
+	}
+	return ""
+}
+
 // handleGitLabWebhook receives GitLab webhook events (POST /api/webhooks/gitlab).
 //
 // Push, tag push and merge request events are recorded in the commits table
@@ -98,7 +124,7 @@ func (s *Server) handleGitLabWebhook(w http.ResponseWriter, r *http.Request) {
 
 	kind := payload.ObjectKind
 	if kind == "" {
-		kind = event // fall back to the X-Gitlab-Event header
+		kind = eventKind(event) // fall back to the X-Gitlab-Event header
 	}
 
 	switch kind {
@@ -133,12 +159,29 @@ func webhookTokenMatches(want, got string) bool {
 // recordPush stores a push or tag push event as a dashboard commit column.
 // The head commit (the last of the pushed list) is the tested revision; tag
 // pushes carry the tag name in ref and the tagged SHA in after.
+//
+// A deletion is acknowledged and dropped: GitLab sends the null SHA as the
+// event's commit, so recording it would put a column on the dashboard that no
+// run can ever fill, and dispatching it would fail at the clone with an error
+// that says nothing about the cause.
 func (s *Server) recordPush(w http.ResponseWriter, payload gitlabEventPayload, event string) {
 	ref := strings.TrimPrefix(payload.Ref, "refs/heads/")
 	if event == store.CommitEventTagPush {
 		// refs/tags/v1.2.3 → v1.2.3 (keep the full name: tags are the
 		// interesting part of a tag push).
 		ref = strings.TrimPrefix(payload.Ref, "refs/tags/")
+	}
+	if isNullSHA(payload.After) {
+		log.Printf("gitlab webhook: %s event on %s: %q deleted, nothing to test",
+			event, payload.Project.PathWithNamespace, ref)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "ignored",
+			"event":   event,
+			"project": payload.Project.PathWithNamespace,
+			"ref":     ref,
+			"message": "branch or tag deletion: no commit to test",
+		})
+		return
 	}
 	// The head of a push is the last entry in the commits array; its message
 	// makes a useful column label. Tag pushes carry no commits list — the
@@ -195,10 +238,17 @@ func (s *Server) recordPush(w http.ResponseWriter, payload gitlabEventPayload, e
 			s.recordDispatchError(commit, reason)
 		}
 	} else {
-		s.recordDispatchError(commit, "task dispatch is not configured on the server")
+		// The commit is recorded, but nothing will ever run it: say so on the
+		// row as well, or the matrix shows an empty column with no reason.
+		resp["dispatchSkipped"] = msgDispatchNotConfigured
+		s.recordDispatchError(commit, msgDispatchNotConfigured)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
+
+// msgDispatchNotConfigured is what both event paths record on a commit they
+// could not dispatch because the server has no runner wired up.
+const msgDispatchNotConfigured = "task dispatch is not configured on the server"
 
 // recordDispatchError stores the reason a commit produced no task graph on
 // its row (see store.SetCommitDispatchError). Bookkeeping only: a failure to
@@ -226,8 +276,23 @@ func (s *Server) recordMergeRequest(w http.ResponseWriter, payload gitlabEventPa
 		return
 	}
 
-	// The tested revision is the MR's last commit on the source branch.
+	// The tested revision is the MR's last commit on the source branch. A
+	// null id is no revision at all (GitLab sends it when the source branch
+	// is gone), so it is dropped like a deletion on the push path.
 	sha := oa.LastCommit.ID
+	if isNullSHA(sha) {
+		log.Printf("gitlab webhook: merge request event on %s (%s, action %q): no commit to test",
+			payload.Project.PathWithNamespace, oa.SourceBranch, oa.Action)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "ignored",
+			"event":   "merge_request",
+			"action":  oa.Action,
+			"project": payload.Project.PathWithNamespace,
+			"ref":     oa.SourceBranch,
+			"message": "merge request without a commit id: nothing to test",
+		})
+		return
+	}
 	ref := oa.SourceBranch
 	message := firstLine(oa.LastCommit.Message)
 	if message == "" {
@@ -266,18 +331,25 @@ func (s *Server) recordMergeRequest(w http.ResponseWriter, payload gitlabEventPa
 	if !dispatch {
 		resp["message"] = "action " + oa.Action + " recorded; not dispatched (only open, reopen and merge trigger tests)"
 	}
-	if dispatch && s.Runner != nil {
-		if ok, reason := s.dispatchDecision(payload); ok {
-			d := s.Runner.DispatchForCommit(commit)
-			resp["jobsCreated"] = d.TasksCreated
-			resp["entriesSkipped"] = d.EntriesSkipped
-			if d.Err != nil {
-				resp["dispatchError"] = d.Err.Error()
-				log.Printf("gitlab webhook: dispatch for commit %d failed: %v", commit.ID, d.Err)
+	if dispatch {
+		if s.Runner != nil {
+			if ok, reason := s.dispatchDecision(payload); ok {
+				d := s.Runner.DispatchForCommit(commit)
+				resp["jobsCreated"] = d.TasksCreated
+				resp["entriesSkipped"] = d.EntriesSkipped
+				if d.Err != nil {
+					resp["dispatchError"] = d.Err.Error()
+					log.Printf("gitlab webhook: dispatch for commit %d failed: %v", commit.ID, d.Err)
+				}
+			} else {
+				resp["dispatchSkipped"] = reason
+				s.recordDispatchError(commit, reason)
 			}
 		} else {
-			resp["dispatchSkipped"] = reason
-			s.recordDispatchError(commit, reason)
+			// Same as the push path: without a runner the row would stay
+			// empty with nothing saying why.
+			resp["dispatchSkipped"] = msgDispatchNotConfigured
+			s.recordDispatchError(commit, msgDispatchNotConfigured)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)

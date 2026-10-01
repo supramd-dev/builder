@@ -83,7 +83,7 @@ func TestDispatchManual(t *testing.T) {
 		if root.CommitID != commits[0].ID {
 			t.Errorf("root %d: commit %d, want %d", root.ID, root.CommitID, commits[0].ID)
 		}
-		subs, err := s.ListSubTasks(root.ID)
+		subs, err := s.ListActiveNodes(root.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +96,7 @@ func TestDispatchManual(t *testing.T) {
 		for i := range subs {
 			kinds = append(kinds, subs[i].Kind)
 		}
-		if !contains(kinds, store.TaskKindUnit) || contains(kinds, store.TaskKindRegression) {
+		if !contains(kinds, store.TaskKindUnit) || contains(kinds, store.TaskKindRegressionStage) {
 			t.Fatalf("root %d: kinds %v", root.ID, kinds)
 		}
 
@@ -154,12 +154,12 @@ func TestDispatchManual(t *testing.T) {
 		t.Fatalf("re-dispatch reused commit %d, want a fresh row", again[0].CommitID)
 	}
 
-	subs, err := s.ListSubTasks(again[0].ID)
+	subs, err := s.ListActiveNodes(again[0].ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := range subs {
-		if subs[i].Kind == store.TaskKindRegression {
+		if subs[i].Kind == store.TaskKindRegressionStage {
 			return // the fresh graph has the requested stage
 		}
 	}

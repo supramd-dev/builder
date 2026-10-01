@@ -320,6 +320,71 @@ func caseNames(cases []RegressionCase) []string {
 	return out
 }
 
+// TestParseConfigV2CaseTimeoutPrecedence pins the chain a regression case's
+// command timeout resolves through: the preset's own timeout, else the matrix
+// entry's, else the defaults' one, else the package default. The entry level
+// is the one that matters — a case resolved without it keeps the defaults'
+// value (or the package default, an hour), so an entry with `timeout: 60`
+// would run its cases for far longer than the entry allows.
+func TestParseConfigV2CaseTimeoutPrecedence(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 2
+presets:
+  own:
+    command: "./own"
+    timeout: 120
+  plain:
+    command: "./plain"
+defaults:
+  build:
+    command: "make"
+  timeout: 900
+matrix:
+  - tags: [cpu]
+    timeout: 60
+    regression:
+      use: [own, plain]
+  - tags: [gpu]
+    regression:
+      use: [plain]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+	if got := entries[0].Regression[0].Timeout; got != 120 {
+		t.Errorf("preset's own timeout = %d, want 120", got)
+	}
+	if got := entries[0].Regression[1].Timeout; got != 60 {
+		t.Errorf("case of an entry with timeout 60 = %d, want 60 (the entry's, not the defaults')", got)
+	}
+	if got := entries[1].Regression[0].Timeout; got != 900 {
+		t.Errorf("case falling through to defaults = %d, want 900", got)
+	}
+
+	// Nothing to fall through to: the package default.
+	entries, err = ParseConfig([]byte(`version: 2
+defaults:
+  build:
+    command: "make"
+presets:
+  plain:
+    command: "./plain"
+matrix:
+  - tags: [cpu]
+    regression:
+      use: [plain]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entries[0].Regression[0].Timeout; got != DefaultTimeoutSeconds {
+		t.Errorf("case with nothing to fall through to = %d, want the package default %d",
+			got, DefaultTimeoutSeconds)
+	}
+}
+
 func TestParseConfigV2CommandList(t *testing.T) {
 	entries, err := ParseConfig([]byte(`version: 2
 defaults:

@@ -3,12 +3,16 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 
 	"md-builder/server/storage"
 	"md-builder/server/store"
@@ -98,6 +102,17 @@ func artifactText(t *testing.T, s *store.Store, a *store.TestArtifact) string {
 		t.Fatalf("read artifact %d: %v", a.ID, err)
 	}
 	return string(data)
+}
+
+// runOf returns the in-flight (latest) run row of a real task node: the row
+// the dashboard and the run page read.
+func runOf(t *testing.T, s *store.Store, task *store.Task) *store.TestRun {
+	t.Helper()
+	run, err := s.FindTaskRun(task.ID, task.Attempts)
+	if err != nil {
+		t.Fatalf("run of task %d (attempt %d): %v", task.ID, task.Attempts, err)
+	}
+	return run
 }
 
 // newExecuteFixture seeds a user/environment/commit and a full task graph,
@@ -288,13 +303,7 @@ func TestExecuteStageFetchesArtifactFile(t *testing.T) {
 		t.Fatalf("no artifact fetch script ran: %+v", exec.scripts)
 	}
 
-	envs := []int64{stage.EnvironmentID}
-	commits := []int64{stage.CommitID}
-	runs, _ := s.FindRunsByCommits(store.RunKindUnit, envs, commits)
-	run, ok := runs[store.EnvCommit{Env: stage.EnvironmentID, Commit: stage.CommitID}]
-	if !ok {
-		t.Fatal("unit run missing")
-	}
+	run := runOf(t, s, stage)
 	if run.TaskID != stage.ID {
 		t.Errorf("run.TaskID = %d, want the stage task %d", run.TaskID, stage.ID)
 	}
@@ -343,12 +352,7 @@ func TestExecuteStageMultipleArtifactFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runs, _ := s.FindRunsByCommits(store.RunKindUnit,
-		[]int64{stage.EnvironmentID}, []int64{stage.CommitID})
-	run, ok := runs[store.EnvCommit{Env: stage.EnvironmentID, Commit: stage.CommitID}]
-	if !ok {
-		t.Fatal("unit run missing")
-	}
+	run := runOf(t, s, stage)
 	if run.Total != 12 || run.Failed != 2 || run.Skipped != 1 {
 		t.Errorf("counts should sum across files: total=%d failed=%d skipped=%d",
 			run.Total, run.Failed, run.Skipped)
@@ -385,12 +389,7 @@ func TestExecuteStageArtifactFileMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runs, _ := s.FindRunsByCommits(store.RunKindUnit,
-		[]int64{stage.EnvironmentID}, []int64{stage.CommitID})
-	run, ok := runs[store.EnvCommit{Env: stage.EnvironmentID, Commit: stage.CommitID}]
-	if !ok {
-		t.Fatal("unit run missing")
-	}
+	run := runOf(t, s, stage)
 	if run.Total != 0 || run.Failed != 0 {
 		t.Errorf("missing file should leave counts zero: %+v", run)
 	}
@@ -402,7 +401,7 @@ func TestExecuteStageArtifactFileMissing(t *testing.T) {
 		t.Errorf("no artifact should be stored: %+v", artifacts)
 	}
 	// The stage log mentions the fetch failure.
-	logs, _ := s.ReadTaskLogs(stage.ID, 0)
+	logs, _ := s.ReadTaskLogs(stage.ID, stage.Attempts, 0)
 	var all string
 	for _, l := range logs {
 		all += l.Content
@@ -423,7 +422,7 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := s.GetTask(cloneTask.ID)
-	if got.Status != store.TaskDone {
+	if got.Status != store.StatusPassed {
 		t.Fatalf("clone should be done: %+v", got)
 	}
 	if cloner.codeRepo != "https://gitlab.example.com/group/code" {
@@ -433,7 +432,7 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 		t.Errorf("clone remote dir wrong: %v", cloner.remoteDirs)
 	}
 	// Clone log was persisted.
-	logs, _ := s.ReadTaskLogs(cloneTask.ID, 0)
+	logs, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
 	if len(logs) == 0 {
 		t.Error("clone task should have log chunks")
 	}
@@ -447,32 +446,30 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ = s.GetTask(build.ID)
-	if got.Status != store.TaskDone {
+	if got.Status != store.StatusPassed {
 		t.Fatalf("build should be done: %+v", got)
 	}
 	// The build outcome is recorded as a "build" test run for the dashboard.
-	buildRuns, _ := s.FindRunsByCommits(store.RunKindBuild,
-		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
-	bRun, ok := buildRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
-	if !ok || bRun.Status != store.StatusPassed {
+	if bRun := runOf(t, s, build); bRun.Status != store.StatusPassed {
 		t.Errorf("build run wrong: %+v", bRun)
 	}
 
-	// 3. unit + both regression cases (claimable once build is done)
+	// 3. unit + both regression cases (claimable once build is done; the
+	// regression container is virtual and never claimed)
 	claimOrder := map[string]int{}
 	for i := 0; i < 3; i++ {
 		st, err := s.ClaimReadyTask()
 		if err != nil || st == nil {
 			t.Fatalf("claim stage %d: %v %v", i, st, err)
 		}
-		if st.Kind != store.TaskKindUnit && st.Kind != store.TaskKindRegression {
+		if st.Kind != store.TaskKindUnit && st.Kind != store.TaskKindRegressionCase {
 			t.Fatalf("want a stage, got %s", st.Kind)
 		}
 		if err := svc.ExecuteTask(ctx, st); err != nil {
 			t.Fatal(err)
 		}
 		got, _ := s.GetTask(st.ID)
-		if got.Status != store.TaskDone {
+		if got.Status != store.StatusPassed {
 			t.Errorf("%s should be done: %+v", st.Kind, got)
 		}
 		claimOrder[st.Name]++
@@ -481,29 +478,33 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 		t.Errorf("stage set wrong: %+v", claimOrder)
 	}
 
-	// Both test runs recorded as passed; the regression run aggregates the
-	// two case rows.
-	envs := []int64{cloneTask.EnvironmentID}
-	commits := []int64{cloneTask.CommitID}
-	runs, err := s.FindRunsByCommits(store.RunKindUnit, envs, commits)
+	// Every real node has its passed run; the virtual regression container
+	// has none and aggregates the two case rows instead.
+	latest, err := runsByKey(s, cloneTask)
 	if err != nil {
 		t.Fatal(err)
 	}
-	unit, ok := runs[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
-	if !ok || unit.Status != store.StatusPassed {
+	if unit := latest[store.TaskKindUnit]; unit == nil || unit.Status != store.StatusPassed {
 		t.Errorf("unit run wrong: %+v", unit)
 	}
-	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression, envs, commits)
-	reg, ok := regRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
-	if !ok || reg.Status != store.StatusPassed {
-		t.Fatalf("regression run wrong: %+v", reg)
+	heat, poisson := latest[RegressionCaseKey("heat")], latest[RegressionCaseKey("poisson")]
+	if heat == nil || heat.Status != store.StatusPassed || poisson == nil || poisson.Status != store.StatusPassed {
+		t.Fatalf("case runs wrong: heat=%+v poisson=%+v", heat, poisson)
 	}
-	if reg.Total != 2 || reg.Passed != 2 || reg.Failed != 0 {
-		t.Errorf("regression run should aggregate 2 passed cases: %+v", reg)
+	if cont := latest[RegressionStageKey]; cont != nil {
+		t.Errorf("the regression container should have no run of its own: %+v", cont)
 	}
-	children, _ := s.ListChildRuns(reg.ID)
-	if len(children) != 2 || children[0].Name != "heat" || children[1].Name != "poisson" {
-		t.Errorf("child runs wrong: %+v", children)
+	reg, err := regressionStage(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reg.Status != store.StatusPassed || reg.Total != 2 || reg.Passed != 2 || reg.Failed != 0 {
+		t.Errorf("regression container should aggregate 2 passed cases: %+v", reg)
+	}
+	children, _ := s.ListChildren(reg.ID)
+	if len(children) != 2 || children[0].NodeKey != RegressionCaseKey("heat") ||
+		children[1].NodeKey != RegressionCaseKey("poisson") {
+		t.Errorf("case nodes wrong: %+v", children)
 	}
 
 	// The build script ran the configured command; the stage scripts used
@@ -538,60 +539,69 @@ func TestExecuteCloneFailureSkipsDownstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := s.GetTask(cloneTask.ID)
-	if got.Status != store.TaskFailed || got.Error == "" {
+	if got.Status != store.StatusFailed || got.Error == "" {
 		t.Fatalf("clone should be failed with error: %+v", got)
 	}
 
-	// runClaimed's post-processing: skip dependents + skipped test runs.
-	if err := s.SkipDependents(got.RootID, got.ID, "skipped: upstream task "+got.Name+" failed"); err != nil {
-		t.Fatal(err)
+	// runClaimed's post-processing: SkipDependents marks everything behind the
+	// failed node skipped, closes its run and rolls the containers up.
+	reason := "upstream task " + got.Name + " failed"
+	if got.Error != "" {
+		reason += ": " + got.Error
 	}
-	svc.recordSkippedRuns(got)
-	if _, _, err := s.RefreshRootStatus(got.RootID); err != nil {
+	if err := s.SkipDependents(got.RootID, got.ID, reason); err != nil {
 		t.Fatal(err)
 	}
 
-	subs, _ := s.ListSubTasks(got.RootID)
+	subs, _ := s.ListActiveNodes(got.RootID)
 	for _, sub := range subs {
 		if sub.Kind == store.TaskKindClone {
 			continue
 		}
-		if sub.Status != store.TaskSkipped {
+		if sub.Status != store.StatusSkipped {
 			t.Errorf("%s should be skipped: %s", sub.Kind, sub.Status)
 		}
 	}
 	root, _ := s.GetTask(got.RootID)
-	if root.Status != store.TaskFailed {
+	if root.Status != store.StatusFailed {
 		t.Errorf("root should be failed: %s", root.Status)
 	}
 
-	// The dashboard shows ✗ through failed TestRuns.
-	runs, _ := s.FindRunsByCommits(store.RunKindUnit, []int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
-	unit, ok := runs[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
-	if !ok || unit.Status != store.StatusFailed || !strings.Contains(unit.Summary, "skipped") {
+	// The dashboard shows the skipped stages through their own rows: the unit
+	// run is skipped, carrying the reason that stopped it.
+	latest, err := runsByKey(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := latest[store.TaskKindUnit]
+	if unit == nil || unit.Status != store.StatusSkipped || !strings.Contains(unit.Summary, "upstream task") {
 		t.Errorf("skipped unit run wrong: %+v", unit)
 	}
-	// The regression cases were recorded as skipped child runs; the run
-	// summary surfaces as "skipped:" (the dashboard translation).
-	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression,
-		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
-	reg, ok := regRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
-	if !ok {
-		t.Fatal("skipped regression run missing")
+	// The regression cases were recorded as skipped runs; the virtual
+	// container has no run and aggregates them.
+	reg, err := regressionStage(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if reg.Total != 2 || reg.Passed != 0 || reg.Failed != 0 || reg.Skipped != 2 {
 		t.Errorf("skipped case aggregate wrong: %+v", reg)
 	}
-	if !strings.HasPrefix(reg.Summary, "skipped:") {
-		t.Errorf("all-skipped run summary should start with skipped:: %q", reg.Summary)
+	if !strings.Contains(reg.Summary, "skipped (upstream failure)") {
+		t.Errorf("all-skipped container summary should say so: %q", reg.Summary)
 	}
-	children, _ := s.ListChildRuns(reg.ID)
+	if c := latest[RegressionStageKey]; c != nil {
+		t.Errorf("the regression container should have no run: %+v", c)
+	}
+	children, _ := s.ListChildren(reg.ID)
 	if len(children) != 2 {
-		t.Fatalf("want 2 skipped child runs, got %d", len(children))
+		t.Fatalf("want 2 skipped case nodes, got %d", len(children))
 	}
 	for _, c := range children {
 		if c.Status != store.StatusSkipped {
 			t.Errorf("case %s should be skipped: %s", c.Name, c.Status)
+		}
+		if run := latest[c.NodeKey]; run == nil || run.Status != store.StatusSkipped {
+			t.Errorf("case %s run should be skipped: %+v", c.Name, run)
 		}
 	}
 }
@@ -617,16 +627,13 @@ func TestExecuteBuildFailureRecordsFailedBuildRun(t *testing.T) {
 	}
 
 	got, _ := s.GetTask(build.ID)
-	if got.Status != store.TaskFailed {
+	if got.Status != store.StatusFailed {
 		t.Fatalf("build should be failed: %+v", got)
 	}
 
 	// The failed build recorded a failed "build" run with the compiler error.
-	envs := []int64{build.EnvironmentID}
-	commits := []int64{build.CommitID}
-	buildRuns, _ := s.FindRunsByCommits(store.RunKindBuild, envs, commits)
-	bRun, ok := buildRuns[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]
-	if !ok || bRun.Status != store.StatusFailed {
+	bRun := runOf(t, s, build)
+	if bRun.Status != store.StatusFailed {
 		t.Fatalf("failed build run wrong: %+v", bRun)
 	}
 	if !strings.Contains(bRun.Summary, "CMake Error") {
@@ -634,13 +641,15 @@ func TestExecuteBuildFailureRecordsFailedBuildRun(t *testing.T) {
 	}
 
 	// Scheduler post-processing: the test stages are skipped with rows.
-	if err := s.SkipDependents(got.RootID, got.ID, "skipped: upstream task "+got.Name+" failed"); err != nil {
+	if err := s.SkipDependents(got.RootID, got.ID, "upstream task "+got.Name+" failed: "+got.Error); err != nil {
 		t.Fatal(err)
 	}
-	svc.recordSkippedRuns(got)
-	unitRuns, _ := s.FindRunsByCommits(store.RunKindUnit, envs, commits)
-	if unitRun, ok := unitRuns[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]; !ok ||
-		unitRun.Status != store.StatusFailed || !strings.Contains(unitRun.Summary, "skipped") {
+	latest, err := runsByKey(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unitRun := latest[store.TaskKindUnit]; unitRun == nil ||
+		unitRun.Status != store.StatusSkipped || !strings.Contains(unitRun.Summary, "build") {
 		t.Errorf("skipped unit run after build failure wrong: %+v", unitRun)
 	}
 }
@@ -661,18 +670,16 @@ func TestExecuteBuildScriptBuildFailureClosesPlaceholderRun(t *testing.T) {
 		t.Fatalf("claim build: %v %v", build, err)
 	}
 
-	// The placeholder run exists from dispatch, pending.
-	envs := []int64{build.EnvironmentID}
-	commits := []int64{build.CommitID}
-	runs, _ := s.FindRunsByCommits(store.RunKindBuild, envs, commits)
-	if run, ok := runs[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]; !ok || run.Status != store.StatusPending {
-		t.Fatalf("placeholder build run should exist and be pending: %+v", run)
+	// The placeholder run exists from dispatch, running (the claim flipped it
+	// together with the task).
+	if run := runOf(t, s, build); run.Status != store.StatusRunning {
+		t.Fatalf("placeholder build run should be running: %+v", run)
 	}
 
 	// An empty build snapshot makes BuildStageScript fail ("no stage
 	// command"): blank the build sub-task's config, then re-fetch the task so
 	// the executor sees the emptied snapshot.
-	if err := s.UpdateTaskConfig(build.ID, "{}", ""); err != nil {
+	if err := s.DB.Model(&store.Task{}).Where("id = ?", build.ID).Update("config", "{}").Error; err != nil {
 		t.Fatal(err)
 	}
 	if build, err = s.GetTask(build.ID); err != nil {
@@ -683,12 +690,11 @@ func TestExecuteBuildScriptBuildFailureClosesPlaceholderRun(t *testing.T) {
 	}
 
 	got, _ := s.GetTask(build.ID)
-	if got.Status != store.TaskFailed {
+	if got.Status != store.StatusFailed {
 		t.Fatalf("build should be failed: %+v", got)
 	}
-	runs, _ = s.FindRunsByCommits(store.RunKindBuild, envs, commits)
-	run, ok := runs[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]
-	if !ok || run.Status != store.StatusFailed {
+	run := runOf(t, s, build)
+	if run.Status != store.StatusFailed {
 		t.Fatalf("placeholder run should be failed after script-build error: %+v", run)
 	}
 	if !strings.Contains(run.Summary, "no stage command") {
@@ -731,11 +737,8 @@ func TestExecuteBuildFetchesArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	envs := []int64{build.EnvironmentID}
-	commits := []int64{build.CommitID}
-	runs, _ := s.FindRunsByCommits(store.RunKindBuild, envs, commits)
-	run, ok := runs[store.EnvCommit{Env: build.EnvironmentID, Commit: build.CommitID}]
-	if !ok || run.Status != store.StatusPassed {
+	run := runOf(t, s, build)
+	if run.Status != store.StatusPassed {
 		t.Fatalf("build run should pass: %+v", run)
 	}
 	if run.Total != 0 || run.Failed != 0 || run.Skipped != 0 {
@@ -782,12 +785,11 @@ func TestExecuteStageFailureRecordsFailedRun(t *testing.T) {
 	}
 
 	got, _ := s.GetTask(unit.ID)
-	if got.Status != store.TaskFailed {
+	if got.Status != store.StatusFailed {
 		t.Fatalf("unit should be failed: %+v", got)
 	}
-	runs, _ := s.FindRunsByCommits(store.RunKindUnit, []int64{unit.EnvironmentID}, []int64{unit.CommitID})
-	run, ok := runs[store.EnvCommit{Env: unit.EnvironmentID, Commit: unit.CommitID}]
-	if !ok || run.Status != store.StatusFailed {
+	run := runOf(t, s, unit)
+	if run.Status != store.StatusFailed {
 		t.Fatalf("failed unit run wrong: %+v", run)
 	}
 	if run.Summary != "2 of 3 unit tests failed" {
@@ -808,12 +810,12 @@ func TestExecuteUnknownKindFails(t *testing.T) {
 		t.Log("unknown-kind task not persisted (expected in this fixture)")
 		return
 	}
-	if got.Status != store.TaskFailed {
+	if got.Status != store.StatusFailed {
 		t.Errorf("task should be failed: %+v", got)
 	}
 }
 
-func TestRedeployRebuildsGraph(t *testing.T) {
+func TestRedeployRequeuesGraphInPlace(t *testing.T) {
 	svc, s, _, cloner, cloneTask := newExecuteFixture(t, execYAML)
 	root, err := s.GetTask(cloneTask.RootID)
 	if err != nil {
@@ -821,12 +823,13 @@ func TestRedeployRebuildsGraph(t *testing.T) {
 	}
 
 	// Run clone to done, then re-dispatch the same commit/environment: the
-	// graph is rebuilt from the fresh snapshot (old sub-tasks and logs are
-	// dropped).
+	// graph is re-armed from the fresh snapshot. The nodes it still defines
+	// keep their rows — and with them the previous attempt's logs — and come
+	// out with a new pending attempt.
 	if err := svc.ExecuteTask(context.Background(), cloneTask); err != nil {
 		t.Fatal(err)
 	}
-	logsBefore, _ := s.ReadTaskLogs(cloneTask.ID, 0)
+	logsBefore, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
 	if len(logsBefore) == 0 {
 		t.Fatal("precondition: clone log exists")
 	}
@@ -839,21 +842,29 @@ func TestRedeployRebuildsGraph(t *testing.T) {
 		t.Fatalf("re-dispatch should requeue 1 graph, got %d", res.TasksCreated)
 	}
 
-	subs, _ := s.ListSubTasks(root.ID)
-	if len(subs) != 5 { // clone, build, unit, 2 regression cases
-		t.Fatalf("redeploy should rebuild 5 sub-tasks, got %d", len(subs))
+	subs, _ := s.ListActiveNodes(root.ID)
+	if len(subs) != 6 { // clone, build, unit, the regression container, 2 cases
+		t.Fatalf("redeploy should re-arm 6 nodes, got %d", len(subs))
 	}
 	for _, sub := range subs {
-		if sub.Status != store.TaskPending {
-			t.Errorf("rebuilt sub should be pending: %+v", sub)
-		}
-		if sub.ID == cloneTask.ID {
-			t.Error("old clone task should have been deleted")
+		if sub.Status != store.StatusPending {
+			t.Errorf("re-armed node should be pending: %+v", sub)
 		}
 	}
-	// The old logs went with the deleted sub-tasks.
-	if _, err := s.GetTask(cloneTask.ID); err == nil {
-		t.Error("old clone task row should be gone")
+	// The clone node is the same row, re-armed: identity (and history) kept,
+	// fresh attempt open.
+	again, err := s.GetTask(cloneTask.ID)
+	if err != nil {
+		t.Fatalf("the clone row should survive a re-dispatch: %v", err)
+	}
+	if again.Attempts != 2 || again.Status != store.StatusPending {
+		t.Errorf("re-armed clone: %+v", again)
+	}
+	if logs, _ := s.ReadTaskLogs(cloneTask.ID, 1, 0); len(logs) != len(logsBefore) {
+		t.Errorf("the first attempt's log should be kept: %d chunks, want %d", len(logs), len(logsBefore))
+	}
+	if n, _ := s.MaxTaskLogSeq(cloneTask.ID, 2); n != 0 {
+		t.Errorf("the fresh attempt should start with an empty log, got %d chunks", n)
 	}
 	_ = cloner
 }
@@ -873,7 +884,7 @@ func TestExecuteCaseRunsPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The clone log warns: the fixture environment has no env script.
-	logs, _ := s.ReadTaskLogs(cloneTask.ID, 0)
+	logs, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
 	var cloneLog string
 	for _, l := range logs {
 		cloneLog += l.Content
@@ -920,30 +931,38 @@ func TestExecuteCaseRunsPreset(t *testing.T) {
 		t.Errorf("scripts seen wrong: case=%v unit=%v", caseScriptSeen, unitOnly)
 	}
 
-	// The regression run carries exactly the heat case, passed, with its
-	// artifact riding the case's own child run.
-	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression,
-		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
-	reg, ok := regRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
-	if !ok {
-		t.Fatal("regression run missing")
+	// The heat case ran, passed, with its artifact riding the case's own run;
+	// the container aggregates it.
+	latest, err := runsByKey(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heat := latest[RegressionCaseKey("heat")]
+	if heat == nil {
+		t.Fatal("heat case run missing")
+	}
+	if heat.Status != store.StatusPassed || heat.Summary == "" {
+		t.Errorf("case run wrong: %+v", heat)
+	}
+	if heat.FinishedAt.IsZero() || heat.DurationMillis < 0 {
+		t.Errorf("case run should carry its window: %+v", heat)
+	}
+	artifacts, _ := s.ListRunArtifacts(heat.ID)
+	if len(artifacts) != 1 || artifacts[0].Name != "out.xml" {
+		t.Errorf("case artifact should ride the case's run: %+v", artifacts)
+	}
+	if c := latest[RegressionStageKey]; c != nil {
+		t.Errorf("the container should have no run of its own: %+v", c)
+	}
+	reg, err := regressionStage(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if reg.Total != 1 || reg.Passed != 1 || reg.Status != store.StatusPassed {
-		t.Errorf("case run aggregate wrong: %+v", reg)
+		t.Errorf("case aggregate wrong: %+v", reg)
 	}
-	children, _ := s.ListChildRuns(reg.ID)
-	if len(children) != 1 || children[0].Name != "heat" || children[0].Status != store.StatusPassed {
-		t.Fatalf("child runs wrong: %+v", children)
-	}
-	if children[0].DurationMillis < 0 || children[0].Message == "" {
-		t.Errorf("child run should carry duration and message: %+v", children[0])
-	}
-	artifacts, _ := s.ListRunArtifacts(children[0].ID)
-	if len(artifacts) != 1 || artifacts[0].Name != "out.xml" {
-		t.Errorf("case artifact should ride the child run: %+v", artifacts)
-	}
-	if parentArtifacts, _ := s.ListRunArtifacts(reg.ID); len(parentArtifacts) != 0 {
-		t.Errorf("parent run should stay artifact-free: %+v", parentArtifacts)
+	if parentArtifacts, _ := s.ListSubtreeArtifacts(reg.ID); len(parentArtifacts) != 1 {
+		t.Errorf("the container serves the case artifact from its subtree: %+v", parentArtifacts)
 	}
 }
 
@@ -968,26 +987,35 @@ func TestExecuteCaseFailureMarksRunFailed(t *testing.T) {
 		}
 	}
 
-	regRuns, _ := s.FindRunsByCommits(store.RunKindRegression,
-		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
-	reg, ok := regRuns[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]
-	if !ok {
-		t.Fatal("regression run missing")
+	latest, err := runsByKey(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The failed heat case's own run carries the MD-BUILDER-SUMMARY message.
+	if heat := latest[RegressionCaseKey("heat")]; heat == nil ||
+		heat.Status != store.StatusFailed || !strings.Contains(heat.Summary, "err 1e-3") {
+		t.Errorf("heat case run wrong: %+v", heat)
+	}
+	// A case's run counts as the one test it is — "0/0 passed" on a case that
+	// ran would read as an empty run.
+	if heat := latest[RegressionCaseKey("heat")]; heat != nil && (heat.Total != 1 || heat.Passed != 0 || heat.Failed != 1) {
+		t.Errorf("failed case counts = %d/%d (%d failed), want 0/1 of 1", heat.Passed, heat.Total, heat.Failed)
+	}
+	if poisson := latest[RegressionCaseKey("poisson")]; poisson == nil ||
+		poisson.Status != store.StatusPassed {
+		t.Errorf("poisson case should stay passed: %+v", poisson)
+	} else if poisson.Total != 1 || poisson.Passed != 1 || poisson.Failed != 0 {
+		t.Errorf("passed case counts = %d/%d, want 1/1 of 1", poisson.Passed, poisson.Total)
+	}
+	reg, err := regressionStage(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if reg.Total != 2 || reg.Passed != 1 || reg.Failed != 1 || reg.Status != store.StatusFailed {
 		t.Errorf("mixed case aggregate wrong: %+v", reg)
 	}
 	if !strings.Contains(reg.Summary, "heat") {
 		t.Errorf("summary should name the failing case: %q", reg.Summary)
-	}
-	// The failed heat child run carries the MD-BUILDER-SUMMARY message.
-	children, _ := s.ListChildRuns(reg.ID)
-	for _, c := range children {
-		if c.Name == "heat" {
-			if c.Status != store.StatusFailed || !strings.Contains(c.Message, "err 1e-3") {
-				t.Errorf("heat child run wrong: %+v", c)
-			}
-		}
 	}
 }
 
@@ -1009,7 +1037,7 @@ func TestExecuteEnvScriptWrittenAndSourced(t *testing.T) {
 	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
 		t.Fatal(err)
 	}
-	logs, _ := s.ReadTaskLogs(cloneTask.ID, 0)
+	logs, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
 	var cloneLog string
 	for _, l := range logs {
 		cloneLog += l.Content
@@ -1159,5 +1187,82 @@ func TestExecuteStageVariablesUseEnvironmentWhitelist(t *testing.T) {
 	}
 	if strings.Contains(script, "warning: variables.HOST_TMP") {
 		t.Errorf("a whitelisted host variable must not warn:\n%s", script)
+	}
+}
+
+// TestExecuteStageRetriesTheClosingWrite: the write that ends an attempt
+// (store.FinishAttempt) is the only thing that takes a node out of "running",
+// so a transient failure is retried rather than leaving a task that no worker
+// will ever claim again. The fake failure is registered on the run row's
+// update — the first write the finish makes.
+func TestExecuteStageRetriesTheClosingWrite(t *testing.T) {
+	svc, s, _, _, cloneTask := newExecuteFixture(t, execYAML)
+	// No waiting in the test: the backoff is only there to give a busy
+	// database room between tries.
+	old := finishAttemptBackoff
+	finishAttemptBackoff = 0
+	t.Cleanup(func() { finishAttemptBackoff = old })
+
+	var writes int32
+	fail := func(tx *gorm.DB) {
+		if tx.Statement.Table == "test_runs" && atomic.AddInt32(&writes, 1) <= 2 {
+			tx.AddError(errors.New("database is busy"))
+		}
+	}
+	if err := s.DB.Callback().Update().Before("gorm:update").Register("test:busy-finish", fail); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.ExecuteTask(context.Background(), cloneTask); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTask(cloneTask.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != store.StatusPassed {
+		t.Errorf("clone status = %q, want %q once the write went through", got.Status, store.StatusPassed)
+	}
+	if n := atomic.LoadInt32(&writes); n < 3 {
+		t.Errorf("the closing write was tried %d times, want the two failures retried", n)
+	}
+}
+
+// TestExecuteStageSummarizesTheLogTail: a stage's summary is read out of the
+// END of its log — the summary line is the last thing the command prints, and
+// a log longer than one read page (store.logReadLimit, 1000 chunks) runs past
+// what a single read returns. Reading from the head would summarize a stage
+// from output written long before its result.
+func TestExecuteStageSummarizesTheLogTail(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
+	ctx := context.Background()
+	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
+		t.Fatal(err)
+	}
+
+	build, err := s.ClaimReadyTask()
+	if err != nil || build == nil || build.Kind != store.TaskKindBuild {
+		t.Fatalf("claim build: %v %v", build, err)
+	}
+	// Noise past the size of one read page, then the stage's own output.
+	for i := 1; i <= 1100; i++ {
+		if err := s.AppendTaskLog(&store.TaskLog{
+			TaskID: build.ID, Attempt: build.Attempts, Seq: i, Content: fmt.Sprintf("noise %d\n", i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec.outcome["cmake -DEXEC=1 ."] = 0
+	exec.output["cmake -DEXEC=1 ."] = "compiling…\nMD-BUILDER-SUMMARY: build ok\n"
+
+	if err := svc.ExecuteTask(ctx, build); err != nil {
+		t.Fatal(err)
+	}
+	run := runOf(t, s, build)
+	if !strings.Contains(run.Summary, "build ok") {
+		t.Errorf("build summary = %q, want the summary line at the end of the log", run.Summary)
+	}
+	if strings.Contains(run.Summary, "noise") {
+		t.Errorf("build summary = %q, want the tail of the log, not its head", run.Summary)
 	}
 }

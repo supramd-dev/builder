@@ -33,9 +33,9 @@ func TestSchedulerRunsFullGraph(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if root.Status == store.TaskDone || root.Status == store.TaskFailed {
-			if root.Status != store.TaskDone {
-				subs, _ := s.ListSubTasks(root.ID)
+		if root.Status == store.StatusPassed || root.Status == store.StatusFailed {
+			if root.Status != store.StatusPassed {
+				subs, _ := s.ListActiveNodes(root.ID)
 				var detail []string
 				for _, sub := range subs {
 					detail = append(detail, sub.Kind+"/"+sub.Status+": "+sub.Error)
@@ -46,9 +46,9 @@ func TestSchedulerRunsFullGraph(t *testing.T) {
 			if len(exec.scripts) != 4 {
 				t.Fatalf("want 4 scripts, got %d", len(exec.scripts))
 			}
-			subs, _ := s.ListSubTasks(root.ID)
+			subs, _ := s.ListActiveNodes(root.ID)
 			for _, sub := range subs {
-				if sub.Status != store.TaskDone {
+				if sub.Status != store.StatusPassed {
 					t.Errorf("%s not done: %s", sub.Kind, sub.Status)
 				}
 			}
@@ -78,38 +78,45 @@ func TestSchedulerSkipsOnFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if root.Status == store.TaskFailed {
-			subs, _ := s.ListSubTasks(root.ID)
+		if root.Status == store.StatusFailed {
+			subs, _ := s.ListActiveNodes(root.ID)
 			var unitState string
+			var regStage *store.Task
 			regStates := map[string]int{}
 			for _, sub := range subs {
 				switch sub.Kind {
 				case store.TaskKindBuild:
-					if sub.Status != store.TaskFailed || !strings.Contains(sub.Error, "exit 1") {
+					if sub.Status != store.StatusFailed || !strings.Contains(sub.Error, "exit 1") {
 						t.Errorf("build state: %s / %q", sub.Status, sub.Error)
 					}
 				case store.TaskKindUnit:
 					unitState = sub.Status
-				case store.TaskKindRegression:
+				case store.TaskKindRegressionStage:
+					stage := sub
+					regStage = &stage
+				case store.TaskKindRegressionCase:
 					regStates[sub.Status]++
 				}
 			}
-			if unitState != store.TaskSkipped {
+			if unitState != store.StatusSkipped {
 				t.Errorf("unit should be skipped: %s", unitState)
 			}
-			if regStates[store.TaskSkipped] != 2 {
+			if regStates[store.StatusSkipped] != 2 {
 				t.Errorf("both regression cases should be skipped: %v", regStates)
 			}
-			// The skipped stages got failed dashboard runs.
-			runs, _ := s.FindRunsByCommits(store.RunKindUnit,
-				[]int64{roots[0].EnvironmentID}, []int64{roots[0].CommitID})
-			run, ok := runs[store.EnvCommit{Env: roots[0].EnvironmentID, Commit: roots[0].CommitID}]
-			if !ok || run.Status != store.StatusFailed || !strings.Contains(run.Summary, "skipped") {
+			if regStage == nil || regStage.Status != store.StatusSkipped {
+				t.Errorf("the regression container should be skipped: %+v", regStage)
+			}
+			// The skipped stages got their dashboard rows too, marked skipped
+			// with the reason that stopped them.
+			runs, _ := runsByKey(s, &roots[0])
+			run := runs[store.TaskKindUnit]
+			if run == nil || run.Status != store.StatusSkipped || !strings.Contains(run.Summary, "build") {
 				t.Errorf("skipped unit run wrong: %+v", run)
 			}
 			return
 		}
-		if root.Status == store.TaskDone {
+		if root.Status == store.StatusPassed {
 			t.Fatal("root should be failed")
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -128,28 +135,38 @@ func TestNewServiceWorkersDefault(t *testing.T) {
 	}
 }
 
-// caseStatuses returns the regression run's per-case child statuses keyed by
-// case name — the rows the run page's case list, the case detail page and
-// the graph all read.
+// caseStatuses returns the regression cases' statuses keyed by case name —
+// the rows the run page's case list, the case detail page and the graph all
+// read.
 func caseStatuses(s *store.Store, task *store.Task) (map[string]string, error) {
-	runs, err := s.FindRunsByCommits(store.RunKindRegression,
-		[]int64{task.EnvironmentID}, []int64{task.CommitID})
+	stage, err := regressionStage(s, task)
 	if err != nil {
 		return nil, err
 	}
-	parent, ok := runs[store.EnvCommit{Env: task.EnvironmentID, Commit: task.CommitID}]
-	if !ok {
-		return nil, errors.New("no regression run recorded")
-	}
-	children, err := s.ListChildRuns(parent.ID)
+	children, err := s.ListChildren(stage.ID)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]string{}
 	for i := range children {
-		out[children[i].Name] = children[i].Status
+		out[strings.TrimPrefix(children[i].NodeKey, RegressionStageKey+":")] = children[i].Status
 	}
 	return out, nil
+}
+
+// regressionStage returns the (virtual) regression container of the graph
+// task belongs to.
+func regressionStage(s *store.Store, task *store.Task) (*store.Task, error) {
+	nodes, err := s.ListActiveNodes(task.RootID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range nodes {
+		if nodes[i].NodeKey == RegressionStageKey {
+			return &nodes[i], nil
+		}
+	}
+	return nil, errors.New("no regression stage in the graph")
 }
 
 // TestCaseRunFollowsItsTask pins the fix for a case that read pending while
@@ -200,8 +217,8 @@ func TestCaseRunFollowsItsTask(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if root.Status == store.TaskDone || root.Status == store.TaskFailed {
-			if root.Status != store.TaskDone {
+		if root.Status == store.StatusPassed || root.Status == store.StatusFailed {
+			if root.Status != store.StatusPassed {
 				t.Fatalf("root failed: %s", root.Error)
 			}
 			break
@@ -234,9 +251,37 @@ func TestCaseRunFollowsItsTask(t *testing.T) {
 	if got["heat"] != store.StatusPassed || got["poisson"] != store.StatusPassed {
 		t.Fatalf("both cases should be passed: %v", got)
 	}
-	runs, _ := s.FindRunsByCommits(store.RunKindRegression,
-		[]int64{cloneTask.EnvironmentID}, []int64{cloneTask.CommitID})
-	if run := runs[store.EnvCommit{Env: cloneTask.EnvironmentID, Commit: cloneTask.CommitID}]; run.Status != store.StatusPassed {
-		t.Fatalf("the regression run should be passed: %+v", run)
+	runs, err := runsByKey(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if run := runs[RegressionCaseKey("heat")]; run == nil || run.Status != store.StatusPassed {
+		t.Fatalf("the heat case run should be passed: %+v", run)
+	}
+}
+
+// runsByKey returns the latest run of every node of task's graph, keyed by
+// the node key ("build", "unit", "regression:<case>") — the rows the stage
+// pages read. Virtual nodes have no run and are absent.
+func runsByKey(s *store.Store, task *store.Task) (map[string]*store.TestRun, error) {
+	nodes, err := s.ListActiveNodes(task.RootID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(nodes))
+	for i := range nodes {
+		ids = append(ids, nodes[i].ID)
+	}
+	latest, err := s.LatestRunsByTaskIDs(ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*store.TestRun, len(nodes))
+	for i := range nodes {
+		if r, ok := latest[nodes[i].ID]; ok {
+			run := r
+			out[nodes[i].NodeKey] = &run
+		}
+	}
+	return out, nil
 }

@@ -112,6 +112,15 @@ func TestRepoPath(t *testing.T) {
 		{"gitlab.com:group/code", "group/code"},
 		{"https://gitlab.com/group/sub/code", "group/sub/code"},
 		{"ssh://git@gitlab.example.com:2222/group/code.git", "group/code"},
+		// A bare value with one "/" is the path itself — the shape a webhook
+		// payload's path_with_namespace has, and what the dashboard filters
+		// on. Dropping its first segment would leave "code", which matches no
+		// recorded commit: the matrix would stay empty while the pushes were
+		// still dispatched.
+		{"group/code", "group/code"},
+		{"group/sub/code", "sub/code"}, // three segments: the first is the host
+		{"gitlab.com/group/code", "group/code"},
+		{"group/code.git", "group/code"},
 		{"", ""},
 		{"   ", ""},
 	}

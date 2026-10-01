@@ -61,35 +61,11 @@ export function StageStatus({ status, label, onClick, title }: {
   )
 }
 
-// TaskStatusText renders a task status as colored text for page titles and
-// step rows: ✓ done / ✗ failed / ⤼ skipped / spinner running / · pending.
-export function TaskStatusText({ status }: { status: string }) {
-  const cls =
-    status === 'done' ? 'text-success'
-      : status === 'failed' ? 'text-danger'
-        : status === 'skipped' ? 'text-warn'
-          : status === 'running' ? 'text-run'
-            : 'text-muted'
-  return (
-    <span className={'task-status-text ' + cls}>
-      {status === 'running' ? (
-        <>
-          <LoaderCircle size={13} className="spin" /> running
-        </>
-      ) : (
-        <>
-          {statusGlyph(status)} {status}
-        </>
-      )}
-    </span>
-  )
-}
-
-// CaseStatusText renders a case's status as colored inline text. Cases carry
-// run statuses (passed/failed/skipped/pending/running), not the task statuses
-// TaskStatusText above expects: ✓ passed / ✗ failed / ⤼ skipped / spinner
-// running / gray · pending.
-export function CaseStatusText({ status }: { status: string }) {
+// StatusText renders a task's or a run's status as colored inline text: ✓
+// passed / ✗ failed / ⤼ skipped / spinner running / gray · pending. Tasks and
+// runs share one status vocabulary — a task's status is its latest attempt's
+// — so one component serves both page titles and node rows.
+export function StatusText({ status }: { status: string }) {
   if (status === 'running') {
     return (
       <span className="text-run">
@@ -106,17 +82,4 @@ export function CaseStatusText({ status }: { status: string }) {
           ? ['text-muted', '· pending']
           : ['text-danger', '✗ failed']
   return <span className={cls}>{text}</span>
-}
-
-function statusGlyph(status: string): string {
-  switch (status) {
-    case 'done':
-      return '✓'
-    case 'failed':
-      return '✗'
-    case 'skipped':
-      return '⤼'
-    default:
-      return '·'
-  }
 }

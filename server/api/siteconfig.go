@@ -110,15 +110,18 @@ func (s *Server) handleWebhookTokenRotate(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	cfg, err := s.Store.GetSiteConfig()
-	if err != nil {
-		log.Printf("get site config for webhook token rotation: %v", err)
+	// Write the one column rather than the whole row the handler is about to
+	// return: a configuration update that lands while this runs (another tab,
+	// the repository tab) owns the other columns and must not be reverted.
+	if err := s.Store.UpdateSiteConfig(&store.SiteConfig{WebhookToken: token}, "WebhookToken"); err != nil {
+		log.Printf("save rotated webhook token: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	cfg.WebhookToken = token
-	if err := s.Store.SaveSiteConfig(cfg); err != nil {
-		log.Printf("save rotated webhook token: %v", err)
+	// The rest of the row as it stands now, for the response.
+	cfg, err := s.Store.GetSiteConfig()
+	if err != nil {
+		log.Printf("get site config for webhook token rotation: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
@@ -163,18 +166,31 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request, user *
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	// owned lists the columns this request writes. The row is written back
+	// through UpdateSiteConfig with exactly those columns: the copy above was
+	// read before the request did its work, and saving the whole row would
+	// revert whatever another writer changed in the meantime — a webhook token
+	// rotated in another tab, most visibly, which the caller would then copy
+	// into GitLab after it had stopped working.
+	owned := []string{"CodeRepo", "Timezone"}
+
 	cfg.CodeRepo = strings.TrimSpace(in.CodeRepo)
-	// Token: empty = keep, Clear = remove, otherwise replace.
+	// Token: empty = keep, Clear = remove, otherwise replace. Kept out of
+	// owned means "not written at all", which is what empty means here.
 	if in.ClearAccessToken {
 		cfg.AccessToken = ""
+		owned = append(owned, "AccessToken")
 	} else if tok := strings.TrimSpace(in.AccessToken); tok != "" {
 		cfg.AccessToken = tok
+		owned = append(owned, "AccessToken")
 	}
 	// Secret token: the same write-only convention.
 	if in.ClearSecretToken {
 		cfg.SecretToken = ""
+		owned = append(owned, "SecretToken")
 	} else if tok := strings.TrimSpace(in.SecretToken); tok != "" {
 		cfg.SecretToken = tok
+		owned = append(owned, "SecretToken")
 	}
 	cfg.Timezone = strings.TrimSpace(in.Timezone)
 
@@ -186,17 +202,22 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request, user *
 	if in.touchesGitLab() {
 		if in.GitLabURL != nil {
 			cfg.GitLabURL = strings.TrimSpace(*in.GitLabURL)
+			owned = append(owned, "GitLabURL")
 		}
 		if in.GitLabClientID != nil {
 			cfg.GitLabClientID = strings.TrimSpace(*in.GitLabClientID)
+			owned = append(owned, "GitLabClientID")
 		}
 		if in.ClearGitLabClientSecret {
 			cfg.GitLabClientSecret = ""
+			owned = append(owned, "GitLabClientSecret")
 		} else if secret := strings.TrimSpace(in.GitLabClientSecret); secret != "" {
 			cfg.GitLabClientSecret = secret
+			owned = append(owned, "GitLabClientSecret")
 		}
 		if in.GitLabLoginEnabled != nil {
 			cfg.GitLabLoginEnabled = *in.GitLabLoginEnabled
+			owned = append(owned, "GitLabLoginEnabled")
 		}
 	}
 
@@ -211,10 +232,17 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request, user *
 		}
 	}
 
-	if err := s.Store.SaveSiteConfig(cfg); err != nil {
+	if err := s.Store.UpdateSiteConfig(cfg, owned...); err != nil {
 		log.Printf("save site config: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
+	}
+	// Answer from the stored row rather than from the copy read above: it
+	// holds the columns this request wrote and any other writer's changes,
+	// and the administrator may be about to copy the webhook token out of
+	// this response.
+	if fresh, err := s.Store.GetSiteConfig(); err == nil {
+		cfg = fresh
 	}
 	writeJSON(w, http.StatusOK, s.toSiteConfigJSON(cfg, user))
 }

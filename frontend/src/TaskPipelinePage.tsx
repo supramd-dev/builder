@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, useParams } from 'react-router'
 import { LoaderCircle } from 'lucide-react'
-import { getTask, type SubTask, type TaskDetail } from './api'
-import { TaskStatusText, commitUrl } from './StatusViews'
+import { getTask, taskArtifactsZipUrl, type TaskDetail, type TaskNode } from './api'
+import { StatusText, commitUrl } from './StatusViews'
 import { Breadcrumbs } from './Breadcrumbs'
 import TaskLogView from './TaskLogView'
 import {
@@ -10,72 +10,97 @@ import {
   GAP_Y,
   NODE_H,
   NODE_W,
-  ROOT_KEY,
   graphEdges,
   layerNodes,
   nodePositions,
-  regressionGroup,
-  type LayoutNode,
+  regressionStage,
 } from './graphLayout'
 
 // TaskPipelinePage shows one pipeline as two linked views: the dependency
-// graph on top, the pipeline step list (with inline expandable stage logs)
-// below it. Graph nodes come in two flavours (see graphLayout): real
-// sub-tasks, which open the run they recorded, and derived containers (the
-// root, and the reg test node summarizing the regression cases), which open
-// the stage-wide run. A node with no run at all scrolls to the step list and
-// expands that stage's log. Clicking a step toggles its log in place;
-// statuses follow the live pipeline — getTask is polled (3s) only while the
-// graph is pending/running. The requested id may be a root or a sub-task
-// (legacy deep links); sub-task ids resolve to their root and preselect that
-// sub-task's log.
+// graph on top, the pipeline step list — with the selected step's log inlined
+// under it — below. The graph is drawn from the graph's own task nodes: the
+// real ones (clone, build, unit, and one per regression case) each have a run
+// of their own, whose log the panel streams while the stage executes; a
+// virtual one (the regression container) runs nothing itself — it summarizes
+// its cases, so selecting it lists them. getTask is polled (3s) only while the
+// graph is pending/running. The requested id may be any node (a dashboard cell
+// links its container, for instance): a non-root id resolves to its root and
+// preselects that node.
+//
+// Nodes a later dispatch dropped are not part of the graph any more, but they
+// are not gone either: their runs, logs and artifacts stay readable, so they
+// are listed below the current steps as history.
 export default function TaskPipelinePage() {
   const params = useParams()
-  const navigate = useNavigate()
   const urlId = Number(params.taskId)
   const [root, setRoot] = useState<TaskDetail | null>(null)
   const [error, setError] = useState('')
-  // Which step's log is expanded; null = none.
-  const [expanded, setExpanded] = useState<number | null>(null)
-  // A sub-task id seen in the URL (e.g. /tasks/64) that wins the first
-  // expansion once its graph arrives.
+  // Which node's panel is open; null = none.
+  const [selected, setSelected] = useState<number | null>(null)
+  // Mirror of `selected` for the poll loop. The automatic first selection has
+  // to read the current selection, and it cannot do that from inside a state
+  // updater: an updater must be pure (StrictMode runs it twice), and a flag
+  // written on the first pass would then suppress the selection on the second.
+  const selectedRef = useRef<number | null>(null)
+  // A node id seen in the URL (e.g. /tasks/64) that wins the first selection
+  // once its graph arrives.
   const wantedRef = useRef<number | null>(null)
-  // Whether the automatic first expansion has happened — later polls must
-  // not re-expand a step the user collapsed.
+  // Whether the automatic first selection has happened — later polls must not
+  // re-select a node the user moved away from.
   const autoSelectedRef = useRef(false)
+
+  // select is the only way the panel changes node, so the mirror cannot drift.
+  const select = (id: number | null) => {
+    selectedRef.current = id
+    setSelected(id)
+  }
 
   useEffect(() => {
     let live = true
     let timer: ReturnType<typeof setInterval> | undefined
+    let loaded = false
+    let retries = 0
+    // A new id is a different graph, and the route element is reused for it:
+    // drop the old graph instead of rendering it under the new URL, and let
+    // the new one make its own first selection.
+    setRoot(null)
+    select(null)
+    wantedRef.current = null
+    autoSelectedRef.current = false
     setError('')
     async function poll() {
       try {
         let t = await getTask(urlId)
         if (!live) return
-        // A sub-task id was addressed: forward to its root's graph and
-        // remember the step to expand.
+        // A node id was addressed: forward to its root's graph and remember
+        // the node to select.
         if (t.kind !== 'root' && t.rootId > 0 && t.rootId !== t.id) {
           wantedRef.current = t.id
           t = await getTask(t.rootId)
           if (!live) return
         }
+        loaded = true
         setRoot(t)
-        // Automatic first expansion: the URL-requested sub-task when
-        // present, else the first running step (or the last one) — where
+        setError('') // an earlier blip must not keep the page on the error view
+        // Automatic first selection: the URL-requested node when present —
+        // including a retired one, which a link built before a re-dispatch can
+        // still name — else the first running step (or the last one), where
         // the pipeline currently is.
-        setExpanded((cur) => {
-          if (cur !== null || autoSelectedRef.current) return cur
+        if (!autoSelectedRef.current && selectedRef.current === null) {
           const subs = t.subTasks ?? []
+          const known = [...subs, ...(t.retiredTasks ?? [])]
           let pick: number | null = null
-          if (wantedRef.current !== null && subs.some((s) => s.id === wantedRef.current)) {
+          if (wantedRef.current !== null && known.some((s) => s.id === wantedRef.current)) {
             pick = wantedRef.current
           } else if (subs.length > 0) {
             const active = subs.find((s) => s.status === 'running')
             pick = (active ?? subs[subs.length - 1]).id
           }
-          if (pick !== null) autoSelectedRef.current = true
-          return pick
-        })
+          if (pick !== null) {
+            autoSelectedRef.current = true
+            select(pick)
+          }
+        }
         // Follow the pipeline only while it is live; a terminal graph stops
         // the loop (a finished page costs two requests in total).
         if (t.status === 'pending' || t.status === 'running') {
@@ -85,8 +110,20 @@ export default function TaskPipelinePage() {
           timer = undefined
         }
       } catch (err) {
-        if (live) {
-          setError(err instanceof Error ? err.message : 'Failed to load task')
+        if (!live) return
+        // One failed request is not a dead page. Nothing has been shown yet,
+        // so this is the whole page: retry a few times before giving up, which
+        // rides out a blip without polling an id that does not exist for ever.
+        // A failure after the graph is up keeps the last good graph and the
+        // poll loop, which is already running.
+        if (loaded) return
+        setError(err instanceof Error ? err.message : 'Failed to load task')
+        if (retries < 3) {
+          retries++
+          if (!timer) timer = setInterval(poll, 3000)
+        } else if (timer) {
+          clearInterval(timer)
+          timer = undefined
         }
       }
     }
@@ -115,7 +152,20 @@ export default function TaskPipelinePage() {
   }
 
   const subs = root.subTasks ?? []
+  const retired = root.retiredTasks ?? []
   const live = root.status === 'pending' || root.status === 'running'
+
+  // Selecting a node opens the panel below the step list: the attempt's log
+  // for a real node (the panel's own link goes on to the run's page, with the
+  // artifacts and the other attempts), the child cases for a virtual one.
+  const openNode = (node: TaskNode) => {
+    select(node.id)
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`pipeline-step-${node.id}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }
 
   return (
     <div>
@@ -125,41 +175,20 @@ export default function TaskPipelinePage() {
           <GraphCanvas
             task={root}
             subs={subs}
-            expanded={expanded}
-            onNodeClick={(node) => {
-              // A derived node opens the stage-wide run it summarizes.
-              if (node.derived) {
-                if (root.regressionRunId) navigate(`/runs/${root.regressionRunId}`)
-                return
-              }
-              // A recorded run owns the click: straight to the run's
-              // detail page. Otherwise select the step: expand its log
-              // in the pipeline list and scroll it into view.
-              if (node.sub?.runId) {
-                navigate(`/runs/${node.sub.runId}`)
-                return
-              }
-              if (node.sub) {
-                const id = node.sub.id
-                setExpanded(id)
-                requestAnimationFrame(() => {
-                  document
-                    .getElementById(`pipeline-step-${id}`)
-                    ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-                })
-              }
-            }}
+            selected={selected}
+            onNodeClick={openNode}
           />
           <p className="text-muted graph-hint">
-            Click a stage with a recorded run to open its test details; the
-            reg test node opens the whole regression run; other nodes expand
-            the stage's log in the pipeline below.
+            Click a stage to follow its output below; the reg test node has no
+            run of its own — selecting it lists the cases, each with its own
+            run.
           </p>
           <PipelineSection
             subs={subs}
+            retired={retired}
             live={live}
-            expanded={expanded}
-            onToggle={(id) => setExpanded((cur) => (cur === id ? null : id))}
+            selected={selected}
+            onSelect={openNode}
           />
         </>
       ) : (
@@ -214,36 +243,44 @@ function TaskHeader({ task }: { task: TaskDetail }) {
           </>
         )}
         {' · '}
-        <TaskStatusText status={task.status} />
+        <StatusText status={task.status} />
         {(task.trigger ?? 0) > 0 && (
           <span className="dash-trigger" title="manually triggered from the UI">
             manual
           </span>
         )}
       </div>
+      {task.summary && <p className="text-muted">{task.summary}</p>}
       {task.error && <p className="task-error">{task.error}</p>}
+      {/* Everything this graph stored, as one zip: every stage's files, each
+          node under a directory of its own — a stage's own attempt is zipped
+          from its run page instead. Only a graph that ran stores anything, so
+          the link appears once it has an outcome. */}
+      {(task.status === 'passed' || task.status === 'failed') && (
+        <p style={{ marginBottom: '0.5rem' }}>
+          <a href={taskArtifactsZipUrl(task.id)}>Download the graph's artifacts (zip)</a>
+        </p>
+      )}
     </div>
   )
 }
 
-// GraphCanvas draws the dependency graph. Real nodes with a recorded run
-// open the run detail page, derived nodes the stage-wide run (onNodeClick);
-// a node with neither expands its step's log in the pipeline list below. The
-// root node is not clickable.
+// GraphCanvas draws the dependency graph from the graph's task nodes. Clicking
+// a node selects it in the pipeline list below (onNodeClick), where its run's
+// log opens; the root node stands for the whole graph and is not clickable.
 function GraphCanvas({
   task,
   subs,
-  expanded,
+  selected,
   onNodeClick,
 }: {
   task: TaskDetail
-  subs: SubTask[]
-  expanded: number | null
-  onNodeClick: (node: LayoutNode) => void
+  subs: TaskNode[]
+  selected: number | null
+  onNodeClick: (node: TaskNode) => void
 }) {
-  const root = task.kind === 'root' ? task : null
-  const group = regressionGroup(subs)
-  const layers = layerNodes(subs, root, group)
+  const stage = regressionStage(subs)
+  const layers = layerNodes(task, subs, stage)
   const pos = nodePositions(layers)
 
   const width = Math.max(1, layers.length)
@@ -260,20 +297,20 @@ function GraphCanvas({
         }}
       >
         <svg className="graph-edges" width="100%" height="100%">
-          {graphEdges(subs, root, group, pos).map((e, i) => (
+          {graphEdges(subs, stage, pos).map((e, i) => (
             <path key={i} d={e.d} className={'graph-edge' + (e.done ? ' graph-edge-done' : '')} />
           ))}
         </svg>
         {layers.flat().map((node) => {
           const p = pos.get(node.key)
           if (!p) return null
-          const isRoot = node.key === ROOT_KEY
+          const isRoot = node.node === null
           const status = node.status
           const cls = [
             'graph-node',
             isRoot ? 'graph-node-root' : '',
-            node.derived ? 'graph-node-derived' : '',
-            node.sub && expanded === node.key ? 'graph-node-selected' : '',
+            node.virtual ? 'graph-node-derived' : '',
+            selected === node.key ? 'graph-node-selected' : '',
             'graph-node-' + status,
           ]
             .filter(Boolean)
@@ -281,18 +318,18 @@ function GraphCanvas({
           return (
             <button
               type="button"
-              key={String(node.key)}
+              key={node.key}
               className={cls}
               style={{ left: p.x, top: p.y, width: NODE_W, height: NODE_H }}
-              onClick={isRoot ? undefined : () => onNodeClick(node)}
+              onClick={isRoot ? undefined : () => onNodeClick(node.node as TaskNode)}
               title={
                 isRoot
                   ? 'Pipeline root'
-                  : node.derived
-                    ? `Derived from ${group?.cases.length ?? 0} case nodes — open the regression run`
-                    : node.sub?.runId
-                      ? 'Open the run details'
-                      : "Expand the stage's log below"
+                  : node.virtual
+                    ? `${status} · ${node.name} — a container whose status is its nodes' rollup; select it to list them`
+                    : node.node?.runId
+                      ? "Select the stage: its log is shown below"
+                      : 'Select the stage: it has no run yet'
               }
             >
               <span className="graph-node-head">
@@ -316,73 +353,174 @@ function GraphCanvas({
   )
 }
 
-// PipelineSection is the step list at the bottom of the page. Clicking a
-// step toggles its log inline (accordion — one log at a time); a step with
-// a recorded run also links to the run's detail page in the log head.
+// PipelineSection is the step list under the graph. Clicking a step opens its
+// panel below (one at a time): the attempt's log for a real node, the child
+// nodes for a virtual one. The retired nodes follow in their own list —
+// history the current graph no longer defines.
 function PipelineSection({
   subs,
+  retired,
   live,
-  expanded,
-  onToggle,
+  selected,
+  onSelect,
 }: {
-  subs: SubTask[]
+  subs: TaskNode[]
+  retired: TaskNode[]
   live: boolean
-  expanded: number | null
-  onToggle: (id: number) => void
+  selected: number | null
+  onSelect: (node: TaskNode) => void
 }) {
-  const selected = subs.find((s) => s.id === expanded)
+  const all = [...subs, ...retired]
+  const node = all.find((n) => n.id === selected)
   return (
     <section>
       <h3 className="task-section-title">Pipeline</h3>
-      <ol className="task-steps">
-        {subs.map((sub) => (
-          <li key={sub.id} id={`pipeline-step-${sub.id}`}>
-            <button
-              type="button"
-              className={
-                'task-step' + (expanded === sub.id ? ' task-step-selected' : '')
-              }
-              onClick={() => onToggle(sub.id)}
-              title={sub.error || sub.name}
-            >
-              <span className={'task-step-status ' + statusTextClass(sub.status)}>
-                {sub.status === 'running' ? (
-                  <LoaderCircle size={13} className="spin" />
-                ) : (
-                  nodeGlyph(sub.status)
-                )}
-              </span>
-              <span className="task-step-name">{sub.name}</span>
-              <span className="text-muted task-step-kind">{sub.kind}</span>
-              <TaskStatusText status={sub.status} />
-            </button>
-          </li>
-        ))}
-      </ol>
-      {/* The selected step's log sits below the whole step list (one shared
-          viewer), not inline under each row. */}
-      {selected && (
-        <div className="pipeline-log">
-          <div className="pipeline-log-head">
-            <span className={'pipeline-log-status ' + statusTextClass(selected.status)}>
-              {nodeGlyph(selected.status)}
-            </span>
-            <span className="pipeline-log-name">{selected.name}</span>
-            <span className="text-muted pipeline-log-kind">{selected.kind}</span>
-            <TaskStatusText status={selected.status} />
-            {live && selected.status === 'running' && (
-              <span className="text-muted pipeline-log-live">following output…</span>
-            )}
-            {selected.runId !== undefined && (
-              <Link to={`/runs/${selected.runId}`} className="pipeline-run-link">
-                Run details →
-              </Link>
-            )}
-          </div>
-          <TaskLogView taskId={selected.id} live={live} />
-        </div>
+      <StepList nodes={subs} selected={selected} onSelect={onSelect} />
+      {node && <StepPanel node={node} nodes={all} live={live} />}
+      {retired.length > 0 && (
+        <>
+          <h4 className="task-steps-title">
+            History — {retired.length} node{retired.length === 1 ? '' : 's'} the current
+            yaml no longer defines
+          </h4>
+          <StepList nodes={retired} selected={selected} onSelect={onSelect} retired />
+        </>
       )}
     </section>
+  )
+}
+
+// StepList renders the step rows: glyph, name, kind and status. A retired row
+// is dimmed — it keeps its history but is never scheduled again.
+function StepList({
+  nodes,
+  selected,
+  onSelect,
+  retired,
+}: {
+  nodes: TaskNode[]
+  selected: number | null
+  onSelect: (node: TaskNode) => void
+  retired?: boolean
+}) {
+  return (
+    <ol className="task-steps">
+      {nodes.map((node) => (
+        <li key={node.id} id={`pipeline-step-${node.id}`}>
+          <button
+            type="button"
+            className={
+              'task-step' +
+              (selected === node.id ? ' task-step-selected' : '') +
+              (retired || node.retired ? ' task-step-retired' : '')
+            }
+            onClick={() => onSelect(node)}
+            title={node.error || node.summary || node.name}
+          >
+            <span className={'task-step-status ' + statusTextClass(node.status)}>
+              {node.status === 'running' ? (
+                <LoaderCircle size={13} className="spin" />
+              ) : (
+                nodeGlyph(node.status)
+              )}
+            </span>
+            <span className="task-step-name">{node.name}</span>
+            <span className="text-muted task-step-kind">{node.kind}</span>
+            {/* The counts are the stage's tests (a unit stage runs several);
+                a node standing for one test says nothing new. */}
+            {node.total > 1 && (
+              <span className="text-muted task-step-kind">
+                {node.passed}/{node.total}
+              </span>
+            )}
+            <StatusText status={node.status} />
+          </button>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
+// StepPanel is the panel under the step list for the selected node: a real
+// node shows its attempt's log, a virtual one its children — it runs nothing
+// itself, so it has no log to show.
+function StepPanel({
+  node,
+  nodes,
+  live,
+}: {
+  node: TaskNode
+  nodes: TaskNode[]
+  live: boolean
+}) {
+  return (
+    <div className="pipeline-log">
+      <div className="pipeline-log-head">
+        <span className={'pipeline-log-status ' + statusTextClass(node.status)}>
+          {nodeGlyph(node.status)}
+        </span>
+        <span className="pipeline-log-name">{node.name}</span>
+        <span className="text-muted pipeline-log-kind">{node.kind}</span>
+        {node.total > 1 && (
+          <span className="text-muted pipeline-log-kind">
+            {node.passed}/{node.total} passed
+            {node.failed > 0 && `, ${node.failed} failed`}
+            {node.skipped > 0 && `, ${node.skipped} skipped`}
+          </span>
+        )}
+        {node.attempts > 1 && (
+          <span className="text-muted pipeline-log-kind">
+            attempt {node.attempts}
+          </span>
+        )}
+        <StatusText status={node.status} />
+        {live && node.status === 'running' && (
+          <span className="text-muted pipeline-log-live">following output…</span>
+        )}
+        {node.runId ? (
+          <Link to={`/runs/${node.runId}`} className="pipeline-run-link">
+            Run details →
+          </Link>
+        ) : (
+          node.virtual && (
+            <Link to={`/tasks/${node.id}`} className="pipeline-run-link">
+              Task details →
+            </Link>
+          )
+        )}
+      </div>
+      {node.summary && <p className="text-muted">{node.summary}</p>}
+      {node.virtual ? (
+        <>
+          {node.error && <p className="task-error">{node.error}</p>}
+          <ul className="pipeline-cases">
+            {nodes
+              .filter((n) => n.parentId === node.id)
+              .map((child) => (
+                <li key={child.id}>
+                  <span className="pipeline-cases-name">{child.name}</span>
+                  <StatusText status={child.status} />
+                  {child.runId ? (
+                    <Link to={`/runs/${child.runId}`}>Run details →</Link>
+                  ) : (
+                    <span className="text-muted">no run yet</span>
+                  )}
+                </li>
+              ))}
+          </ul>
+        </>
+      ) : (
+        // The panel names the attempt it shows: a re-dispatch during the
+        // follow opens a new attempt, and asking for "the current one" every
+        // tick would read the new attempt's log from the old one's sequence
+        // (the per-attempt sequence restarts), hiding its early output.
+        <TaskLogView
+          taskId={node.id}
+          attempt={node.attempts}
+          live={live && node.status === 'running'}
+        />
+      )}
+    </div>
   )
 }
 
@@ -390,7 +528,7 @@ function PipelineSection({
 
 function nodeGlyph(status: string): string {
   switch (status) {
-    case 'done':
+    case 'passed':
       return '✓'
     case 'failed':
       return '✗'
@@ -403,7 +541,7 @@ function nodeGlyph(status: string): string {
 
 function statusTextClass(status: string): string {
   switch (status) {
-    case 'done':
+    case 'passed':
       return 'text-success'
     case 'failed':
       return 'text-danger'

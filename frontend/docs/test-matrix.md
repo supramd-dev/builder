@@ -94,7 +94,7 @@ matrix:
 | unit.workdir                 | no       | Directory the command runs in (see Working directories).            |
 | unit.artifacts               | no       | Artifact file path (or list) the runner fetches back (see Artifact files). |
 | unit.timeout                 | no       | Stage timeout overriding defaults.                                  |
-| regression.description       | no       | Human-readable label of the regression stage as a whole (the parent run); each case carries its preset's own description. |
+| regression.description       | no       | Human-readable label of the regression stage as a whole (the container node); each case carries its preset's own description. |
 
 The build stage is one shell command — or a list of them, like the
 test stages (no built-in cmake support — write the
@@ -139,16 +139,18 @@ presets:
 | Field                | Required | Description                                                   |
 |----------------------|----------|---------------------------------------------------------------|
 | presets.<name>.command | yes    | Shell command, or a list of commands (see Command lists).    |
-| presets.<name>.description | no | Human-readable label of the case, shown under its name on the regression run's detail page and on the case's own page; stored with every triggered run. |
+| presets.<name>.description | no | Human-readable label of the case, shown on the case's own task page (and its runs); stored with every triggered run. |
 | presets.<name>.workdir | no    | Directory the command runs in (see Working directories).     |
 | presets.<name>.timeout | no     | Case timeout (falls back to defaults/matrix timeout).        |
 | presets.<name>.artifacts | no    | Artifact files to collect (see Artifact files).              |
 
-Each referenced preset becomes its **own sub-task** in the task graph
-(“regression: heat”), which runs after the build with its own timeout,
-its own log and its own child test run under the parent regression run.
-The cases run independently — one failing case does not stop the others —
-and the matrix cell aggregates all cases of the entry.
+Each referenced preset becomes its **own task** in the graph
+(“regression: heat”), nested under the stage's virtual container. It runs
+after the build with its own timeout, its own log, its own attempt history
+and its own run — which is what lets it be reported on, downloaded and
+re-run on its own. The cases run independently — one failing case does not
+stop the others — and the matrix cell is the container's rollup over all
+cases of the entry.
 
 A matrix entry selects presets with `regression.use` and
 `regression.disable`:
@@ -170,17 +172,25 @@ A case's verdict is its **command's exit status** — nothing else:
 - An SSH-level failure (host unreachable, session dropped) fails the
   case the same way, with the transport error as the case's note.
 - The preset's `artifacts` files **never flip the verdict** — they are
-  stored as artifacts of the case's own child run (per-case detail parsed
+  stored as artifacts of the case's own run (per-case detail parsed
   in the browser). This differs from the unit stage, where artifact files
   reporting failed cases also fail the run.
+- The case's own run counts as the **one** test the case is: `1/1 passed`
+  when the command exits 0, `0/1 failed` otherwise. That count is the
+  verdict, not a tally parsed out of the artifact files (the browser
+  parses those for the per-case detail).
 - An `MD-BUILDER-SUMMARY:` line only becomes the case's note; it cannot
   turn a non-zero exit into a pass.
 
-The entry's regression run (the matrix cell) aggregates its cases: any
-failed case → the cell shows ✗, every case passed → ✓. Cases run
-independently — one failing case does not stop the others. When the
-clone or build fails, every case is recorded as **skipped** (⤼) with the
-upstream error as its note.
+The matrix cell is the **container's** state, which is the rollup of the
+cases under it: any failed case fails the stage and the cell says which
+ones ("3/4 cases passed; failed: heat"), all of them passed and the stage
+passes, and while they are still being claimed it reads "2/4 cases passed;
+2 queued". Cases run independently — one failing case does not stop the
+others. When the clone or build ends without passing — it failed, or it
+was itself reported `skipped` — every case is marked **skipped** with the
+upstream error as its summary (and one log line of its own); if every case
+was skipped, the stage itself reads `skipped`, not `passed`.
 
 ## Command lists
 
@@ -502,13 +512,24 @@ build runs — the detail page charts them wherever they appear.
 
 ### Downloading artifacts
 
-Every stored artifact of a run (build files, unit/regression results
-files) is downloadable from the run's detail page: each file individually,
-or the whole bundle as one zip (`GET /api/test-runs/{id}/artifacts/zip`).
-A regression run's zip includes every case's files, nested under
-`cases/<case name>/`. File contents live in the platform's database; an
-S3-compatible object store (e.g. Garage) is a planned storage backend —
-the download endpoints stay the same either way.
+Every stored artifact of a run (build files, unit/regression results and
+plot files) is downloadable from the run's detail page: each file
+individually, or the attempt's whole bundle as one zip
+(`GET /api/test-runs/{id}/artifacts/zip`). A zip of a run that produced
+nothing is a `404` rather than an empty archive.
+
+The zip that gathers a **whole test** is the task one:
+`GET /api/tasks/{id}/artifacts/zip` bundles the latest attempts of the
+task and every node under it — the task's own files at the archive root,
+each descendant's under a directory named after it (`regression-heat/…`,
+built from the node key with `:` replaced by `-`). Asking for the
+regression container therefore downloads every case's files in one
+archive, while asking for a single case downloads just that case. Retired
+nodes are excluded: their files belong to an earlier graph shape.
+
+File contents live in the configured S3-compatible object store (see
+[Object storage](#/docs/object-storage)); a read whose object is missing is
+a `404`, a backend failure a `502`.
 
 ## Validation rules
 
@@ -549,15 +570,17 @@ Each matched entry becomes a task graph (see
    MD_ENV_TAGS, MD_TASK_DIR, MD_CODE_DIR plus the yaml env variables,
    sources the env setup script (if any), exports the expanded yaml
    variables and runs the build stage in its working directory.
-3. If the build (or the clone) fails, the dependent test stages are
-   marked skipped and the dashboard shows ✗.
+3. If the build (or the clone) ends without passing — it failed, or it
+   was itself reported `skipped` — the dependent test stages are marked
+   **skipped**, with the reason in their summary and one line in their
+   log, and the dashboard says so.
 4. **unit**: the stage command runs in its working directory under its
    timeout; the full output streams into the task log and the outcome
-   is stored as a test run.
-5. **regression: one sub-task per selected preset** — each case command
+   is stored as the attempt's test run.
+5. **regression: one task per selected preset** — each case command
    runs after the build (exporting MD_CASE), collects its own artifact
-   files and records its own child test run; the matrix cell shows the
-   aggregate across cases.
+   files and records its own run; the matrix cell shows the container's
+   rollup across cases.
 
 ## Custom summaries
 
@@ -570,4 +593,4 @@ MD-BUILDER-SUMMARY: all 8 tests passed, max rel err 3.2e-7
 The text after the prefix becomes the run summary shown on the dashboard.
 Without it, the summary is the exit code plus the last lines of the stage
 log (truncated to 500 characters). For a regression case the summary
-line becomes the child run's note.
+line becomes that case's run summary.

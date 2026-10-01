@@ -15,30 +15,27 @@ import (
 	"md-builder/server/store"
 )
 
-// artifactFixture creates a build run with one artifact and returns the test
-// environment, the run and the artifact row.
+// artifactFixture dispatches a graph whose build stage reports one artifact,
+// and returns the test environment, the build stage's run and the artifact row.
 func artifactFixture(t *testing.T, objs storage.Store) (dashboardTestEnv, *store.TestRun, *store.TestArtifact) {
 	t.Helper()
-	apiServer, env := newDashboardEnvWithObjects(t, objs)
+	env := newDashboardEnvWithObjects(t, objs)
+	s := env.server.Store
 
-	var env1 store.TestEnvironment
-	if err := apiServer.Store.DB.Where("name = ?", "cpu-node-1").First(&env1).Error; err != nil {
-		t.Fatalf("load environment: %v", err)
-	}
-	commit := &store.Commit{Repo: "group/md-code", SHA: "3333333"}
-	if _, err := apiServer.Store.GetOrCreateCommit(commit); err != nil {
+	commit := &store.Commit{Repo: "group/md-code", SHA: "aaaaaaa"}
+	if _, err := s.GetOrCreateCommit(commit); err != nil {
 		t.Fatalf("get commit: %v", err)
 	}
-	run, err := apiServer.Store.UpsertTestRun(&store.RunInput{
-		EnvironmentID: env1.ID, CommitID: commit.ID, Kind: store.RunKindBuild,
-		Artifacts: []store.ArtifactInput{
-			{Kind: store.ArtifactKindResults, Name: "build/test_detail.xml", Content: "<testsuites/>"},
-		},
+	_, byKey := dispatchTestGraph(t, s, envByName(t, s, "cpu-node-1"), commit, graphSpec{
+		build: &stageSpec{res: &store.AttemptResult{
+			Status: store.StatusPassed,
+			Artifacts: []store.ArtifactInput{
+				{Kind: store.ArtifactKindResults, Name: "build/test_detail.xml", Content: "<testsuites/>"},
+			},
+		}},
 	})
-	if err != nil {
-		t.Fatalf("upsert run: %v", err)
-	}
-	artifacts, err := apiServer.Store.ListRunArtifacts(run.ID)
+	run := runOfTask(t, s, nodeOf(t, byKey, store.TaskKindBuild))
+	artifacts, err := s.ListRunArtifacts(run.ID)
 	if err != nil || len(artifacts) != 1 {
 		t.Fatalf("artifacts: %+v, %v", artifacts, err)
 	}
@@ -231,23 +228,20 @@ func mustObjectKey(t *testing.T, objs *storage.Memory) string {
 // Rows written before the object store existed are still served from the
 // inline column.
 func TestArtifactContentFallsBackToInlineRow(t *testing.T) {
-	apiServer, env := newDashboardEnv(t)
-	var env1 store.TestEnvironment
-	if err := apiServer.Store.DB.Where("name = ?", "cpu-node-1").First(&env1).Error; err != nil {
-		t.Fatalf("load environment: %v", err)
-	}
-	commit := &store.Commit{Repo: "group/md-code", SHA: "4444444"}
-	if _, err := apiServer.Store.GetOrCreateCommit(commit); err != nil {
+	env := newDashboardEnv(t)
+	s := env.server.Store
+
+	commit := &store.Commit{Repo: "group/md-code", SHA: "eeeeeee"}
+	if _, err := s.GetOrCreateCommit(commit); err != nil {
 		t.Fatalf("get commit: %v", err)
 	}
-	run, err := apiServer.Store.UpsertTestRun(&store.RunInput{
-		EnvironmentID: env1.ID, CommitID: commit.ID, Kind: store.RunKindUnit,
+	_, byKey := dispatchTestGraph(t, s, envByName(t, s, "cpu-node-1"), commit, graphSpec{
+		unit: &stageSpec{res: &store.AttemptResult{Status: store.StatusPassed, Total: 1, Passed: 1}},
 	})
-	if err != nil {
-		t.Fatalf("upsert run: %v", err)
-	}
+	run := runOfTask(t, s, nodeOf(t, byKey, store.TaskKindUnit))
+
 	legacy := store.TestArtifact{RunID: run.ID, Kind: store.ArtifactKindResults, Name: "old.xml", Content: "<old/>"}
-	if err := apiServer.Store.DB.Create(&legacy).Error; err != nil {
+	if err := s.DB.Create(&legacy).Error; err != nil {
 		t.Fatalf("insert legacy row: %v", err)
 	}
 

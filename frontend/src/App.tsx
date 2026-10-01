@@ -22,8 +22,8 @@ import { applySiteTimezone, subscribeTimezone } from './timezone'
 //                           stage's live log in one page (a sub-task id is
 //                           resolved to its root; the old /log suffix
 //                           redirects here)
-//   #/runs/:runId           test run detail (a regression case row opens
-//                           the child run's own detail page here)
+//   #/runs/:runId           run detail: one attempt of one task (its log,
+//                           artifacts, results) plus the task's other attempts
 //   #/health                site health board (footer link): backend
 //                           liveness, git repository, object storage
 //
