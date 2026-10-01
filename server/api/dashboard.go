@@ -764,7 +764,9 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 }
 
 // caseJSON is one case in the run detail: a summary of the case's own
-// (child) TestRun — id doubles as the runId the UI links into the case page.
+// (child) TestRun — id doubles as the runId the UI links into the case page,
+// and taskId is the stage sub-task that produced the case's log (0 for a run
+// reported without a task, e.g. an external CI report).
 type caseJSON struct {
 	ID             int64   `json:"id"`
 	Name           string  `json:"name"`
@@ -772,6 +774,7 @@ type caseJSON struct {
 	Status         string  `json:"status"`
 	Message        string  `json:"message"`
 	DurationMillis float64 `json:"durationMillis"`
+	TaskID         int64   `json:"taskId,omitempty"`
 }
 
 // artifactRefJSON references one stored artifact in the run detail (the
@@ -1311,5 +1314,6 @@ func toCaseJSON(c *store.TestRun) caseJSON {
 		Status:         c.Status,
 		Message:        c.Message,
 		DurationMillis: c.DurationMillis,
+		TaskID:         c.TaskID,
 	}
 }

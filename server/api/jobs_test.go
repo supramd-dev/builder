@@ -643,6 +643,35 @@ func TestTaskDetailCaseRuns(t *testing.T) {
 		t.Errorf("clone/build should have no run: %+v", detail.SubTasks)
 	}
 
+	// The run detail carries each case's own sub-task so the page's log
+	// selector can follow whichever case the user picks (the run's own
+	// taskId is only ever the first case's).
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/test-runs/%d", parent.ID), nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run detail: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var runDetail struct {
+		Cases []struct {
+			Name   string `json:"name"`
+			TaskID int64  `json:"taskId"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &runDetail); err != nil {
+		t.Fatal(err)
+	}
+	wantTask := map[string]int64{"heat": heat.ID, "poisson": poisson.ID, "laplace": laplace.ID}
+	if len(runDetail.Cases) != len(wantTask) {
+		t.Fatalf("run detail cases: want %d, got %+v", len(wantTask), runDetail.Cases)
+	}
+	for _, c := range runDetail.Cases {
+		if c.TaskID != wantTask[c.Name] {
+			t.Errorf("case %s: want taskId %d, got %d", c.Name, wantTask[c.Name], c.TaskID)
+		}
+	}
+
 	// A dispatch that never seeded case rows (a run reported from outside,
 	// with no case sub-tasks recorded): the case node falls back to the
 	// stage-wide run instead of losing its link.

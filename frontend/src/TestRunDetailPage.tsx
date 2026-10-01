@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router'
+import { Link, useParams } from 'react-router'
 import { LoaderCircle, Maximize2 } from 'lucide-react'
 import {
   getTestArtifact,
@@ -10,6 +10,7 @@ import { formatDuration, parseGTestResults, type GTestCase } from './gtest'
 import MessageDialog from './MessageDialog'
 import ArtifactPreviewDialog from './ArtifactPreviewDialog'
 import TaskLogView from './TaskLogView'
+import { CaseStatusText } from './StatusViews'
 import { formatTime } from './timezone'
 import { Breadcrumbs } from './Breadcrumbs'
 import PlotSection from './plot/PlotSection'
@@ -225,14 +226,81 @@ export default function TestRunDetailPage({ onError }: Props) {
         </p>
       )}
 
-      {/* The stage's stdout (task log) — live while the stage executes. */}
-      {run.taskId !== 0 && (
-        <section>
-          <h3 className="task-section-title">Log</h3>
-          <TaskLogView taskId={run.taskId} live={run.status === 'running'} />
-        </section>
-      )}
+      <LogSection run={run} />
     </div>
+  )
+}
+
+// LogSection shows the run's stdout. A stage-wide regression run produces one
+// child run (and one stage sub-task) per case, so the log follows a case the
+// user picks from a step list — the same widget as the task page's pipeline.
+// Runs without cases (build/unit, or a report carrying no per-case task) keep
+// the single stage log.
+function LogSection({ run }: { run: TestRunDetail }) {
+  // The user's explicit pick. Until there is one the selection follows the
+  // data — the run is re-fetched every 3s while in flight, so the view opens
+  // on (and moves to) whichever case is currently executing.
+  const [pickedId, setPickedId] = useState<number | null>(null)
+
+  if (run.cases.length === 0) {
+    if (run.taskId === 0) return null
+    return (
+      <section>
+        <h3 className="task-section-title">Log</h3>
+        <TaskLogView taskId={run.taskId} live={run.status === 'running'} />
+      </section>
+    )
+  }
+
+  const selected =
+    run.cases.find((c) => c.id === pickedId) ??
+    run.cases.find((c) => c.status === 'running') ??
+    run.cases[0]
+  // The case's own sub-task, not the parent run's (which is pinned to the
+  // first case): a case queued behind its siblings has no output yet.
+  const caseLive = run.status === 'running' && selected.status === 'running'
+
+  return (
+    <section>
+      <h3 className="task-section-title">Log</h3>
+      <ol className="task-steps">
+        {run.cases.map((c) => (
+          <li key={c.id}>
+            <button
+              type="button"
+              className={'task-step' + (c.id === selected.id ? ' task-step-selected' : '')}
+              onClick={() => setPickedId(c.id)}
+              title={c.description || c.name}
+            >
+              <span className="task-step-name">{c.name}</span>
+              <CaseStatusText status={c.status} />
+            </button>
+          </li>
+        ))}
+      </ol>
+      {/* The picked case's log sits below the whole list (one shared viewer),
+          mirroring the pipeline's layout. */}
+      <div className="pipeline-log">
+        <div className="pipeline-log-head">
+          <span className="pipeline-log-name">{selected.name}</span>
+          <CaseStatusText status={selected.status} />
+          {caseLive && (
+            <span className="text-muted pipeline-log-live">following output…</span>
+          )}
+          <Link to={`/runs/${selected.id}`} className="pipeline-run-link">
+            Case run details →
+          </Link>
+        </div>
+        {selected.taskId ? (
+          <TaskLogView taskId={selected.taskId} live={caseLive} />
+        ) : (
+          <p className="text-muted">
+            No task log for this case — it reported its result without a stage
+            task.
+          </p>
+        )}
+      </div>
+    </section>
   )
 }
 
@@ -511,19 +579,7 @@ function CaseTable({
                 )}
               </td>
               <td>
-                {c.status === 'passed' ? (
-                  <span className="text-success">✓ passed</span>
-                ) : c.status === 'skipped' ? (
-                  <span className="text-warn">⤼ skipped</span>
-                ) : c.status === 'running' ? (
-                  <span className="text-run">
-                    <LoaderCircle size={13} className="spin" /> running
-                  </span>
-                ) : c.status === 'pending' ? (
-                  <span className="text-muted">· pending</span>
-                ) : (
-                  <span className="text-danger">✗ failed</span>
-                )}
+                <CaseStatusText status={c.status} />
               </td>
               <td>{formatDuration(c.durationMs)}</td>
               <td className="text-muted">

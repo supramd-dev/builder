@@ -85,6 +85,29 @@ export function TaskStatusText({ status }: { status: string }) {
   )
 }
 
+// CaseStatusText renders a case's status as colored inline text. Cases carry
+// run statuses (passed/failed/skipped/pending/running), not the task statuses
+// TaskStatusText above expects: ✓ passed / ✗ failed / ⤼ skipped / spinner
+// running / gray · pending.
+export function CaseStatusText({ status }: { status: string }) {
+  if (status === 'running') {
+    return (
+      <span className="text-run">
+        <LoaderCircle size={13} className="spin" /> running
+      </span>
+    )
+  }
+  const [cls, text] =
+    status === 'passed'
+      ? ['text-success', '✓ passed']
+      : status === 'skipped'
+        ? ['text-warn', '⤼ skipped']
+        : status === 'pending'
+          ? ['text-muted', '· pending']
+          : ['text-danger', '✗ failed']
+  return <span className={cls}>{text}</span>
+}
+
 function statusGlyph(status: string): string {
   switch (status) {
     case 'done':

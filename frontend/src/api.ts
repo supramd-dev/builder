@@ -537,6 +537,10 @@ export interface CaseResult {
   status: 'passed' | 'failed' | 'skipped' | 'pending' | 'running'
   message: string
   durationMillis: number
+  // taskId: the stage sub-task that produced this case's log. The run detail
+  // page's log viewer follows the case the user picks; 0/absent means the
+  // case was reported without a task (no log to show).
+  taskId?: number
 }
 
 // TestArtifactRef references one stored result/log/series/file artifact of a
