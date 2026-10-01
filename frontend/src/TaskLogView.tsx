@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { getTaskLogs } from './api'
+import { Download } from 'lucide-react'
+import { getTaskLogs, taskLogDownloadUrl } from './api'
 
 // TaskLogView shows one task's incremental log, polling with after=lastSeq
 // while live is set. Shared by the task pipeline page (following a running
@@ -8,6 +9,10 @@ import { getTaskLogs } from './api'
 // The poll interval is derived from `live` but taskId alone resets the
 // stream: flipping live (a task finishing while being watched) only stops
 // the timer — the already-streamed text stays put, no re-fetch from 0.
+//
+// The rendered text is capped (only the tail is kept), so the bar above it
+// links to the server's copy of the whole log — the button is how a user
+// gets the full file, whatever the viewer is showing.
 export default function TaskLogView({
   taskId,
   live,
@@ -95,16 +100,28 @@ export default function TaskLogView({
   }, [text])
 
   return (
-    <pre
-      ref={preRef}
-      className="task-log"
-      onScroll={(e) => {
-        const el = e.currentTarget
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-      }}
-    >
-      {truncated && <span className="text-muted">… earlier output trimmed (full log on the server) …{'\n'}</span>}
-      {text || (live ? 'waiting for output…' : '(no output)')}
-    </pre>
+    <div className="task-log-box">
+      <div className="task-log-bar">
+        <a
+          className="task-log-download"
+          href={taskLogDownloadUrl(taskId)}
+          download={`task-${taskId}.log`}
+          title="Download the full log as a file"
+        >
+          <Download size={13} /> Download log
+        </a>
+      </div>
+      <pre
+        ref={preRef}
+        className="task-log"
+        onScroll={(e) => {
+          const el = e.currentTarget
+          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+        }}
+      >
+        {truncated && <span className="text-muted">… earlier output trimmed (full log on the server) …{'\n'}</span>}
+        {text || (live ? 'waiting for output…' : '(no output)')}
+      </pre>
+    </div>
   )
 }

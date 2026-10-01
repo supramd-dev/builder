@@ -2,6 +2,8 @@ package api
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -12,7 +14,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// --- GET /api/tasks/{id} and GET /api/tasks/{id}/log ---
+// --- GET /api/tasks/{id}, /log and /log/download ---
 
 // subTaskJSON is the wire representation of one sub-task.
 type subTaskJSON struct {
@@ -67,12 +69,16 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request, user *st
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid task id"})
 		return
 	}
-	if len(parts) == 2 && parts[1] == "log" {
+	if len(parts) == 2 && (parts[1] == "log" || parts[1] == "log/download") {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
 		}
-		s.taskLogs(w, r, id)
+		if parts[1] == "log" {
+			s.taskLogs(w, r, id)
+		} else {
+			s.taskLogDownload(w, id)
+		}
 		return
 	}
 	if len(parts) != 1 {
@@ -235,6 +241,46 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, id int64) {
 type logChunkJSON struct {
 	Seq     int    `json:"seq"`
 	Content string `json:"content"`
+}
+
+// taskLogDownload handles GET /api/tasks/{id}/log/download: the task's whole
+// log as one text file. The log viewer in the browser keeps only the tail of
+// the stream it followed, so the file is produced from the stored chunks
+// here, streamed batch by batch (ReadTaskLogs caps how many it returns).
+func (s *Server) taskLogDownload(w http.ResponseWriter, id int64) {
+	task, err := s.Store.GetTask(id)
+	if err != nil {
+		if errors.Is(err, store.ErrTaskNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return
+		}
+		log.Printf("task log download: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("task-%d.log", task.ID)))
+	// Walk the log by sequence: each batch continues after the last chunk
+	// written, so a long build's output never has to fit in memory.
+	after := 0
+	for {
+		logs, err := s.Store.ReadTaskLogs(task.ID, after)
+		if err != nil {
+			// The status line is already out: the download is cut short and
+			// the reason stays in the server log.
+			log.Printf("task %d log download: %v", task.ID, err)
+			return
+		}
+		if len(logs) == 0 {
+			return
+		}
+		for _, l := range logs {
+			if _, err := io.WriteString(w, l.Content); err != nil {
+				return // the client is gone; nothing left to write to
+			}
+			after = l.Seq
+		}
+	}
 }
 
 // regressionSubTaskIDs collects the ids of a root's regression case

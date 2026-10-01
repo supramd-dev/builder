@@ -523,6 +523,47 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad after: expected 400, got %d", rec.Code)
 	}
+
+	// Full-log download: the stored chunks as one text file the browser saves.
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", stored[1].ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("log download: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Errorf("download Content-Type = %q", got)
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != fmt.Sprintf(`attachment; filename="task-%d.log"`, stored[1].ID) {
+		t.Errorf("download Content-Disposition = %q", got)
+	}
+	if got := rec.Body.String(); got != "cloning...\nuploading 12.3 MiB\n" {
+		t.Errorf("download body = %q", got)
+	}
+
+	// A log longer than one store read (ReadTaskLogs returns at most 1000
+	// chunks): the whole file comes down, not just the first batch.
+	long := make([]store.TaskLog, 0, 1500)
+	var want strings.Builder
+	for i := 1; i <= 1500; i++ {
+		line := fmt.Sprintf("line %d\n", i)
+		long = append(long, store.TaskLog{TaskID: stored[2].ID, Seq: i, Content: line})
+		want.WriteString(line)
+	}
+	if err := s.DB.CreateInBatches(long, 500).Error; err != nil {
+		t.Fatal(err)
+	}
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", stored[2].ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("long log download: expected 200, got %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != want.String() {
+		t.Errorf("long log download: got %d bytes, want %d", len(got), want.Len())
+	}
+
+	// An unknown task has no file to download.
+	rec = authed(http.MethodGet, "/api/tasks/99999/log/download")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown task download: expected 404, got %d", rec.Code)
+	}
 }
 
 // TestTaskDetailCaseRuns checks the graph's node → run links for a

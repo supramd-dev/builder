@@ -706,6 +706,14 @@ export async function getTaskLogs(
   return api<TaskLogs>(`/api/tasks/${id}/log?after=${after}`)
 }
 
+// taskLogDownloadUrl is the task's whole log as a downloadable text file. The
+// viewer follows the stream incrementally and keeps only its tail, so the
+// file is assembled server-side and fetched by the browser itself (a plain
+// link — the session cookie authenticates it).
+export function taskLogDownloadUrl(id: number): string {
+  return `/api/tasks/${id}/log/download`
+}
+
 // ServerHealth is the unauthenticated health probe; version is the served
 // build's source revision (git commit id, "dev" for an unstamped build).
 export interface ServerHealth {
