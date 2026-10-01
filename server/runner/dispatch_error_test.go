@@ -82,7 +82,7 @@ func TestDispatchRecordsErrorOnCommit(t *testing.T) {
 	// A later dispatch that works clears it again — otherwise the row would
 	// keep claiming a failure that has since been fixed.
 	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
-		return []byte("version: 2\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
+		return []byte("version: 3\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
 	}
 	if res := svc.DispatchForCommit(commit); res.Err != nil {
 		t.Fatalf("second dispatch: %v", res.Err)
@@ -100,7 +100,7 @@ func TestDispatchRecordsNoMatchingEntry(t *testing.T) {
 	commit := commitFor(t, s, "bbbb2222")
 
 	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
-		return []byte("version: 2\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
+		return []byte("version: 3\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
 	}
 	res := svc.DispatchForCommit(commit)
 	if res.Err != nil {

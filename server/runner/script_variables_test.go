@@ -228,7 +228,7 @@ func TestVariableValuesCannotInjectShell(t *testing.T) {
 // variables cannot be rendered into a sane script is refused before dispatch.
 func TestConfigVariablesValidation(t *testing.T) {
 	parse := func(entryBody string) ([]MergedEntry, error) {
-		return ParseConfig([]byte(`version: 2
+		return ParseConfig([]byte(`version: 3
 matrix:
   - tags: [cpu]
 ` + entryBody + `    build:
@@ -271,7 +271,7 @@ matrix:
 // TestConfigVariablesDefaultsMerge covers the defaults/entry split: an entry
 // inherits the shared variables and may override one of them.
 func TestConfigVariablesDefaultsMerge(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   variables:
     BUILD_ROOT: "$MD_CODE_DIR/build"
@@ -302,7 +302,7 @@ matrix:
 		t.Errorf("entry 1 must override TOOLCHAIN and keep the rest, got %v", got)
 	}
 	// Entries without variables stay nil, so no exports are emitted for them.
-	if entries, err := ParseConfig([]byte(`version: 2
+	if entries, err := ParseConfig([]byte(`version: 3
 matrix:
   - tags: [cpu]
     build:

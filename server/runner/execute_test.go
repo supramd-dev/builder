@@ -172,7 +172,7 @@ func newExecuteFixture(t *testing.T, yaml string) (*Service, *store.Store, *fake
 	return svc, s, exec, cloner, claimed
 }
 
-const execYAML = `version: 2
+const execYAML = `version: 3
 presets:
   heat:
     command: "python3 run_heat.py"
@@ -216,7 +216,7 @@ func runUntilStage(t *testing.T, svc *Service, s *store.Store, cloneTask *store.
 	}
 }
 
-const artifactsYAML = `version: 2
+const artifactsYAML = `version: 3
 defaults:
   build:
     command: "cmake -DEXEC=1 . && cmake --build ."
@@ -230,7 +230,7 @@ matrix:
 // buildArtifactsYAML exercises the build-stage artifacts field: files the
 // build command leaves behind, fetched back as file-kind artifacts (never
 // parsed for counts — the build verdict is its exit code alone).
-const buildArtifactsYAML = `version: 2
+const buildArtifactsYAML = `version: 3
 defaults:
   build:
     command: "cmake . && ninja"
@@ -243,7 +243,7 @@ matrix:
       command: "ctest -L unit"
 `
 
-const multiArtifactsYAML = `version: 2
+const multiArtifactsYAML = `version: 3
 defaults:
   build:
     command: "cmake ."
@@ -258,7 +258,7 @@ matrix:
 
 // caseArtifactsYAML exercises the per-case regression path: two presets
 // with their own artifact files.
-const caseArtifactsYAML = `version: 2
+const caseArtifactsYAML = `version: 3
 defaults:
   build:
     command: "cmake ."
@@ -1085,7 +1085,7 @@ func TestExecuteEnvScriptWrittenAndSourced(t *testing.T) {
 // execVarsYAML exercises the yaml `variables:` block through the real
 // dispatch path: the entry's variables reach every stage script (expanded),
 // and the site's whitelist decides which host names expand.
-const execVarsYAML = `version: 2
+const execVarsYAML = `version: 3
 defaults:
   build:
     command: "cmake -DEXEC=1 . && cmake --build ."

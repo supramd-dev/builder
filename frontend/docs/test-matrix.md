@@ -13,7 +13,7 @@ source tree as
 ## Full example
 
 ```yaml
-version: 2
+version: 3
 
 # Optional defaults, merged into every matrix entry (maps merge key-wise,
 # scalars are overridden per entry).
@@ -77,7 +77,7 @@ matrix:
 
 | Field                        | Required | Description                                                        |
 |------------------------------|----------|--------------------------------------------------------------------|
-| version                      | yes      | Must be 2.                                                          |
+| version                      | yes      | Must be 3.                                                          |
 | defaults                     | no       | Entry-level defaults: timeout, env, variables, build, unit, regression. |
 | presets                      | no       | Shared regression cases (see below).                               |
 | matrix                       | yes      | One or more entries; each entry needs tags and at least one stage.  |
@@ -533,7 +533,7 @@ a `404`, a backend failure a `502`.
 
 ## Validation rules
 
-- `version` must be 2; `matrix` must be non-empty.
+- `version` must be 3; `matrix` must be non-empty.
 - Each entry needs non-empty `tags` and at least one of `unit` /
   `regression` (or its presets expansion), with a `command`.
 - Duplicate tag sets across entries are rejected.

@@ -16,8 +16,10 @@ import (
 	"md-builder/server/store"
 )
 
-// ConfigVersion is the only supported md-builder.yaml schema version.
-const ConfigVersion = 2
+// ConfigVersion is the only supported md-builder.yaml schema version. A config
+// naming any other version is refused; there is no compatibility path for older
+// schema versions.
+const ConfigVersion = 3
 
 // MaxTimeoutSeconds is the hard per-command timeout cap (4h).
 const MaxTimeoutSeconds = 4 * 3600

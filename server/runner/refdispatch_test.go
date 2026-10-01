@@ -54,7 +54,7 @@ func TestDispatchForRef(t *testing.T) {
 		if atSHA != sha {
 			t.Errorf("fetch yaml at %q, want %q", atSHA, sha)
 		}
-		return []byte(`version: 2
+		return []byte(`version: 3
 defaults:
   build:
     command: "make -j8"
@@ -159,7 +159,7 @@ func TestDispatchStoresDescriptions(t *testing.T) {
 		return sha, nil
 	}
 	svc.FetchYAML = func(ctx context.Context, codeRepoURL, atSHA string, creds *GitCredentials) ([]byte, error) {
-		return []byte(`version: 2
+		return []byte(`version: 3
 defaults:
   build:
     command: "make -j8"

@@ -32,7 +32,7 @@ func newDispatchTestServer(t *testing.T, yaml string) (*Server, *store.Store) {
 	return apiServer, s
 }
 
-const dispatchYAML = `version: 2
+const dispatchYAML = `version: 3
 defaults:
   build:
     command: "cmake . && cmake --build ."

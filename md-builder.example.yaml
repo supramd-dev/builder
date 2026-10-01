@@ -1,4 +1,4 @@
-# md-builder.yaml — example configuration (schema version 2)
+# md-builder.yaml — example configuration (schema version 3)
 #
 # Copy this file to the ROOT of the code repository under test and adapt
 # it. md-builder reads it at every pushed commit, so matrix changes take
@@ -22,7 +22,7 @@
 #      compiler exports — configured per environment on the server, not
 #      here).
 
-version: 2
+version: 3
 
 # ---------------------------------------------------------------------------
 # defaults (optional)

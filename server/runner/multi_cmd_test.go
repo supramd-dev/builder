@@ -121,7 +121,7 @@ func TestMultiCommandScriptBash(t *testing.T) {
 // The list form flows through the whole chain: yaml → merged entry →
 // graph snapshot → generated script.
 func TestCommandListThroughGraph(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "cmake ."

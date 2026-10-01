@@ -33,7 +33,7 @@ func newFileFetchFixture(t *testing.T, handler http.HandlerFunc) (fetch YAMLFetc
 
 // The point of the whole exercise: one small request, no clone.
 func TestFileFetchReadsFileWithoutCloning(t *testing.T) {
-	const yaml = "version: 2\nmatrix: []\n"
+	const yaml = "version: 3\nmatrix: []\n"
 	const sha = "21c8dc33c771d5002df19de1cc71bb5a0c87568e"
 	fetch, repo, fallbackCalls, requests := newFileFetchFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(yaml))
@@ -76,7 +76,7 @@ func TestFileFetchReadsFileWithoutCloning(t *testing.T) {
 // A public repository sends no credential at all.
 func TestFileFetchWithoutTokenSendsNoAuth(t *testing.T) {
 	fetch, repo, _, requests := newFileFetchFixture(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("version: 2\n"))
+		_, _ = w.Write([]byte("version: 3\n"))
 	})
 
 	if _, err := fetch(context.Background(), repo, "abc", nil); err != nil {
@@ -255,7 +255,7 @@ func TestFileFetchDropsTokenOnCrossHostRedirect(t *testing.T) {
 	var tokenAtStorage string
 	storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenAtStorage = r.Header.Get("PRIVATE-TOKEN")
-		_, _ = w.Write([]byte("version: 2\n"))
+		_, _ = w.Write([]byte("version: 3\n"))
 	}))
 	defer storage.Close()
 
@@ -272,7 +272,7 @@ func TestFileFetchDropsTokenOnCrossHostRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch: %v", err)
 	}
-	if string(content) != "version: 2\n" {
+	if string(content) != "version: 3\n" {
 		t.Fatalf("content = %q, want the file from the redirect target", content)
 	}
 	if tokenAtStorage != "" {
