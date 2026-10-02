@@ -12,6 +12,7 @@ import { lazy, Suspense, useEffect, useState } from 'react'
 import type * as Plotly from 'plotly.js'
 import { getTestArtifact, type TestArtifactRef } from '../api'
 import { isPlotArtifact } from '../artifacts'
+import { drawnHeight, heightNote, parsePlotFigure, type PlotFigure } from './figure'
 
 // plotly.js is ~3.5 MB minified, so the <Plot/> component (and everything
 // it drags in) is loaded lazily: the split chunk only downloads when a run
@@ -21,85 +22,9 @@ const Plot = lazy(async () => {
   return { default: mod.default }
 })
 
-// PlotFigure is the subset of a Plotly figure the component forwards: the
-// trace array and the layout. Anything else in the file is ignored.
-export interface PlotFigure {
-  data: Plotly.Data[]
-  layout?: Partial<Plotly.Layout>
-}
-
-// Figure height in pixels. A document's own height is what gets drawn — the
-// author picked it — inside these bounds, which only keep a hairline or a
-// runaway value from being taken literally. A document that names no height
-// gets defaultFigureHeight: taller than Plotly's own 450, because on a run
-// page a chart spans a thousand pixels and 360 read as squashed.
-const minFigureHeight = 120
-const maxFigureHeight = 2000
-const defaultFigureHeight = 480
-
-// figureHeight reads the height a figure document declares. `layout.height`
-// is the Plotly spelling; a bare root-level `height` is what a hand-rolled
-// exporter tends to write, so it is a fallback. Both are accepted as a number
-// or as a numeric string, since JSON written by hand quotes them often
-// enough. 0 means the document does not say.
-function figureHeight(raw: { layout?: unknown; height?: unknown }): number {
-  const layout = (raw.layout ?? {}) as { height?: unknown }
-  return positiveNumber(layout.height) || positiveNumber(raw.height)
-}
-
-// positiveNumber reads a JSON scalar as a positive number, or 0.
-function positiveNumber(v: unknown): number {
-  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v
-  if (typeof v === 'string') {
-    const n = Number(v)
-    if (Number.isFinite(n) && n > 0) return n
-  }
-  return 0
-}
-
-// drawnHeight resolves the pixel height to render a figure at, given the
-// height its document declares (0 when it names none).
-export function drawnHeight(declared: number): number {
-  if (declared <= 0) return defaultFigureHeight
-  return Math.min(Math.max(Math.round(declared), minFigureHeight), maxFigureHeight)
-}
-
-// heightNote says where a drawn height came from, for the label above the
-// chart: the file's own number, the default, or the file's number after the
-// bounds were applied.
-function heightNote(declared: number, drawn: number): string {
-  if (declared <= 0) return '(default)'
-  if (drawn !== Math.round(declared)) return `(capped from ${Math.round(declared)})`
-  return '(from the file)'
-}
-
-// parsePlotFigure validates a fetched artifact's content as a Plotly
-// figure: an object with a non-empty `data` array. Throws a readable error
-// otherwise — the message is shown under the file name.
+// What a figure document is, and how tall to draw it, is in figure.ts: read
+// there, tested there.
 //
-// The height is normalized into `layout.height` here (see figureHeight) so
-// the render path has one place to read it from, and a document that spells
-// it outside the layout still gets the size it asked for.
-export function parsePlotFigure(content: string, name: string): PlotFigure {
-  let raw: unknown
-  try {
-    raw = JSON.parse(content)
-  } catch (err: unknown) {
-    throw new Error(`invalid JSON: ${err instanceof Error ? err.message : String(err)}`)
-  }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    throw new Error('not a plot document (expected a JSON object)')
-  }
-  const fig = raw as { data?: unknown; layout?: unknown; height?: unknown }
-  if (!Array.isArray(fig.data) || fig.data.length === 0) {
-    throw new Error(`not a plot document (${name || 'file'} has no "data" traces)`)
-  }
-  const layout = { ...((fig.layout ?? {}) as Partial<Plotly.Layout>) }
-  const height = figureHeight(fig)
-  if (height > 0) layout.height = height
-  return { data: fig.data as Plotly.Data[], layout }
-}
-
 // PlotSection renders every plot artifact of a run: one fetch per file,
 // one <Plot/> per file. Runs without plot artifacts render nothing.
 export default function PlotSection({
@@ -128,10 +53,9 @@ export default function PlotSection({
   )
 }
 
-// PlotFigureView fetches one artifact's content and renders its figure.
-// The chart height honors the file's layout.height (capped) and otherwise
-// defaults to 360px; width is responsive (the layout.width, when the file
-// sets one, wins).
+// PlotFigureView fetches one artifact's content and renders its figure, at
+// the height the document asks for (see drawnHeight) and the width of the
+// container it is in.
 function PlotFigureView({
   ref2,
   onError,

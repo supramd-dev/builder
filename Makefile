@@ -20,8 +20,13 @@ build-server: build
 serve: build
 	cd server && go run .
 
+# The frontend tests are node --test over src/*.ts (types stripped by node
+# itself): no test framework and no npm install needed, only the .ts modules
+# the pure logic lives in. .tsx is not runnable by node, so what is tested
+# there is what has been kept out of the components.
 test:
 	cd server && go test ./...
+	cd frontend && npm test
 
 # End-to-end API smoke test against a running server (default :8080).
 # Override with USER/EMAIL/PASSWORD if needed.
