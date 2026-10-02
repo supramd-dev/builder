@@ -494,11 +494,12 @@ Any file the build leaves behind works — logs, `compile_commands.json`,
 size reports. As with the test stages, paths are relative to the build's
 workdir and each file is capped at 8 MiB at fetch time.
 
-### Plot artifacts (`*.plot.json`)
+### Plot artifacts (`*.plot.json` / `*.plotly.json`)
 
 A regression case's artifacts may include **plot figures**: files whose
-name ends in `.plot.json` and whose content is a [Plotly] figure
-document — a `data` array of traces plus an optional `layout` object:
+name ends in `.plot.json` or `.plotly.json` and whose content is a
+[Plotly] figure document — a `data` array of traces plus an optional
+`layout` object:
 
 ```yaml
 presets:
@@ -517,14 +518,21 @@ presets:
 }
 ```
 
-When you open the case's run detail page, every `*.plot.json` artifact
-is fetched and rendered as an interactive chart (zoom, hover, legend
-toggle — the standard Plotly toolbar). The document is passed through
-almost verbatim: every [Plotly trace type] (scatter, bar, heatmap, 3D
-surface, …) works, and the file's `layout` wins over the defaults —
-including `layout.height` (capped at 1200 px; the width is always
-responsive). A malformed file shows its error inline and still downloads
-from the artifacts table.
+When you open the run detail page, every plot artifact is fetched and
+rendered as an interactive chart (zoom, hover, legend toggle — the
+standard Plotly toolbar). The document is passed through almost verbatim:
+every [Plotly trace type] (scatter, bar, heatmap, 3D surface, …) works,
+and the file's `layout` wins over the defaults — including `layout.height`
+(capped at 1200 px; the width is always responsive). A malformed file
+shows its error inline and still downloads from the artifacts table.
+
+The **name is what decides**, case-insensitively: only those two suffixes
+are charted, because the alternative — fetching every JSON artifact and
+checking its shape — would download a run's whole results files and pull
+in the 3.5 MB renderer just to find out they are not figures. A figure
+stored under another name (`results/nvt-compare.plotly.json` is fine;
+`results/figure.json` is not) simply appears in the artifacts table like
+any other file.
 
 [Plotly]: https://plotly.com/javascript/
 [Plotly trace type]: https://plotly.com/javascript/chart-studio/

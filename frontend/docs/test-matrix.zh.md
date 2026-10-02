@@ -445,11 +445,11 @@ build:
 告。与测试阶段相同,路径相对于 build 的 workdir,每个文件取回时以
 8 MiB 为上限。
 
-### 绘图工件(`*.plot.json`)
+### 绘图工件(`*.plot.json` / `*.plotly.json`)
 
 回归用例的 artifacts 里可以包含**绘图图表**:文件名以 `.plot.json`
-结尾、内容是一个 [Plotly] 图表文档 —— `data` 轨迹数组加可选的
-`layout` 对象:
+或 `.plotly.json` 结尾、内容是一个 [Plotly] 图表文档 —— `data` 轨迹
+数组加可选的 `layout` 对象:
 
 ```yaml
 presets:
@@ -468,12 +468,18 @@ presets:
 }
 ```
 
-打开用例的运行详情页时,每个 `*.plot.json` 工件都会被取回并渲染为
-可交互的图表(缩放、悬浮、图例开关 —— 标准的 Plotly 工具栏)。文档
-几乎原样透传:[Plotly 支持的每种轨迹类型](https://plotly.com/javascript/)
-(scatter、bar、heatmap、3D surface 等)都可用;文件里的 `layout`
-优先于默认值 —— 包括 `layout.height`(上限 1200 像素;宽度始终自适
-应)。格式坏的文件在页面内显示错误信息,仍可从工件表下载。
+打开运行详情页时,每个绘图工件都会被取回并渲染为可交互的图表(缩放、
+悬浮、图例开关 —— 标准的 Plotly 工具栏)。文档几乎原样透传:[Plotly
+支持的每种轨迹类型](https://plotly.com/javascript/)(scatter、bar、
+heatmap、3D surface 等)都可用;文件里的 `layout` 优先于默认值 ——
+包括 `layout.height`(上限 1200 像素;宽度始终自适应)。格式坏的文件
+在页面内显示错误信息,仍可从工件表下载。
+
+**判定只看文件名**(不分大小写):只认这两个后缀,因为另一种做法 ——
+取回每个 JSON 工件再看它的形状 —— 会把整个运行的结果文件都下载一遍,
+并为了确认“这不是图”而拖进 3.5 MB 的渲染器。用别的名字存的图
+(`results/nvt-compare.plotly.json` 可以;`results/figure.json` 不行)
+就只是工件表里的一个普通文件。
 
 绘图文件在其他方面就是普通工件:原样存储、8 MiB 上限、随 zip 一起
 下载,且与用例的判定无关(退出码说了算,一如既往)。unit 和 build

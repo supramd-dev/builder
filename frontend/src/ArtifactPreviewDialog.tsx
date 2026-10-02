@@ -13,7 +13,8 @@ interface Props {
 // ArtifactPreviewDialog shows one stored artifact in a read-only Monaco
 // editor: a "view" click in the artifacts table fetches the content and
 // renders it with the language picked from the file name (gtest XML,
-// JSON — including *.plot.json figures — yaml, logs, plain text), so
+// JSON — including plot figures (*.plot.json, *.plotly.json) — yaml,
+// logs, plain text), so
 // result files and figure sources can be inspected without downloading.
 export default function ArtifactPreviewDialog({ artifactId, onClose, onError }: Props) {
   const [artifact, setArtifact] = useState<TestArtifactContent | null>(null)

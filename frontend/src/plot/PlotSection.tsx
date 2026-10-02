@@ -1,12 +1,12 @@
-// Plotly plotting for regression case artifacts.
+// Plotly plotting for run artifacts.
 //
-// A case's artifact list may carry one or more `*.plot.json` files —
-// verbatim Plotly figure documents: a `data` array of traces plus an
-// optional `layout` object (exactly what `<Plot/>` expects, minus the
-// DOM-props). This component fetches each matching artifact, validates the
-// JSON shape, and renders one chart per file with Plotly's responsive
-// sizing. Malformed files render their parse error inline instead of
-// breaking the page.
+// A run's artifact list may carry one or more `*.plot.json` /
+// `*.plotly.json` files — verbatim Plotly figure documents: a `data` array
+// of traces plus an optional `layout` object (exactly what `<Plot/>`
+// expects, minus the DOM-props). This component fetches each matching
+// artifact, validates the JSON shape, and renders one chart per file with
+// Plotly's responsive sizing. Malformed files render their parse error
+// inline instead of breaking the page.
 
 import { lazy, Suspense, useEffect, useState } from 'react'
 import type * as Plotly from 'plotly.js'
@@ -14,7 +14,7 @@ import { getTestArtifact, type TestArtifactRef } from '../api'
 
 // plotly.js is ~3.5 MB minified, so the <Plot/> component (and everything
 // it drags in) is loaded lazily: the split chunk only downloads when a run
-// actually has *.plot.json artifacts to chart.
+// actually has plot artifacts to chart.
 const Plot = lazy(async () => {
   const mod = await import('react-plotly.js')
   return { default: mod.default }
@@ -28,9 +28,13 @@ export interface PlotFigure {
 }
 
 // isPlotArtifact reports whether an artifact reference looks like a plot
-// document by its stored name (`xxxx.plot.json`).
+// document by its stored name: `xxxx.plot.json` or `xxxx.plotly.json`, the
+// two spellings the docs name. The name is the whole test on purpose —
+// deciding by content would mean fetching every JSON artifact of the run
+// (a results file can be megabytes) just to find out it is not a figure,
+// and the 3.5 MB renderer would be pulled in for any artifact at all.
 export function isPlotArtifact(a: TestArtifactRef): boolean {
-  return /\.plot\.json$/i.test(a.name)
+  return /\.plot(ly)?\.json$/i.test(a.name)
 }
 
 // parsePlotFigure validates a fetched artifact's content as a Plotly
@@ -53,8 +57,8 @@ export function parsePlotFigure(content: string, name: string): PlotFigure {
   return { data: fig.data as Plotly.Data[], layout: (fig.layout ?? {}) as Partial<Plotly.Layout> }
 }
 
-// PlotSection renders every `*.plot.json` artifact of a run: one fetch per
-// file, one <Plot/> per file. Runs without plot artifacts render nothing.
+// PlotSection renders every plot artifact of a run: one fetch per file,
+// one <Plot/> per file. Runs without plot artifacts render nothing.
 export default function PlotSection({
   artifacts,
   onError,
@@ -71,7 +75,7 @@ export default function PlotSection({
         Plots{' '}
         <span className="text-muted" style={{ fontWeight: 400 }}>
           ({plots.length} figure{plots.length === 1 ? '' : 's'} from{' '}
-          <code>*.plot.json</code> artifacts)
+          <code>*.plot.json</code> / <code>*.plotly.json</code> artifacts)
         </span>
       </h3>
       {plots.map((ref) => (

@@ -225,8 +225,9 @@ export default function TestRunDetailPage({ onError }: Props) {
         <ArtifactsSection run={run} onError={onError} />
       )}
 
-      {/* Plot artifacts (*.plot.json): one interactive Plotly chart per
-          file, fetched and rendered client-side like the results files. */}
+      {/* Plot artifacts (*.plot.json / *.plotly.json): one interactive
+          Plotly chart per file, fetched and rendered client-side like the
+          results files. */}
       {!inFlight && <PlotSection artifacts={run.artifacts} onError={onError} />}
 
       {/* Results files are parsed in the browser (nothing is stored while the

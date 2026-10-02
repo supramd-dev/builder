@@ -1671,9 +1671,9 @@ code {
   color: var(--fg, inherit);
 }
 
-/* Run detail: one rendered *.plot.json figure. The chart is responsive
-   (useResizeHandler + width 100%); the wrapper just keeps the file label
-   and successive figures from crowding. */
+/* Run detail: one rendered plot figure (*.plot.json / *.plotly.json). The
+   chart is responsive (useResizeHandler + width 100%); the wrapper just
+   keeps the file label and successive figures from crowding. */
 .plot-figure {
   margin-bottom: 1rem;
 }
