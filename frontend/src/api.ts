@@ -411,8 +411,10 @@ export interface RunCell {
   runId: number
   taskId?: number
   // "skipped" is a status of its own: the stage never ran because an
-  // upstream task failed, and its summary carries the reason.
-  status: 'passed' | 'failed' | 'running' | 'pending' | 'skipped'
+  // upstream task failed, and its summary carries the reason. "timeout" is
+  // one too: the stage ran and its command outlived the timeout
+  // md-builder.yaml gave it, so the cause, not just the outcome, is on show.
+  status: 'passed' | 'failed' | 'timeout' | 'running' | 'pending' | 'skipped'
   total: number
   passed: number
   failed: number
@@ -571,8 +573,9 @@ export interface Run {
   attempt: number
   kind: TaskKind
   // "pending"/"running" are live states: the attempt is open until the stage
-  // reports its outcome.
-  status: 'passed' | 'failed' | 'skipped' | 'pending' | 'running'
+  // reports its outcome. "timeout" is the outcome of a stage whose command
+  // outlived its timeout.
+  status: 'passed' | 'failed' | 'timeout' | 'skipped' | 'pending' | 'running'
   // The task's summary line: the failure text, the skip reason, or what the
   // stage printed for MD-BUILDER-SUMMARY.
   summary: string
@@ -645,7 +648,9 @@ export function runArtifactsZipUrl(runId: number): string {
 
 // TaskStatus is one vocabulary for tasks and runs: a task's status is its
 // latest attempt's (a virtual node's is rolled up from its children).
-export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped'
+// "timeout" is a failure whose cause is the stage's own timeout — the runner
+// records it, and a container whose failures are all timeouts takes it too.
+export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'timeout' | 'skipped'
 
 // isTerminalStatus reports whether a status is final, i.e. can no longer
 // change: everything else (the two in-flight ones, and anything this build
@@ -657,7 +662,7 @@ export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped'
 // statuses would stop dead — with no request left to notice the change — on
 // a status it does not recognise.
 export function isTerminalStatus(status: string): boolean {
-  return status === 'passed' || status === 'failed' || status === 'skipped'
+  return status === 'passed' || status === 'failed' || status === 'timeout' || status === 'skipped'
 }
 
 // TaskKind is a node's role in the graph: the virtual root per (commit,

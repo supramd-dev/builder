@@ -22,10 +22,13 @@ timestamps are those of the node's latest attempt, and clicking it opens
 that attempt's run detail: the per-case results (name, status, error
 value, short note), the one-paragraph summary the runner wrote, the log
 and the artifacts. The vocabulary is the task vocabulary throughout —
-`pending`, `running`, `passed`, `failed`, `skipped` — so a stage whose
+`pending`, `running`, `passed`, `failed`, `timeout`, `skipped` — so a
+stage whose
 upstream failed (or was itself reported `skipped`) reads `skipped` (the
 reason is in its summary, and its log holds the single line
-`skipped: <reason>`), and a stage the workers
+`skipped: <reason>`), a stage that outlived the timeout the yaml gave it
+reads `timeout` (its summary and log name the bound; the stages behind it
+are skipped as if it had failed), and a stage the workers
 have not claimed yet reads `pending` (shown as queued). A cell is
 **null** when the commit has no graph on that environment, or when the
 graph does not define that stage at all; the UI renders both as "—",
@@ -115,7 +118,10 @@ attempt the report closes**:
   counts (`failed` when anything failed; `skipped` when the total is
   non-zero and every one of them was skipped; `passed` otherwise) and an
   empty `startedAt` is derived from `finishedAt` and `durationMillis`.
-  A `status` outside `passed` / `failed` / `skipped` is a `400`.
+  A `status` outside `passed` / `failed` / `timeout` / `skipped` is a
+  `400`. A reporter that can tell a timeout from a failure says so
+  itself — the derived status never guesses `timeout`, because a clock
+  running out and a command exiting non-zero look the same in the counts.
 - The report must come from somebody entitled to that test: the **owner
   of the environment the task runs on, or an administrator**. Any other
   account gets `403`, because otherwise any signed-in user could

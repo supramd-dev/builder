@@ -119,22 +119,27 @@ export default function TestRunDetailPage({ onError }: Props) {
   }
 
   const failed = run.status === 'failed'
+  const timedOut = run.status === 'timeout'
   const skipped = run.status === 'skipped'
   const inFlight = run.status === 'pending' || run.status === 'running'
   const statusCls = failed
     ? 'text-danger'
-    : skipped
-      ? 'text-warn'
-      : inFlight
-        ? 'text-run'
-        : 'text-success'
+    : timedOut
+      ? 'text-timeout'
+      : skipped
+        ? 'text-warn'
+        : inFlight
+          ? 'text-run'
+          : 'text-success'
   const statusText = failed
     ? '✗ failed'
-    : skipped
-      ? '⤼ skipped'
-      : inFlight
-        ? '⏳ ' + run.status
-        : '✓ passed'
+    : timedOut
+      ? '⏱ timed out'
+      : skipped
+        ? '⤼ skipped'
+        : inFlight
+          ? '⏳ ' + run.status
+          : '✓ passed'
 
   return (
     <div>

@@ -32,6 +32,9 @@
   --success: #28a745;
   --danger: #dc3545;
   --warn: #b7791f;
+  /* A stage killed by its timeout: its own color, between the failure red and
+     the skipped amber — the stage ran, the clock stopped it. */
+  --timeout: #c2410c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -52,6 +55,7 @@
     --success: #2bb34b;
     --danger: #ff3e3e;
     --warn: #e2a33d;
+    --timeout: #ff8a4c;
   }
 }
 
@@ -229,6 +233,10 @@ a.nav-link, a.brand, a.btn {
 
 .text-warn {
   color: var(--warn) !important;
+}
+
+.text-timeout {
+  color: var(--timeout) !important;
 }
 
 .text-run {
@@ -970,6 +978,10 @@ a.dash-st:hover {
 
 .dash-st-fail {
   color: var(--danger);
+}
+
+.dash-st-timeout {
+  color: var(--timeout);
 }
 
 .dash-st-skip {

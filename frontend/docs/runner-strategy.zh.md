@@ -97,12 +97,13 @@ root (test <sha> on <environment>)   # 虚拟:代表整条管线
   整条管线的。
 - 每个节点保存其配置的**快照**,因此后续修改 YAML 或手动重新派发都不
   影响已在运行的图。
-- 子任务未能通过时 —— 它失败了,或它自己就被上报为 `skipped` —— 所有
-  (传递地)依赖它的任务被标记为 **skipped**,原因写在摘要里,日志中
-  也有一行对应内容(`skipped: upstream task build failed`)。依赖必须
+- 子任务未能通过时 —— 它失败了、超时了,或它自己就被上报为 `skipped`
+  —— 所有 (传递地)依赖它的任务被标记为 **skipped**,原因写在摘要里,
+  日志中也有一行对应内容(`skipped: upstream task build failed`,或
+  `upstream task build timed out`)。依赖必须
   通过,其后的节点才算就绪,因此一个永远不会通过的节点不会留下任何
   可等待的东西:跳过与结果记录在同一个事务中完成,不会留下无法排空的
-  队列。`skipped` 与 `passed`、`failed` 属于同一词表中的真实状态,而
+  队列。`skipped` 与 `passed`、`failed`、`timeout` 属于同一词表中的真实状态,而
   不是显示层的约定:该节点从未执行过,仪表板如实呈现。完全不属于图的
   阶段(手动派发中留空的阶段命令,或后续派发移除的用例)不算"跳过"
   —— 它根本不存在,单元格显示"—"。
@@ -202,16 +203,21 @@ HTTP 到达的报告则由 `POST /api/test-runs` 调用它。只有这一条写�
 - SSH 连接失败、构建失败或阶段命令以非零退出时,子任务进入
   **failed**(错误记录在任务及其详情页上)—— *测试本身* 的通过/失败
   体现在仪表板上,而不是任务状态里。
+- 阶段命令超出其超时则进入 **timeout**:同样的阻断效果,但是独立的
+  状态 —— 错误列里写着超时与命令,日志中有一行 `task timed out: …`,
+  摘要尾部是日志的最后几行。如果某个容器下的失败全部是超时,它自己也
+  取 `timeout`,因此被时钟叫停的管线读起来就是超时。
 - **单元测试运行**在命令非零退出 **或** 工件文件解析出失败用例时为
   failed(ctest 一类的包装可能吞掉测试程序的退出码)。它们只带聚合
   计数(总数 / 通过 / 失败 / 跳过,`total` 把每个用例都算一次,包含
   skipped),跨所有配置的工件文件求和;逐测试明细由浏览器从存储的工件
   文件解析。
 - **回归用例**仅凭其命令的退出状态判定(退出码 0 → 通过;其他任何
-  情况 —— 超时、SSH 失败、非零退出 —— → 失败);其 `artifacts` 文件
-  挂在该用例自己的运行上、只作展示存储,不会翻转判定。其上的容器负责
-  汇总:任一用例失败则该阶段失败,摘要读作
-  "3/4 cases passed; failed: heat"。
+  情况 —— SSH 失败、非零退出 —— → 失败,超时则为 `timeout`);其
+  `artifacts` 文件挂在该用例自己的运行上、只作展示存储,不会翻转判定。
+  其上的容器负责汇总:任一用例失败则该阶段失败,摘要读作
+  "3/4 cases passed; failed: heat";若它下面的失败全是超时,则读作
+  "1/4 cases passed; timed out: poisson"。
 - 容器的摘要描述的始终是自己的汇总,而不是某次上报:
   "3/4 cases passed; 1 in progress"、"2/4 cases passed; 2 queued"、
   "4/4 cases skipped (upstream failure)"、"4/4 cases passed"。
@@ -234,7 +240,7 @@ HTTP 到达的报告则由 `POST /api/test-runs` 调用它。只有这一条写�
 
 ```
 派发              认领                     结果
-pending(运行)  →  running            →     passed/failed/skipped
+pending(运行)  →  running            →     passed/failed/timeout/skipped
                   (ClaimReadyTask)          (FinishAttempt)
 ```
 
@@ -247,9 +253,9 @@ pending(运行)  →  running            →     passed/failed/skipped
 - 阶段结束时,`FinishAttempt` 用结果关闭这条运行:状态变为终态,日志
   停止增长,runner 取回的工件挂到这条运行上 —— 即产出它们的那次尝试,
   而不是整个任务。
-- 上游阶段失败或被上报为 `skipped` 时,下游仍在 pending 的尝试以
-  **skipped** 关闭并写入原因(一句摘要、一行日志),容器随之汇总为
-  `skipped` 或 `failed`。
+- 上游阶段失败、超时或被上报为 `skipped` 时,下游仍在 pending 的尝试
+  以 **skipped** 关闭并写入原因(一句摘要、一行日志),容器随之汇总为
+  `skipped`、`failed` 或 `timeout`。
 - 对已经结束的尝试再次报告**不会**覆盖它:存储层会开启**下一次尝试**
   —— 一条新运行,任务计数器递增 —— 两条记录都保持可读。这就是重试
   路径,也是为什么运行的 `attempt` 序号属于它的身份:`(任务, 尝试)`

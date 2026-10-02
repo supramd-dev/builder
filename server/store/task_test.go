@@ -142,6 +142,10 @@ func reportTask(t *testing.T, s *Store, taskID int64, status, summary string) *T
 		res.Passed = 1
 	case StatusFailed:
 		res.Failed = 1
+	case StatusTimeout:
+		// A timeout tallies as a failure: it is not a pass either, and the
+		// counts have to add up. Its status is what names the cause.
+		res.Failed = 1
 	case StatusSkipped:
 		res.Skipped = 1
 	}
@@ -505,6 +509,41 @@ func TestSkippedReportSkipsDependents(t *testing.T) {
 	// Nothing is green: the root reports the skip, not a pass.
 	if got := reloadTask(t, s, root.ID); got.Status != StatusSkipped {
 		t.Errorf("the root of a skipped graph should read skipped, got %s", got.Status)
+	}
+}
+
+// A node that ran out of time stops its dependents like a failure does, and
+// says so: the stages behind it were stopped by the clock, not by a broken
+// assertion, and a reader of the skip reason has to be able to tell which.
+func TestTimeoutReportGatesAndNamesTheDependents(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, subs := seedTaskGraph(t, s, "timeoutgate")
+	build, unit, stage := subs[1], subs[2], subs[3]
+
+	reportTask(t, s, subs[0].ID, StatusPassed, "cloned")
+	// The report the runner writes for a timed-out stage: both columns carry
+	// the sentence, so the reason travels into the dependents' summaries.
+	const reason = "timed out after 30m0s: make -j"
+	if _, err := s.FinishAttempt(build.ID, AttemptResult{
+		Status: StatusTimeout, Summary: reason, Error: reason, Total: 1, Failed: 1,
+	}); err != nil {
+		t.Fatalf("report the timeout: %v", err)
+	}
+	requireNoReadyTask(t, s)
+
+	for _, task := range append([]*Task{unit}, caseNodes(t, s, stage)...) {
+		got := reloadTask(t, s, task.ID)
+		if got.Status != StatusSkipped {
+			t.Errorf("%s: want skipped, got %s", got.NodeKey, got.Status)
+		}
+		if !strings.Contains(got.Summary, build.Name+" timed out: "+reason) {
+			t.Errorf("%s summary should name the timeout and its reason: %q", got.NodeKey, got.Summary)
+		}
+	}
+	// The graph as a whole reports a timeout, not a failure.
+	gotRoot := reloadTask(t, s, root.ID)
+	if gotRoot.Status != StatusTimeout || !strings.Contains(gotRoot.Summary, "timed out") {
+		t.Errorf("the graph of a timed-out stage should read timeout: %+v", gotRoot)
 	}
 }
 
@@ -908,6 +947,47 @@ func TestRollupTaskTree(t *testing.T) {
 		// to show what broke.
 		if !strings.Contains(got.Summary, "unit tests") {
 			t.Errorf("summary should name the failed node: %q", got.Summary)
+		}
+	})
+
+	t.Run("a timed-out child times out the container", func(t *testing.T) {
+		s := newTestTaskStore(t)
+		root, subs := seedTaskGraph(t, s, "rolluptimeout")
+
+		reportTask(t, s, subs[0].ID, StatusPassed, "2 repositories fetched")
+		reportTask(t, s, subs[2].ID, StatusTimeout, "timed out after 30m0s: ctest -L unit")
+
+		// The container takes the timeout status rather than "failed": the
+		// cause is the point, and it is the only failure under it.
+		got := reloadTask(t, s, root.ID)
+		if got.Status != StatusTimeout {
+			t.Errorf("a container whose only failure is a timeout reads timeout, got %s", got.Status)
+		}
+		// Counted as a failure all the same: it is not a pass.
+		if got.Total != 5 || got.Passed != 1 || got.Failed != 1 || got.Skipped != 0 {
+			t.Errorf("counts: %+v", got)
+		}
+		if got.Summary != "1/5 stages passed; timed out: unit tests" {
+			t.Errorf("summary should name the timed-out node: %q", got.Summary)
+		}
+	})
+
+	t.Run("a failure beside a timeout keeps the container failed", func(t *testing.T) {
+		s := newTestTaskStore(t)
+		root, subs := seedTaskGraph(t, s, "rollupmixed")
+
+		// The unit stage first: a failure here would have skipped it.
+		reportTask(t, s, subs[2].ID, StatusTimeout, "timed out after 30m0s: ctest -L unit")
+		reportTask(t, s, subs[1].ID, StatusFailed, "make: no rule to make target")
+
+		got := reloadTask(t, s, root.ID)
+		if got.Status != StatusFailed {
+			t.Errorf("a real failure outranks a timeout, got %s", got.Status)
+		}
+		// Both causes are named: a timeout must not be swallowed by the word
+		// "failed" when it shares the container with one.
+		if got.Summary != "0/5 stages passed; failed: build; timed out: unit tests" {
+			t.Errorf("summary should name both causes: %q", got.Summary)
 		}
 	})
 
@@ -1456,9 +1536,12 @@ func TestTaskKindAndStatusPredicates(t *testing.T) {
 		t.Error("an unknown kind must not validate")
 	}
 
-	for _, status := range []string{StatusPassed, StatusFailed, StatusSkipped} {
+	for _, status := range []string{StatusPassed, StatusFailed, StatusTimeout, StatusSkipped} {
 		if !TaskStatusTerminal(status) {
 			t.Errorf("%q ends an attempt", status)
+		}
+		if !AttemptStatusValid(status) {
+			t.Errorf("%q can end an attempt", status)
 		}
 	}
 	if TaskStatusTerminal(StatusPending) || TaskStatusTerminal(StatusRunning) {
@@ -1468,6 +1551,18 @@ func TestTaskKindAndStatusPredicates(t *testing.T) {
 	for _, status := range []string{StatusPending, StatusRunning, "bogus"} {
 		if AttemptStatusValid(status) {
 			t.Errorf("%q cannot end an attempt", status)
+		}
+	}
+	// A failure, a timeout and a skip all stop the graph behind them: only a
+	// pass lets a dependent be claimed.
+	for _, status := range []string{StatusFailed, StatusTimeout, StatusSkipped} {
+		if !AttemptStatusGatesDependents(status) {
+			t.Errorf("%q must gate the dependents", status)
+		}
+	}
+	for _, status := range []string{StatusPassed, StatusPending, StatusRunning, "bogus"} {
+		if AttemptStatusGatesDependents(status) {
+			t.Errorf("%q does not gate anything", status)
 		}
 	}
 

@@ -53,7 +53,16 @@ func RunKindValid(kind string) bool {
 
 // AttemptStatusValid reports whether status may end an attempt.
 func AttemptStatusValid(status string) bool {
-	return status == StatusPassed || status == StatusFailed || status == StatusSkipped
+	return status == StatusPassed || status == StatusFailed ||
+		status == StatusTimeout || status == StatusSkipped
+}
+
+// AttemptStatusGatesDependents reports whether an attempt's outcome means the
+// stages behind it can never run: a failure or a timeout stopped them, and a
+// skip already came from such a gate further up. Only a passing attempt lets
+// the graph move on.
+func AttemptStatusGatesDependents(status string) bool {
+	return status == StatusFailed || status == StatusTimeout || status == StatusSkipped
 }
 
 // TestRun is one attempt of one real task: when it ran, how long it took and
@@ -355,14 +364,15 @@ func (s *Store) FinishAttempt(taskID int64, res AttemptResult) (*TestRun, error)
 		}).Error; err != nil {
 			return err
 		}
-		if res.Status != StatusFailed && res.Status != StatusSkipped {
+		if !AttemptStatusGatesDependents(res.Status) {
 			return rollupTx(tx, task.RootID)
 		}
 		// A node that did not pass gates everything behind it: its dependents
 		// can never be claimed (taskDepsPassed waits for passed), so they are
 		// skipped here — with their own attempts' runs — instead of staying
 		// pending for ever. The reason reads the way the runner used to write
-		// it, now for both outcomes.
+		// it, now for every outcome that stops the graph (a failure, a timeout,
+		// and a skip that came from one of them).
 		if err := skipDependentsTx(tx, task.RootID, task.ID, FailureReason(task, res)); err != nil {
 			return err
 		}

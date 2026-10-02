@@ -17,9 +17,12 @@
 结果表里的一行。它的状态、通过/失败计数和时间戳都取自该节点最新一次
 尝试;点击打开这次尝试的运行详情:逐用例结果(名称、状态、错误值、
 简短备注)、runner 写下的一段式摘要、日志与工件。状态词表整体沿用
-任务词表 —— `pending`、`running`、`passed`、`failed`、`skipped` ——
+任务词表 —— `pending`、`running`、`passed`、`failed`、`timeout`、
+`skipped` ——
 因此上游失败(或自身被上报为 `skipped`)的阶段读作 `skipped`(原因在
-摘要里,日志中还有一行 `skipped: <原因>`),尚未被 worker 领取的阶段
+摘要里,日志中还有一行 `skipped: <原因>`),超出 yaml 给它的超时而被
+杀掉的阶段读作 `timeout`(摘要和日志写明这个时限,它后面的阶段照常按
+“上游失败”被跳过),尚未被 worker 领取的阶段
 读作 `pending`(界面显示
 为排队中)。单元格为 **null** 时,表示该 commit 在此环境上没有任务图,
 或该图根本不包含这个阶段;界面对两者都显示"—",因为在矩阵看来,从未
@@ -97,7 +100,9 @@ ID,用于图链接;`triggers` 映射到该 root 的触发方式(0 = webhook,
 - 其余字段都可选。`status` 为空时从计数推导(有任何失败即 `failed`;
   总数非零且全部 skipped 即 `skipped`;否则 `passed`);`startedAt` 为空
   时由 `finishedAt` 和 `durationMillis` 推出。`status` 不在 `passed` /
-  `failed` / `skipped` 之内返回 `400`。
+  `failed` / `timeout` / `skipped` 之内返回 `400`。能分清超时与失败的
+  报告方自己写明 `timeout` —— 推导出的状态永远不会猜成 `timeout`,因为
+  在计数里“时钟走完”和“命令退非零”长得一模一样。
 - 报告必须来自**有权对该测试报告的人:任务所在环境的 owner,或管理员**。
   其他账号一律 `403` —— 否则任何已登录用户只要猜到任务 ID 就能覆盖任何
   测试的结果。任务不存在返回 `404`;**虚拟任务**返回 `400` —— root 和

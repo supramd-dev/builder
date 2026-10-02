@@ -18,7 +18,9 @@ version: 3
 # Optional defaults, merged into every matrix entry (maps merge key-wise,
 # scalars are overridden per entry).
 defaults:
-  timeout: 3600                 # per-command timeout seconds (hard cap 4h)
+  timeout: 3600                 # per-command timeout seconds (hard cap 4h);
+                                # a command that outlives it is reported
+                                # with the "timeout" status
   env:
     OMP_NUM_THREADS: "4"
   variables:                    # templates, expanded on the environment
@@ -116,9 +118,26 @@ build:
   workdir: "build"   # runs in <code>/build
 ```
 
-Every timeout bounds the stage via the remote `timeout` command; the
-whole SSH session gets the sum of the stage timeouts plus 15 minutes of
-slack.
+Every stage command runs under the remote `timeout` command, bounded by
+the stage's timeout (default 3600s, capped at 4h); the stage's own SSH
+session gets that timeout plus 5 minutes of slack.
+
+A stage whose command outlives its timeout is a **`timeout`**, not a plain
+`failed` — the outcome is the same, but the cause is what the pages show:
+
+- the dashboard cell and the run page read "⏱ timeout" in their own color;
+- the run's error and summary name the timeout and the command
+  (`timed out after 30m0s: make -j8`, plus the log tail);
+- the log gets a `task timed out: timed out after 30m0s: make -j8` line at
+  the point the command was killed (its own output stays above it);
+- the stages behind it are **skipped** with "upstream task build timed out"
+  as the reason, exactly as a failure would leave them.
+
+The remote `timeout` wrapper reports exit 124 when it fires, which is how
+the runner tells a timeout from a command that exited 124 on its own
+(nothing does, in practice). A command that ignores SIGTERM and outlives
+the session's slack as well is cut by the session instead — same status,
+same wording.
 
 ## Regression presets
 
@@ -166,9 +185,11 @@ A matrix entry selects presets with `regression.use` and
 
 A case's verdict is its **command's exit status** — nothing else:
 
-- **exit 0 → passed**; any non-zero exit → failed. That includes the
-  timeout (the runner wraps the command in the remote `timeout`, which
-  exits 124) and a failed `cd` into the workdir.
+- **exit 0 → passed**; any non-zero exit → failed. A timeout is the one
+  non-zero exit with a status of its own — **`timeout`**, recorded by the
+  runner rather than derived from the exit code (see the timeout paragraph
+  under [Field reference](#/docs/test-matrix)) — while a failed `cd` into
+  the workdir is a plain failure.
 - An SSH-level failure (host unreachable, session dropped) fails the
   case the same way, with the transport error as the case's note.
 - The preset's `artifacts` files **never flip the verdict** — they are
@@ -186,11 +207,14 @@ The matrix cell is the **container's** state, which is the rollup of the
 cases under it: any failed case fails the stage and the cell says which
 ones ("3/4 cases passed; failed: heat"), all of them passed and the stage
 passes, and while they are still being claimed it reads "2/4 cases passed;
-2 queued". Cases run independently — one failing case does not stop the
-others. When the clone or build ends without passing — it failed, or it
-was itself reported `skipped` — every case is marked **skipped** with the
-upstream error as its summary (and one log line of its own); if every case
-was skipped, the stage itself reads `skipped`, not `passed`.
+2 queued". A container whose failures are all timeouts reads `timeout`
+instead, and names them ("1/4 cases passed; timed out: poisson"); a mix of
+both reads `failed` and names both causes. Cases run independently — one
+failing case does not stop the others. When the clone or build ends
+without passing — it failed, it timed out, or it was itself reported
+`skipped` — every case is marked **skipped** with the upstream error as
+its summary (and one log line of its own); if every case was skipped, the
+stage itself reads `skipped`, not `passed`.
 
 ## Command lists
 
@@ -570,10 +594,10 @@ Each matched entry becomes a task graph (see
    MD_ENV_TAGS, MD_TASK_DIR, MD_CODE_DIR plus the yaml env variables,
    sources the env setup script (if any), exports the expanded yaml
    variables and runs the build stage in its working directory.
-3. If the build (or the clone) ends without passing — it failed, or it
-   was itself reported `skipped` — the dependent test stages are marked
-   **skipped**, with the reason in their summary and one line in their
-   log, and the dashboard says so.
+3. If the build (or the clone) ends without passing — it failed, it timed
+   out, or it was itself reported `skipped` — the dependent test stages are
+   marked **skipped**, with the reason in their summary and one line in
+   their log, and the dashboard says so.
 4. **unit**: the stage command runs in its working directory under its
    timeout; the full output streams into the task log and the outcome
    is stored as the attempt's test run.
@@ -593,4 +617,6 @@ MD-BUILDER-SUMMARY: all 8 tests passed, max rel err 3.2e-7
 The text after the prefix becomes the run summary shown on the dashboard.
 Without it, the summary is the exit code plus the last lines of the stage
 log (truncated to 500 characters). For a regression case the summary
-line becomes that case's run summary.
+line becomes that case's run summary. A timed-out stage keeps the
+timeout's wording instead: what a killed command printed on its way out is
+the tail of the summary, not the summary itself.

@@ -291,7 +291,7 @@ function TaskHeader({ task }: { task: TaskDetail }) {
           node under a directory of its own — a stage's own attempt is zipped
           from its run page instead. Only a graph that ran stores anything, so
           the link appears once it has an outcome. */}
-      {(task.status === 'passed' || task.status === 'failed') && (
+      {(task.status === 'passed' || task.status === 'failed' || task.status === 'timeout') && (
         <p style={{ marginBottom: '0.5rem' }}>
           <a href={taskArtifactsZipUrl(task.id)}>Download the graph's artifacts (zip)</a>
         </p>
@@ -584,6 +584,8 @@ function nodeGlyph(status: string): string {
       return '✓'
     case 'failed':
       return '✗'
+    case 'timeout':
+      return '⏱'
     case 'skipped':
       return '⤼'
     default:
@@ -597,6 +599,8 @@ function statusTextClass(status: string): string {
       return 'text-success'
     case 'failed':
       return 'text-danger'
+    case 'timeout':
+      return 'text-timeout'
     case 'skipped':
       return 'text-warn'
     case 'running':
