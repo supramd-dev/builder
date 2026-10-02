@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -250,17 +249,23 @@ func (s *Server) taskRuns(w http.ResponseWriter, id int64) {
 }
 
 // taskLogs handles GET /api/tasks/{id}/log?after=<seq>&attempt=<n>: log chunks
-// after the given sequence, for incremental (live-following) reads. Without an
+// from a byte offset, for incremental (live-following) reads. Without an
 // attempt the current one is read — what a viewer following a task live wants.
+//
+// A first read passes tail instead of after: the last few bytes of the log
+// rather than all of it from the beginning, which is the only sane way to open
+// a log that may be hundreds of megabytes. Where the read ends comes back as
+// lastSeq either way, so the caller's next request continues from there, and a
+// caller that has caught up gets no bytes and the same lastSeq.
 func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, id int64) {
-	after := 0
-	if v := r.URL.Query().Get("after"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "after must be a non-negative integer"})
-			return
-		}
-		after = n
+	q := r.URL.Query()
+	after, ok := readLogOffset(w, q.Get("after"), "after")
+	if !ok {
+		return
+	}
+	tail, ok := readLogOffset(w, q.Get("tail"), "tail")
+	if !ok {
+		return
 	}
 	task, ok := s.loadTask(w, id, "task logs")
 	if !ok {
@@ -270,18 +275,34 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, id int64) {
 	if !ok {
 		return
 	}
-	logs, err := s.Store.ReadTaskLogs(id, attempt, after)
-	if err != nil {
-		log.Printf("task logs read: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-		return
-	}
-	chunks := make([]logChunkJSON, 0, len(logs))
+	chunks := []logChunkJSON{}
 	lastSeq := after
-	for _, l := range logs {
-		chunks = append(chunks, logChunkJSON{Seq: l.Seq, Content: l.Content})
-		if l.Seq > lastSeq {
-			lastSeq = l.Seq
+	if s.Runner != nil {
+		src := s.Runner.OpenLogSource(task, attempt)
+		var (
+			data  []byte
+			start int64
+			err   error
+		)
+		if tail > 0 {
+			// The newest bytes, at most one page of them: what a view opens
+			// with. It follows from where this ends.
+			if tail > src.PageBytes() {
+				tail = src.PageBytes()
+			}
+			data, start, err = src.Tail(r.Context(), tail)
+		} else {
+			start = after
+			data, err = src.ReadFrom(r.Context(), after, src.PageBytes())
+		}
+		if err != nil {
+			log.Printf("task %d log read at %d: %v", task.ID, start, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		if len(data) > 0 {
+			chunks = append(chunks, logChunkJSON{Seq: start + int64(len(data)), Content: string(data)})
+			lastSeq = start + int64(len(data))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -291,24 +312,35 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request, id int64) {
 	})
 }
 
-// logChunkJSON is one stored log chunk.
+// readLogOffset reads a byte offset off the query string; an unset value is 0.
+func readLogOffset(w http.ResponseWriter, value, name string) (int64, bool) {
+	if value == "" {
+		return 0, true
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": name + " must be a non-negative integer"})
+		return 0, false
+	}
+	return n, true
+}
+
+// logChunkJSON is one piece of a log as the viewer receives it: the text, and
+// the offset its end is at — the cursor the next read continues from.
 type logChunkJSON struct {
-	Seq     int    `json:"seq"`
+	Seq     int64  `json:"seq"`
 	Content string `json:"content"`
 }
 
 // taskLogDownload handles GET /api/tasks/{id}/log/download[?attempt=<n>]: the
 // attempt's whole log as one text file.
 //
-// A finished attempt has its complete log in object storage, and that object
-// is streamed here: it is the whole output, where the stored chunks keep only
-// the log's beginning and its end. An attempt that has no object yet but is
-// being run by this process is served from the writer's spool, which holds the
-// complete output up to now — waiting for the stage to end is not what someone
-// downloading a log to see what it is doing has in mind. Anything else — an
-// attempt that never ran, one another process runs, one written before the
-// full log existed, or a stage whose spool failed — falls back to the stored
-// chunks, read batch by batch (ReadTaskLogs caps how many it returns).
+// The log is streamed from where it lives: the parts stored for the run, plus —
+// when this process is the one running the stage — the writer's buffer, so a
+// download of a stage in progress gets its output as it stands rather than as
+// it stood one part ago. Nothing is truncated and nothing is buffered whole:
+// the length is known up front, so this is a plain file to the browser, and the
+// log is paged through one part at a time.
 func (s *Server) taskLogDownload(w http.ResponseWriter, r *http.Request, id int64) {
 	task, ok := s.loadTask(w, id, "task log download")
 	if !ok {
@@ -324,60 +356,35 @@ func (s *Server) taskLogDownload(w http.ResponseWriter, r *http.Request, id int6
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".log"))
-
-	// The complete log, when the attempt has one. A read failure falls
-	// through to the stored chunks: they are the same log, minus the cap.
-	if run, err := s.Store.FindTaskRun(task.ID, attempt); err == nil && run.LogObjectKey != "" {
-		rc, size, openErr := s.Store.OpenRunLog(r.Context(), run)
-		if openErr == nil {
-			defer rc.Close()
-			if size >= 0 {
-				w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-			}
-			if _, err := io.Copy(w, rc); err != nil {
-				log.Printf("task %d log download (full log %s): %v", task.ID, run.LogObjectKey, err)
-			}
-			return
-		}
-		log.Printf("task %d log download: read the full log %s: %v; serving the stored chunks",
-			task.ID, run.LogObjectKey, openErr)
+	if s.Runner == nil {
+		return
 	}
-
-	// A stage this process is still running: its complete log lives in the
-	// writer's spool until the stage ends and the object above appears. The
-	// snapshot has an exact length, so the download is a plain file to the
-	// browser.
-	if s.Runner != nil {
-		if rc, size, live := s.Runner.LiveLog(task.ID, attempt); live {
-			defer rc.Close()
-			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-			if _, err := io.Copy(w, rc); err != nil {
-				log.Printf("task %d log download (live log): %v", task.ID, err)
-			}
-			return
-		}
+	src := s.Runner.OpenLogSource(task, attempt)
+	size, err := src.End(r.Context())
+	if err != nil {
+		// The status line is already out: the download is cut short and the
+		// reason stays in the server log.
+		log.Printf("task %d log download: %v", task.ID, err)
+		return
 	}
-
-	// Walk the log by sequence: each batch continues after the last chunk
-	// written, so a long build's output never has to fit in memory.
-	after := 0
-	for {
-		logs, err := s.Store.ReadTaskLogs(task.ID, attempt, after)
+	// The file holds what the log holds now: a stage that is still writing
+	// appends past it, which is not this download's business.
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	for off := int64(0); off < size; {
+		data, err := src.ReadFrom(r.Context(), off, src.PageBytes())
 		if err != nil {
-			// The status line is already out: the download is cut short and
-			// the reason stays in the server log.
-			log.Printf("task %d log download: %v", task.ID, err)
+			log.Printf("task %d log download at %d: %v", task.ID, off, err)
 			return
 		}
-		if len(logs) == 0 {
+		if len(data) == 0 {
+			// A page that cannot advance: the log is shorter than its length
+			// said (a resumed stage rewriting a part). Stop rather than spin.
 			return
 		}
-		for _, l := range logs {
-			if _, err := io.WriteString(w, l.Content); err != nil {
-				return // the client is gone; nothing left to write to
-			}
-			after = l.Seq
+		if _, err := w.Write(data); err != nil {
+			return // the client is gone; nothing left to write to
 		}
+		off += int64(len(data))
 	}
 }
 

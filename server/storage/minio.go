@@ -76,13 +76,13 @@ func (m *MinIO) EnsureBucket(ctx context.Context) error {
 
 // Put stores data under key, overwriting any previous object.
 func (m *MinIO) Put(ctx context.Context, key string, data []byte) (ObjectMeta, error) {
-	return m.PutStream(ctx, key, bytes.NewReader(data), int64(len(data)))
+	return m.putStream(ctx, key, bytes.NewReader(data), int64(len(data)))
 }
 
-// PutStream stores the object read from r, whose length must be size. The SDK
-// streams the body with a known length, so a stage's full log never has to fit
-// in memory (an unknown length would make it buffer the stream to find out).
-func (m *MinIO) PutStream(ctx context.Context, key string, r io.Reader, size int64) (ObjectMeta, error) {
+// putStream stores the object read from r, whose length must be size. The SDK
+// streams the body with a known length, so the caller never has to hold the
+// whole object in one buffer.
+func (m *MinIO) putStream(ctx context.Context, key string, r io.Reader, size int64) (ObjectMeta, error) {
 	if size < 0 {
 		return ObjectMeta{}, fmt.Errorf("object storage %s: put %s: length is required", m.cfg.Describe(), key)
 	}

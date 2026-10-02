@@ -770,7 +770,8 @@ export async function getTaskRuns(id: number): Promise<Run[]> {
   return res.runs ?? []
 }
 
-// LogChunk is one stored chunk of a task's incremental log.
+// LogChunk is one piece of a task's log as it is read: the text, and the byte
+// offset its end is at (the cursor the next read continues from).
 export interface LogChunk {
   seq: number
   content: string
@@ -781,28 +782,38 @@ export interface TaskLogs {
   // unless the caller asked for another (a retry's log stays readable).
   attempt: number
   chunks: LogChunk[]
+  // lastSeq is where this read ended: pass it as the next read's after. It is
+  // where the read started when there was nothing new.
   lastSeq: number
 }
 
-// getTaskLogs returns log chunks after the given sequence (0 = from the
-// beginning) — poll with the lastSeq to follow a running task. attempt
-// selects one of the task's attempts; omit it for the current one.
+// getTaskLogs reads a task's log from the given byte offset (0 = from the
+// beginning) — poll with the lastSeq to follow a running task. attempt selects
+// one of the task's attempts; omit it for the current one.
+//
+// tail asks for the log's last N bytes instead, for a view that is opening a
+// log whose length is unknown: a first read has no cursor yet, and a log that
+// grew for an hour must not be fetched whole to show its end. The server caps
+// it at one page.
 export async function getTaskLogs(
   id: number,
   after = 0,
   attempt?: number,
+  tail?: number,
 ): Promise<TaskLogs> {
-  const q = new URLSearchParams({ after: String(after) })
+  const q = new URLSearchParams()
+  if (tail !== undefined) q.set('tail', String(tail))
+  else q.set('after', String(after))
   if (attempt !== undefined) q.set('attempt', String(attempt))
   return api<TaskLogs>(`/api/tasks/${id}/log?${q}`)
 }
 
-// taskLogDownloadUrl is one attempt's whole log as a downloadable text file.
-// The server serves it from the run's full log in object storage — the whole
-// output, where the live view's stored chunks stop at their cap — and the
-// browser fetches it itself (a plain link — the session cookie authenticates
-// it). The filename gains an -attempt-N suffix when the caller asks for an
-// attempt other than the current one.
+// taskLogDownloadUrl is one attempt's whole log as a downloadable text file:
+// every part the server holds for the run, including what a stage which is
+// still running has written so far. The browser fetches it itself (a plain
+// link — the session cookie authenticates it). The filename gains an
+// -attempt-N suffix when the caller asks for an attempt other than the current
+// one.
 export function taskLogDownloadUrl(id: number, attempt?: number): string {
   const q = attempt === undefined ? '' : `?attempt=${attempt}`
   return `/api/tasks/${id}/log/download${q}`

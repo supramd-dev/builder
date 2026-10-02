@@ -67,11 +67,13 @@ const (
 	EnvDisableWorker = "MD_BUILDER_DISABLE_WORKER"
 	// EnvPublicURL overrides server.publicURL.
 	EnvPublicURL = "MD_BUILDER_PUBLIC_URL"
-	// EnvLogMaxStored overrides logs.maxStoredBytes.
+	// EnvLogPartBytes overrides logs.partBytes.
+	EnvLogPartBytes = "MD_BUILDER_LOG_PART_BYTES"
+	// EnvLogMaxStored overrides logs.maxStoredBytes (no longer used).
 	EnvLogMaxStored = "MD_BUILDER_LOG_MAX_STORED"
-	// EnvLogMaxFile overrides logs.maxFileBytes.
+	// EnvLogMaxFile overrides logs.maxFileBytes (no longer used).
 	EnvLogMaxFile = "MD_BUILDER_LOG_MAX_FILE"
-	// EnvLogSpoolDir overrides logs.spoolDir.
+	// EnvLogSpoolDir overrides logs.spoolDir (no longer used).
 	EnvLogSpoolDir = "MD_BUILDER_LOG_SPOOL_DIR"
 )
 
@@ -122,22 +124,41 @@ type Worker struct {
 	Count int `yaml:"count"`
 }
 
-// Logs is the `logs` section: how much task output is kept. A stage's output
-// is kept twice — as chunks in the database, which the live viewer polls, and
-// as one complete log per run in object storage, which the download serves.
+// Logs is the `logs` section: how a task's output is kept. A running stage
+// holds its newest output in memory; every time that reaches PartBytes it is
+// stored as one part object under the run's log prefix, and the whole log is
+// those parts in order. Nothing about a log is stored in the database.
 type Logs struct {
-	// MaxStoredBytes caps the task output kept in the database (0 = 8 MiB).
-	// Past it the stored log ends in a truncation marker; the complete log
-	// is unaffected.
-	MaxStoredBytes int64 `yaml:"maxStoredBytes"`
-	// MaxFileBytes caps the complete log kept in object storage, per run
-	// (0 = 64 MiB). A log that runs past it keeps its beginning and its
-	// end, with a marker naming what was dropped.
-	MaxFileBytes int64 `yaml:"maxFileBytes"`
-	// SpoolDir is where a stage's log is written while it runs, before it is
-	// uploaded ("" = the OS temp directory). A deployment should point this
-	// at a disk with room for one MaxFileBytes file per running stage.
-	SpoolDir string `yaml:"spoolDir"`
+	// PartBytes is how much output a running stage holds in memory before it
+	// is stored as one part (0 = 8 MiB): the memory a stage costs, the size
+	// of one object, and how far a viewer in another process can lag. A
+	// smaller part is a fresher remote view at the price of more objects.
+	PartBytes int64 `yaml:"partBytes"`
+
+	// MaxStoredBytes, MaxFileBytes and SpoolDir configured the two copies a
+	// stage's log used to be kept in (capped chunks in the database, and one
+	// spooled file uploaded when the stage ended). Neither exists any more:
+	// they are still accepted so that an older configuration file keeps
+	// loading, and the server says so once at startup. See LegacyKeys.
+	MaxStoredBytes int64  `yaml:"maxStoredBytes"`
+	MaxFileBytes   int64  `yaml:"maxFileBytes"`
+	SpoolDir       string `yaml:"spoolDir"`
+}
+
+// LegacyKeys names the logs settings this build accepts but no longer uses, so
+// the server can point them out rather than leave them looking effective.
+func (l Logs) LegacyKeys() []string {
+	var keys []string
+	if l.MaxStoredBytes != 0 {
+		keys = append(keys, "maxStoredBytes")
+	}
+	if l.MaxFileBytes != 0 {
+		keys = append(keys, "maxFileBytes")
+	}
+	if l.SpoolDir != "" {
+		keys = append(keys, "spoolDir")
+	}
+	return keys
 }
 
 // Config is the whole configuration file, and also the resolved configuration
@@ -342,6 +363,7 @@ func applyEnv(cfg *Config) error {
 		key string
 		dst *int64
 	}{
+		{EnvLogPartBytes, &cfg.Logs.PartBytes},
 		{EnvLogMaxStored, &cfg.Logs.MaxStoredBytes},
 		{EnvLogMaxFile, &cfg.Logs.MaxFileBytes},
 	} {

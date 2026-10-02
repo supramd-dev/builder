@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -13,10 +15,12 @@ import (
 )
 
 // Artifact bytes live in object storage; the database keeps a reference (the
-// object key plus the size) in test_artifacts. A run's complete task log works
-// the same way, with its key on the run row (TestRun.LogObjectKey). This file
-// owns that split: the key layout, the upload that precedes every artifact
-// insert, and the accessors the API layer reads through.
+// object key plus the size) in test_artifacts. A run's task log works the same
+// way, with its prefix on the run row (TestRun.LogPrefix) and its parts under
+// it. This file owns that split: the upload that precedes every artifact
+// insert, and the accessors the API layer reads through. (The log's own parts
+// are written and read by the runner, which holds them in memory as it goes —
+// see runner.LogWriter.)
 
 // putTimeout bounds one artifact upload. The runner caps each fetched file
 // (maxArtifactBytes), so an upload that takes this long is a broken backend,
@@ -144,20 +148,45 @@ func (s *Store) OpenArtifact(ctx context.Context, a *TestArtifact) (io.ReadClose
 	return objs.Open(ctx, a.ObjectKey)
 }
 
-// OpenRunLog streams a run's complete log (the object the runner uploaded when
-// the stage ended) with its size, for the download path — a log is read once
-// and can be tens of megabytes, so it is never buffered. It fails for a run
-// that has no log object: callers fall back to the stored task_logs chunks.
-func (s *Store) OpenRunLog(ctx context.Context, run *TestRun) (io.ReadCloser, int64, error) {
-	if run == nil || run.LogObjectKey == "" {
-		return nil, 0, ErrNotFound
+// ListRunLogParts returns the parts of a run's log under prefix, in stream
+// order, with the byte offset each starts at. It is the one read the runner's
+// log source needs to place and fetch a part; a part whose name carries no
+// offset (an older server's single "full.log") is taken to start at zero, so
+// such a run still reads as a one-part log.
+func (s *Store) ListRunLogParts(ctx context.Context, prefix string) ([]LogPart, error) {
+	if prefix == "" {
+		return nil, ErrNotFound
 	}
 	objs, err := s.requireObjects()
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	return objs.Open(ctx, run.LogObjectKey)
+	listed, err := objs.List(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	parts := make([]LogPart, 0, len(listed))
+	for _, obj := range listed {
+		off, ok := storage.LogPartOffset(obj.Key[strings.LastIndex(obj.Key, "/")+1:])
+		if !ok {
+			off = 0
+		}
+		parts = append(parts, LogPart{Key: obj.Key, Start: off, Size: obj.Size})
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].Start < parts[j].Start })
+	return parts, nil
 }
+
+// LogPart is one stored piece of a run's log: the object holding it, the byte
+// offset it starts at in the stream, and its length.
+type LogPart struct {
+	Key   string
+	Start int64
+	Size  int64
+}
+
+// End is the byte offset just past the part: where the next one starts.
+func (p LogPart) End() int64 { return p.Start + p.Size }
 
 // deleteArtifactsByRunIDs removes the artifact rows of the given runs. The
 // objects they referenced are reclaimed by SweepOrphanObjects rather than

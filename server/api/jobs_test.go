@@ -33,6 +33,41 @@ func newDispatchTestServer(t *testing.T, yaml string) (*Server, *store.Store) {
 	return apiServer, s
 }
 
+// seedTaskLog stores a task attempt's log the way a finished stage leaves it:
+// one part under the run's log prefix, with the run holding the prefix and the
+// byte count. It is what the log endpoints read.
+func seedTaskLog(t *testing.T, s *store.Store, taskID int64, attempt int, body string) {
+	t.Helper()
+	seedTaskLogInParts(t, s, taskID, attempt, body, len(body))
+}
+
+// seedTaskLogInParts is seedTaskLog with the log split into parts of at most
+// partBytes, the way a long stage's output is stored.
+func seedTaskLogInParts(t *testing.T, s *store.Store, taskID int64, attempt int, body string, partBytes int) {
+	t.Helper()
+	run, err := s.FindTaskRun(taskID, attempt)
+	if err != nil {
+		t.Fatalf("find the run of task %d attempt %d: %v", taskID, attempt, err)
+	}
+	if s.Objects() == nil {
+		t.Fatalf("the test store has no object backend for task %d's log", taskID)
+	}
+	ctx := context.Background()
+	prefix := storage.LogPrefix(s.Objects().KeyPrefix(), run.ID)
+	for off := 0; off < len(body); off += partBytes {
+		end := off + partBytes
+		if end > len(body) {
+			end = len(body)
+		}
+		if _, err := s.Objects().Put(ctx, storage.LogKey(s.Objects().KeyPrefix(), run.ID, int64(off)), []byte(body[off:end])); err != nil {
+			t.Fatalf("store the part at %d of task %d's log: %v", off, taskID, err)
+		}
+	}
+	if ok, err := s.SetRunLogPrefix(run.ID, prefix, int64(len(body))); err != nil || !ok {
+		t.Fatalf("record the log of task %d: ok=%t err=%v", taskID, ok, err)
+	}
+}
+
 const dispatchYAML = `version: 3
 defaults:
   build:
@@ -427,14 +462,10 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	clone := nodeOf(t, byKey, store.TaskKindClone)
 	build := nodeOf(t, byKey, store.TaskKindBuild)
 
-	// Logs on the clone task.
-	for seq, chunk := range []string{"cloning...\n", "uploading 12.3 MiB\n"} {
-		if err := s.AppendTaskLog(&store.TaskLog{
-			TaskID: clone.ID, Attempt: 1, Seq: seq + 1, Content: chunk,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// The clone task's log, as the runner leaves it: stored under the run, with
+	// the run holding the prefix and the byte count.
+	cloneLog := "cloning...\nuploading 12.3 MiB\n"
+	seedTaskLog(t, s, clone.ID, 1, cloneLog)
 
 	mux := http.NewServeMux()
 	apiServer.Register(mux)
@@ -482,30 +513,57 @@ func TestTaskDetailAndLogs(t *testing.T) {
 		t.Fatalf("sub detail wrong: %+v", subDetail)
 	}
 
-	// Logs: full read then incremental.
+	// Logs are read by byte offset: the first read from zero gets the log, and
+	// the offset it ends at (lastSeq) is the cursor the next read continues
+	// from — which is how a viewer follows a stage without repeating itself.
 	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log", clone.ID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("log read: expected 200, got %d", rec.Code)
 	}
 	var logs struct {
 		Chunks  []logChunkJSON `json:"chunks"`
-		LastSeq int            `json:"lastSeq"`
+		LastSeq int64          `json:"lastSeq"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil {
 		t.Fatal(err)
 	}
-	if len(logs.Chunks) != 2 || logs.LastSeq != 2 {
+	if len(logs.Chunks) != 1 || logs.Chunks[0].Content != cloneLog || logs.LastSeq != int64(len(cloneLog)) {
 		t.Fatalf("log read wrong: %+v", logs)
 	}
-	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=1", clone.ID))
+
+	// A reader that is caught up is handed no bytes and the same cursor.
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=%d", clone.ID, len(cloneLog)))
 	if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil {
 		t.Fatal(err)
 	}
-	if len(logs.Chunks) != 1 || logs.Chunks[0].Seq != 2 {
-		t.Fatalf("incremental log read wrong: %+v", logs)
+	if len(logs.Chunks) != 0 || logs.LastSeq != int64(len(cloneLog)) {
+		t.Fatalf("caught-up log read wrong: %+v", logs)
 	}
 
-	// Log of an unknown task: 404; bad after: 400.
+	// A reader with a cursor inside the log gets the rest of it.
+	const marker = "cloning...\n"
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=%d", clone.ID, len(marker)))
+	if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs.Chunks) != 1 || logs.Chunks[0].Content != cloneLog[len(marker):] {
+		t.Fatalf("incremental log read wrong: %+v", logs)
+	}
+	if logs.Chunks[0].Seq != int64(len(cloneLog)) || logs.LastSeq != int64(len(cloneLog)) {
+		t.Fatalf("incremental log cursor wrong: %+v", logs)
+	}
+
+	// Opening a long log passes tail instead of after: the newest bytes, and
+	// the cursor they end at, rather than the whole file.
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?tail=6", clone.ID))
+	if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs.Chunks) != 1 || logs.Chunks[0].Content != "3 MiB\n" || logs.LastSeq != int64(len(cloneLog)) {
+		t.Fatalf("tail log read wrong: %+v", logs)
+	}
+
+	// Log of an unknown task: 404; bad after/tail: 400.
 	rec = authed(http.MethodGet, "/api/tasks/99999/log")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown task log: expected 404, got %d", rec.Code)
@@ -514,8 +572,12 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad after: expected 400, got %d", rec.Code)
 	}
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?tail=-1", clone.ID))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad tail: expected 400, got %d", rec.Code)
+	}
 
-	// Full-log download: the stored chunks as one text file the browser saves.
+	// Full-log download: the run's log as one text file the browser saves.
 	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", clone.ID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("log download: expected 200, got %d, body %s", rec.Code, rec.Body.String())
@@ -526,22 +588,21 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	if got := rec.Header().Get("Content-Disposition"); got != fmt.Sprintf(`attachment; filename="task-%d.log"`, clone.ID) {
 		t.Errorf("download Content-Disposition = %q", got)
 	}
-	if got := rec.Body.String(); got != "cloning...\nuploading 12.3 MiB\n" {
+	if got := rec.Body.String(); got != cloneLog {
 		t.Errorf("download body = %q", got)
 	}
+	if got, want := rec.Header().Get("Content-Length"), fmt.Sprint(len(cloneLog)); got != want {
+		t.Errorf("download Content-Length = %q, want %q", got, want)
+	}
 
-	// A log longer than one store read (ReadTaskLogs returns at most 1000
-	// chunks): the whole file comes down, not just the first batch.
-	long := make([]store.TaskLog, 0, 1500)
+	// A log longer than one page (a page is one part) comes down whole: the
+	// download pages through the parts in order rather than stopping at the
+	// first read.
 	var want strings.Builder
 	for i := 1; i <= 1500; i++ {
-		line := fmt.Sprintf("line %d\n", i)
-		long = append(long, store.TaskLog{TaskID: build.ID, Attempt: 1, Seq: i, Content: line})
-		want.WriteString(line)
+		fmt.Fprintf(&want, "line %d\n", i)
 	}
-	if err := s.DB.CreateInBatches(long, 500).Error; err != nil {
-		t.Fatal(err)
-	}
+	seedTaskLogInParts(t, s, build.ID, 1, want.String(), 4096)
 	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", build.ID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("long log download: expected 200, got %d", rec.Code)
@@ -549,56 +610,79 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	if got := rec.Body.String(); got != want.String() {
 		t.Errorf("long log download: got %d bytes, want %d", len(got), want.Len())
 	}
-
-	// A finished attempt has its complete log in object storage, and the
-	// download serves that object rather than the stored chunks: it is the
-	// whole output, where the chunks stop at their cap.
-	full := "the complete log\n" + strings.Repeat("noise\n", 10) + "error: it failed here\n"
-	buildRun, err := s.FindTaskRun(build.ID, 1)
-	if err != nil {
-		t.Fatalf("build run: %v", err)
+	// And the viewer pages a part at a time, with the cursor advancing past
+	// every byte of it.
+	offset, seen := int64(0), strings.Builder{}
+	for {
+		rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?attempt=1&after=%d", build.ID, offset))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("long log read at %d: expected 200, got %d", offset, rec.Code)
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil {
+			t.Fatal(err)
+		}
+		if logs.LastSeq <= offset {
+			break
+		}
+		for _, c := range logs.Chunks {
+			seen.WriteString(c.Content)
+		}
+		offset = logs.LastSeq
 	}
-	key := storage.ArtifactKey(s.Objects().KeyPrefix(), buildRun.ID, store.ArtifactKindLog, "full.log", 0)
-	if _, err := s.Objects().Put(context.Background(), key, []byte(full)); err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := s.SetRunLogObject(buildRun.ID, key, int64(len(full))); err != nil || !ok {
-		t.Fatalf("record the full log on the run: ok=%t err=%v", ok, err)
-	}
-	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", build.ID))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("full-log download: expected 200, got %d", rec.Code)
-	}
-	if got := rec.Body.String(); got != full {
-		t.Errorf("full-log download body = %q, want the object's bytes", got)
-	}
-	if got, want := rec.Header().Get("Content-Length"), fmt.Sprint(len(full)); got != want {
-		t.Errorf("full-log download Content-Length = %q, want %q", got, want)
+	if got := seen.String(); got != want.String() {
+		t.Errorf("followed %d bytes of the long log, want %d", len(got), want.Len())
 	}
 
-	// A stage that is still running has its complete log nowhere but the
-	// writer's spool — the object above only appears once the stage ends —
-	// so the download reads that, rather than the chunks, which hold only
-	// the log's beginning and its end by then.
+	// A stage that is still running has its output nowhere but its writer's
+	// buffer (nothing is stored until a part fills): what the download reads,
+	// and what a viewer following it is handed, before any object exists.
+	unit := nodeOf(t, byKey, store.TaskKindUnit)
 	svc := runner.NewService(s)
-	svc.LogLimits = runner.LogLimits{SpoolDir: t.TempDir()}
+	svc.LogLimits = runner.LogLimits{PartBytes: 1024}
 	apiServer.SetRunner(svc)
-	live := svc.OpenLog(clone)
-	if _, err := live.Write([]byte("still running: step 7 of 9\n")); err != nil {
+	live := svc.OpenLog(unit)
+	out := "still running: step 7 of 9\n"
+	if _, err := live.Write([]byte(out)); err != nil {
 		t.Fatal(err)
 	}
-	live.Flush()
-	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", clone.ID))
+
+	// The writer keeps what it has not stored, so this part of the log is
+	// readable from memory alone: the run has no parts and no recorded log.
+	unitRun, err := s.FindTaskRun(unit.ID, 1)
+	if err != nil {
+		t.Fatalf("unit run: %v", err)
+	}
+	if parts, err := s.ListRunLogParts(context.Background(), storage.LogPrefix(s.Objects().KeyPrefix(), unitRun.ID)); err != nil || len(parts) != 0 {
+		t.Errorf("%d parts stored for %d bytes under a 1024-byte part (err %v)", len(parts), len(out), err)
+	}
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", unit.ID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("live log download: expected 200, got %d", rec.Code)
 	}
-	if got, want := rec.Body.String(), "still running: step 7 of 9\n"; got != want {
-		t.Errorf("live log download body = %q, want the stage's output so far (%q)", got, want)
+	if got := rec.Body.String(); got != out {
+		t.Errorf("live log download body = %q, want the stage's output so far (%q)", got, out)
 	}
-	if got, want := rec.Header().Get("Content-Length"), fmt.Sprint(len("still running: step 7 of 9\n")); got != want {
+	if got, want := rec.Header().Get("Content-Length"), fmt.Sprint(len(out)); got != want {
 		t.Errorf("live log download Content-Length = %q, want %q", got, want)
 	}
+	// The viewer sees the same, and its cursor is the log's length so far.
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?tail=%d", unit.ID, len("step 7 of 9\n")))
+	if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil {
+		t.Fatal(err)
+	}
+	if len(logs.Chunks) != 1 || logs.Chunks[0].Content != "step 7 of 9\n" || logs.LastSeq != int64(len(out)) {
+		t.Errorf("live tail read = %+v, want the newest bytes ending at %d", logs, len(out))
+	}
+
+	// And the stage ends: its log is stored, and both reads still serve it.
 	live.Close()
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", unit.ID))
+	if rec.Code != http.StatusOK || rec.Body.String() != out {
+		t.Errorf("finished log download = %q (status %d), want the whole log", rec.Body.String(), rec.Code)
+	}
+	if got := rec.Header().Get("Content-Length"); got != fmt.Sprint(len(out)) {
+		t.Errorf("finished log download Content-Length = %q, want %d", got, len(out))
+	}
 
 	// An unknown task has no file to download.
 	rec = authed(http.MethodGet, "/api/tasks/99999/log/download")

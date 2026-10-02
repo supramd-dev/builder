@@ -2,14 +2,17 @@ import { Fragment, useEffect, useRef, useState } from 'react'
 import { Download } from 'lucide-react'
 import { getTaskLogs, isTerminalStatus, taskLogDownloadUrl } from './api'
 
-// One read returns at most this many chunks (the store caps the query), so a
-// full page means there may be more and the viewer asks again.
-const LOG_PAGE = 1000
-// Pages a live tick fetches back to back before yielding to its interval: the
-// log of a long stage catches up quickly, but one tick cannot monopolise the
-// connection for ever. A finished attempt has no next tick, so it is read to
-// the end in one go (the log itself is capped server-side).
-const LOG_PAGES_PER_TICK = 20
+// How much of a log a view opens with: the last megabyte rather than the whole
+// file, because a log has no size limit — a stage that has been printing for an
+// hour is hundreds of megabytes, and the part a reader opening it wants is the
+// end. Everything written from there on is appended as it arrives.
+const LOG_OPEN_TAIL = 1 << 20
+// Pages a live tick fetches back to back before yielding to its interval: a
+// reader that has fallen behind catches up quickly, but one tick cannot hold
+// the connection for ever. Each page is up to a part (8 MiB), so this is a
+// catch-up of tens of megabytes at most; a finished attempt has no next tick,
+// so it is read to the end in one go.
+const LOG_PAGES_PER_TICK = 4
 // How long a live view waits after a read finishes before reading again.
 const LOG_POLL_MS = 2000
 
@@ -29,11 +32,12 @@ const LOG_POLL_MS = 2000
 // stops the timer, after one last read, so the lines written between the final
 // tick and the outcome still show up.
 //
-// Nothing read is ever dropped from the view: output that appeared stays
-// where it is, and the page grows downward as the attempt writes more. (A
-// view that trimmed its head to bound the text would make the first lines
-// vanish under the reader mid-follow.) The stored log is capped server-side,
-// which is what bounds this — the bar above links to that copy, whole or not.
+// Nothing read is ever dropped from the view: output that appeared stays where
+// it is, and the page grows downward as the attempt writes more. (A view that
+// trimmed its head to bound the text would make the first lines vanish under
+// the reader mid-follow.) The view opens with the log's last lines rather than
+// its first, so a long log still shows what the stage is doing; the download
+// link above hands over all of it.
 export default function TaskLogView({
   taskId,
   attempt,
@@ -75,13 +79,22 @@ export default function TaskLogView({
     let timer: number | undefined
 
     // Reads one page at a time until the log is caught up (or a live tick has
-    // had its share of the connection).
+    // had its share of the connection). The first read of a stream asks for
+    // the log's tail instead of its start: there is no cursor yet, and the
+    // server bounds every read, so a page that does not move the cursor is
+    // what says the reader is at the end.
     async function read() {
       const maxPages = live ? LOG_PAGES_PER_TICK : Number.POSITIVE_INFINITY
       for (let page = 0; page < maxPages && !stop; page++) {
+        const from = lastSeq.current
         let res
         try {
-          res = await getTaskLogs(taskId, lastSeq.current, showAttempt)
+          res = await getTaskLogs(
+            taskId,
+            from,
+            showAttempt,
+            page === 0 && from === 0 ? LOG_OPEN_TAIL : undefined,
+          )
         } catch {
           return // transient; the next tick retries
         }
@@ -89,13 +102,14 @@ export default function TaskLogView({
         // Only what is past the last line rendered. The cursor moves forward
         // only, so a read that raced another cannot pull it back — which is
         // what made the next tick fetch, and append, a page all over again.
-        const fresh = res.chunks.filter((c) => c.seq > lastSeq.current)
+        const fresh = res.chunks.filter((c) => c.seq > from)
         if (res.lastSeq > lastSeq.current) lastSeq.current = res.lastSeq
         if (fresh.length > 0) {
           const joined = fresh.map((c) => c.content).join('')
           setChunks((cur) => [...cur, joined])
         }
-        if (res.chunks.length < LOG_PAGE) return
+        // Nothing new: the log has been read to its end.
+        if (res.lastSeq <= from) return
       }
     }
 

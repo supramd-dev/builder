@@ -49,32 +49,28 @@ worker:
   count: 2
 
 logs:
-  # A stage's output is kept twice. The task_logs chunks are what the live
-  # viewer polls (small, indexed, streamed); the complete log is one object
-  # per run (runs/<runID>/log/full.log in the bucket below), which is what
-  # "download log" serves — and what the run's summary is derived from, so a
-  # failure at the end of a very long log is still read and reported. While a
-  # stage is running, "download log" reads the spool below: the complete log
-  # at that moment, since the object only appears when the stage ends.
+  # A stage's log lives in the object store below and nowhere else — no log
+  # text is ever written to the database, and no log is capped or truncated.
+  # It is stored as an ordered series of parts, runs/<runID>/log/part-<offset>,
+  # and the run row keeps only the prefix and the byte count.
+  #
+  # A stage that is running here keeps the output it has not stored yet in
+  # memory; a viewer following it reads that buffer (so a live view costs no
+  # object-storage round trips), and a page opened later reads the parts by
+  # byte offset. The log a stage's summary is derived from is read the same
+  # way, from its end.
 
-  # Cap on the chunks kept in the database, in bytes. Past it a long log keeps
-  # its beginning (1 MiB) and a rolling window over its newest output, with a
-  # truncation marker between them: the viewer follows a long stage to its
-  # end, and a page opened later still finds what the stage last wrote.
-  # 0 = 8 MiB. Override with MD_BUILDER_LOG_MAX_STORED.
-  maxStoredBytes: 8388608
+  # How much output a running stage holds in memory before it is uploaded as
+  # one part: the memory a stage costs, the size of one object, and how far a
+  # viewer in another process lags behind a running stage. A smaller part is a
+  # fresher remote view at the price of more objects. 0 = 8 MiB (8388608).
+  # Override with MD_BUILDER_LOG_PART_BYTES.
+  partBytes: 8388608
 
-  # Cap on the complete log kept in object storage, in bytes. A log that runs
-  # past it keeps its beginning (1 MiB) and its end, with a marker line in
-  # between naming what was dropped — a reader is never misled about what the
-  # file holds. 0 = 64 MiB. Override with MD_BUILDER_LOG_MAX_FILE.
-  maxFileBytes: 67108864
-
-  # Where a running stage's log is spooled before it is uploaded. Needs room
-  # for one maxFileBytes file per stage in flight; the files are removed when
-  # the stage ends, and leftovers from a crash are swept at startup. Empty
-  # uses the OS temp directory. Override with MD_BUILDER_LOG_SPOOL_DIR.
-  # spoolDir: /var/lib/md-builder/logs
+  # maxStoredBytes, maxFileBytes and spoolDir configured the two capped copies
+  # a log used to be kept in. Neither exists any more: the keys are still
+  # accepted so an existing configuration loads, and the server logs a warning
+  # at startup when one is set. Remove them.
 
 objectStorage:
   # MinIO / S3 endpoint, host and port, no scheme.

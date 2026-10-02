@@ -44,30 +44,12 @@ func NewMemory() *Memory {
 }
 
 // Put stores a copy of data.
-func (m *Memory) Put(ctx context.Context, key string, data []byte) (ObjectMeta, error) {
-	return m.PutStream(ctx, key, bytes.NewReader(data), int64(len(data)))
-}
-
-// PutStream reads r into memory: buffering is the point of this backend, so a
-// test double owes the caller no streaming discipline. size is checked the
-// same way MinIO checks it (see Store.PutStream) so a caller that gets this
-// wrong fails in the suite rather than only against a real backend.
-func (m *Memory) PutStream(_ context.Context, key string, r io.Reader, size int64) (ObjectMeta, error) {
-	if size < 0 {
-		return ObjectMeta{}, fmt.Errorf("storage: PutStream needs the object's length (got %d)", size)
-	}
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return ObjectMeta{}, err
-	}
-	if int64(len(data)) != size {
-		return ObjectMeta{}, fmt.Errorf("storage: PutStream got %d bytes, want %d", len(data), size)
-	}
+func (m *Memory) Put(_ context.Context, key string, data []byte) (ObjectMeta, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	meta := ObjectMeta{Key: key, Size: size, LastModified: time.Now()}
+	meta := ObjectMeta{Key: key, Size: int64(len(data)), LastModified: time.Now()}
 	m.objects[key] = meta
-	m.data[key] = data
+	m.data[key] = append([]byte(nil), data...)
 	return meta, nil
 }
 

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -14,184 +13,171 @@ import (
 	"md-builder/server/store"
 )
 
-// Incremental task log persistence. SSH output streams into a LogWriter,
-// which keeps two copies of it:
+// Task logs. SSH output streams into a LogWriter, and a stage's log lives in
+// two places, neither of them the database:
 //
-//   - stored chunks in the task_logs table, appended at least once per
-//     flushInterval (or earlier when the buffer reaches flushBytes). The
-//     frontend polls GET /api/tasks/{id}/log?after=<seq> for new chunks, so
-//     this copy stays small and bounded (MaxStoredBytes) — a live log is
-//     read a page at a time through an indexed query. Past the cap it keeps
-//     its beginning and a rolling window over its end (see chunkRef): a
-//     reader that follows a stage must see the output it is writing now, and
-//     a reader opening it later must still find where it ended.
-//   - the complete log, spooled to a local file while the stage runs and
-//     uploaded once, when it ends, as one object per run. That object is what
-//     the download serves and what the run's summary is derived from, so a
-//     stage whose output runs past the stored cap still reports, and hands
-//     over, the output it actually ended with — including the failure at the
-//     end of a very long log.
+//   - the output written since the last upload, in memory, bounded by
+//     partBytes. A reader following a running stage is served from here (see
+//     LogSource), so following a live log costs no object-storage round trips;
+//   - one object per full buffer, under the run's log prefix
+//     (<prefix>/runs/<runID>/log/part-<offset>): the parts. Each part carries
+//     the byte offset it starts at, which is what lets a reader address any
+//     byte of a very long log without reading the parts before it.
+//
+// The database keeps only the prefix and the byte count (store.TestRun.LogPrefix
+// and .LogBytes) — what a reader and the orphan sweep need — so no row ever
+// holds log text, and no log is truncated, capped or rewritten. The complete
+// log is the parts in order, whenever it is read.
+//
+// A process that dies mid-stage loses only what its buffer held (less than one
+// part). The retry keeps the attempt and its run, so the next writer continues
+// after the parts already stored instead of overwriting them, and writes one
+// line at the seam saying so (see restartNote).
 
 const (
-	// flushBytes is the buffer size that triggers an early flush.
-	flushBytes = 32 * 1024
-	// flushInterval is the maximum time output waits before being stored.
-	flushInterval = 2 * time.Second
-	// defaultMaxLogBytes is the per-task cap on the stored chunks; past it the
-	// beginning and the newest output are kept and the middle is given back as
-	// new output arrives (it all stays in the full log).
-	defaultMaxLogBytes = 8 * 1024 * 1024
-	// storedHeadBytes is how much of the beginning the stored chunks hold onto
-	// verbatim — the command line, the first error, the context a reader wants
-	// before the noise. The rest of the cap rolls over the newest output. It
-	// matches the spool's head region so both copies start the same way.
-	storedHeadBytes = spoolHeadBytes
-	// defaultMaxFileBytes is the per-run cap on the full log object.
-	defaultMaxFileBytes = 64 * 1024 * 1024
-	// logPutTimeout bounds the full-log upload. The payload is up to
-	// MaxFileBytes, so it gets more room than an artifact upload (putTimeout
+	// defaultPartBytes is how much output a running stage buffers in memory
+	// before it uploads a part. It bounds the memory one stage costs, the
+	// size of one object, and how far a reader in another process can lag
+	// behind a running stage.
+	defaultPartBytes = 8 * 1024 * 1024
+	// maxBufferParts is how many parts' worth of output may pile up in memory
+	// while the uploads keep failing: past it the writer refuses output (see
+	// LogWriter.Write), because the alternative is a runaway stage taking the
+	// server's memory with it.
+	maxBufferParts = 4
+	// logPutTimeout bounds one part upload, and one read of a part. Parts are
+	// partBytes each, so they get more room than an artifact upload (putTimeout
 	// in the store, tuned for 8 MiB files).
 	logPutTimeout = 5 * time.Minute
 )
 
-// fullLogName is the object name of a run's complete log, under the reserved
-// ArtifactKindLog kind: <prefix>/runs/<runID>/log/full.log.
-const fullLogName = "full.log"
-
-// LogLimits bounds a stage's two log copies, as configured under the `logs`
-// section. The zero value is the documented default for each field.
+// LogLimits bounds a stage's log, as configured under the `logs` section. The
+// zero value is the documented default.
 type LogLimits struct {
-	// MaxStoredBytes caps the chunks kept in the database (0 = 8 MiB). Past
-	// it the stored log keeps its beginning and its newest output and gives
-	// the middle back: see LogWriter.
-	MaxStoredBytes int64
-	// MaxFileBytes caps the complete log kept in object storage (0 = 64
-	// MiB). Its beginning and its end both survive a cap: see logSpool.
-	MaxFileBytes int64
-	// SpoolDir is where a stage's log is spooled while it runs ("" = the
-	// OS temp directory).
-	SpoolDir string
+	// PartBytes is how much output a running stage holds in memory before it
+	// is uploaded as one part (0 = 8 MiB): the memory a stage costs, the size
+	// of one object, and how far a viewer in another process lags. A smaller
+	// part is a fresher remote view at the price of more objects.
+	PartBytes int64
 }
 
-// SpoolDirectory is the directory spool files are written to, defaults
-// resolved. The startup sweep (CleanStaleSpools) asks the same question, so
-// it cleans up after the same directory.
-func (l LogLimits) SpoolDirectory() string {
-	if dir := strings.TrimSpace(l.SpoolDir); dir != "" {
-		return dir
+// partBytes resolves the default.
+func (l LogLimits) partBytes() int64 {
+	if l.PartBytes > 0 {
+		return l.PartBytes
 	}
-	return os.TempDir()
+	return defaultPartBytes
 }
 
-// storedBytes / fileBytes resolve the caps' defaults.
-func (l LogLimits) storedBytes() int64 {
-	if l.MaxStoredBytes > 0 {
-		return l.MaxStoredBytes
-	}
-	return defaultMaxLogBytes
-}
-
-func (l LogLimits) fileBytes() int64 {
-	if l.MaxFileBytes > 0 {
-		return l.MaxFileBytes
-	}
-	return defaultMaxFileBytes
-}
-
-// LogWriter is an io.Writer that persists task output incrementally and spools
-// the complete log for object storage. It is safe for concurrent use (SSH
-// multiplexes stdout and stderr into separate writers). Close flushes the
-// remainder, stops the background timer and uploads the full log. Output
-// passes through RedactSecrets first: anything a command prints that contains
-// the site's secrets (the access token, the MD_SECRET_TOKEN value) is replaced
-// with REDACTED before it is stored — in either copy.
+// LogWriter is an io.Writer that stores a stage's output in parts. It is safe
+// for concurrent use (SSH multiplexes stdout and stderr into separate writers).
+// Close stores the remainder. Output passes through RedactSecrets first:
+// anything a command prints that contains the site's secrets (the access
+// token, the MD_SECRET_TOKEN value) is replaced with REDACTED before it is
+// buffered, so no copy — memory, part, or the API's response — ever holds one.
 type LogWriter struct {
 	store   *store.Store
 	taskID  int64
 	attempt int
 	runID   int64
-	redact  func(string) string // built once at construction; nil = nothing to scrub
-
-	// maxStored caps the stored chunks; spool holds the complete log.
-	maxStored int64
-	spool     *logSpool
-	// ownLog reports whether this writer produced the attempt's log from
-	// its first byte. It is what makes the full log trustworthy: a writer
-	// that started on an attempt which already had stored chunks (a stage
-	// resumed after a restart keeps its attempt and its output) holds only
-	// part of the log, and uploading that part as "the full log" would be a
-	// file that looks complete and is not. Such an attempt keeps the chunk
-	// path, which is cumulative.
-	ownLog bool
+	// prefix is where this writer's parts go. It is derived from the run id
+	// rather than read from the run row: a run written by an older server
+	// pointed at the single object it held then, and the first part stored
+	// here re-points the row at the directory instead (see storedPrefix).
+	prefix    string
+	partBytes int64
+	// objs is the backend the parts go to (nil when there is none — the unit
+	// suite's store, or a run that no longer exists: the stage still runs and
+	// its log stays in memory).
+	objs   storage.Store
+	redact func(string) string // built once at construction; nil = nothing to scrub
 
 	// onClose runs once, after Close has finished with the writer: what the
-	// Service uses to stop offering this writer's spool as a live log.
+	// Service uses to stop offering this writer as its task's live log.
 	onClose func()
 
-	mu        sync.Mutex
-	buf       []byte
-	seq       int
-	written   int64 // total bytes accepted from the session
-	headBytes int64 // bytes of the stored copy held as the beginning
-	stored    []chunkRef
-	kept      int64 // bytes of the stored copy, the head region included
-	truncat   bool
-	timer     *time.Timer
-	closed    bool
-	lastFlush time.Time
+	mu    sync.Mutex
+	buf   []byte          // output written since the last stored part
+	parts []store.LogPart // the parts already stored, in stream order
+	base  int64           // the end of the last stored part: where the next one starts
+	// orphaned reports that the run this log belongs to is gone (a re-dispatch
+	// replaced it while the stage was finishing): the bytes already stored are
+	// left to the orphan sweep, and the rest of the stage's output stays in
+	// memory rather than going into parts nothing references.
+	orphaned bool
+	// overflow reports that the buffer hit its ceiling because the parts are
+	// not being stored. It is what keeps the complaint to one line per
+	// episode rather than one per write.
+	overflow bool
+	closed   bool
+	// storedPrefix/storedBytes are what the run row said its log was, when it
+	// already had one: what this writer resumes after, and the fallback for
+	// where the log ends when its parts cannot be listed.
+	storedPrefix string
+	storedBytes  int64
 }
 
-// chunkRef is one stored chunk beyond the head region: what the writer has to
-// know to give the cap back as new output arrives. The marker is never given
-// back — it is the line that tells a reader the middle is missing, and it
-// belongs right after the beginning, where the gap is.
-type chunkRef struct {
-	seq    int
-	n      int64
-	marker bool
-}
-
-// headBudget is how much of the stored copy is the protected beginning.
-func (lw *LogWriter) headBudget() int64 {
-	// Narrowed for a cap too small to hold a head region and a tail at once,
-	// so that something always remains prunable and the copy stays bounded.
-	if half := lw.maxStored / 2; half < storedHeadBytes {
-		return half
-	}
-	return storedHeadBytes
-}
-
-// NewLogWriter returns a LogWriter appending to a task's CURRENT attempt, so a
-// retried task (or one re-executed after a restart, which keeps its attempt —
-// see store.ResetStaleRunning) writes after the output already stored and
-// never duplicates a sequence number. A background timer flushes partial
-// buffers every flushInterval until Close.
-//
-// It also opens the spool for the run's complete log. A spool that cannot be
-// created (an unwritable directory) is not an error: the stage runs, the
-// stored chunks carry its output, and the run ends up with no full log.
+// NewLogWriter returns a LogWriter for a task's CURRENT attempt, so a stage
+// that is retried after a crash (which keeps its attempt — see
+// store.ResetStaleRunning) continues its log instead of overwriting it. A run
+// that already has parts is resumed after them, with one line announcing the
+// seam.
 func NewLogWriter(s *store.Store, task *store.Task, limits LogLimits) *LogWriter {
 	lw := &LogWriter{
 		store:     s,
 		taskID:    task.ID,
 		attempt:   task.Attempts,
-		maxStored: limits.storedBytes(),
-		lastFlush: time.Now(),
+		partBytes: limits.partBytes(),
+		objs:      s.Objects(),
 	}
 	if run, err := s.FindTaskRun(task.ID, task.Attempts); err == nil {
 		lw.runID = run.ID
+		lw.storedPrefix = run.LogPrefix
+		lw.storedBytes = run.LogBytes
 	}
-	if max, err := s.MaxTaskLogSeq(task.ID, task.Attempts); err == nil {
-		lw.seq = max
-		lw.ownLog = max == 0
+	if lw.objs != nil {
+		lw.prefix = storage.LogPrefix(lw.objs.KeyPrefix(), lw.runID)
 	}
-	if sp, err := newLogSpool(limits.SpoolDirectory(), limits.fileBytes()); err != nil {
-		log.Printf("tasklog: task %d attempt %d: full log will not be spooled: %v", task.ID, task.Attempts, err)
-	} else {
-		lw.spool = sp
-	}
-	lw.timer = time.AfterFunc(flushInterval, lw.tick)
+	lw.resume()
 	return lw
+}
+
+// resume places the writer after the parts its attempt already has. A stage
+// whose process died keeps its attempt (and its run) when it is retried, so
+// this writer must continue the stream: the parts already stored are the log's
+// beginning, and the buffer starts with a line that marks the join.
+func (lw *LogWriter) resume() {
+	if lw.objs == nil || lw.runID == 0 || lw.storedPrefix == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), logPutTimeout)
+	defer cancel()
+	parts, err := lw.store.ListRunLogParts(ctx, lw.storedPrefix)
+	if err != nil {
+		log.Printf("tasklog: task %d attempt %d: read the stored parts under %s: %v",
+			lw.taskID, lw.attempt, lw.storedPrefix, err)
+		// The parts cannot be listed, so where the log ends cannot be read
+		// back. Continuing from the byte count the run row last recorded is
+		// the one answer that cannot overwrite output already stored.
+		lw.base = lw.storedBytes
+		lw.buf = append(lw.buf, restartNote(lw.partBytes)...)
+		return
+	}
+	if len(parts) == 0 {
+		return
+	}
+	lw.parts = parts
+	lw.base = parts[len(parts)-1].End()
+	lw.buf = append(lw.buf, restartNote(lw.partBytes)...)
+}
+
+// restartNote is what a writer puts at the seam when it takes over a log that
+// already has output: a reader has to know the halves are separate runs of the
+// stage, and that whatever the dead process held in memory — less than one
+// part — is gone for good.
+func restartNote(partBytes int64) string {
+	return fmt.Sprintf("\n… md-builder restarted while this stage was running; up to %s of its output was lost …\n",
+		bytesLabel(partBytes))
 }
 
 // SetSecrets scrubs the given secrets from everything written from now on.
@@ -224,8 +210,12 @@ func redactorFor(secrets []string) func(string) string {
 	}
 }
 
-// Write buffers p and flushes when the buffer is full. It never returns an
-// error: log failures are logged but must not fail the SSH session.
+// Write buffers p and stores a part once the buffer holds one. It never returns
+// an error: log failures are logged but must not fail the SSH session.
+//
+// The buffer is what a live reader is served from until the part is stored, so
+// storing it is not a tidiness: it is what bounds the memory a stage costs and
+// what a reader in another process sees.
 func (lw *LogWriter) Write(p []byte) (int, error) {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()
@@ -235,36 +225,37 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 	if lw.redact != nil {
 		p = []byte(lw.redact(string(p)))
 	}
-	// The spool takes every byte (within its own cap, which keeps the end);
-	// the stored chunks keep their head and their end, and give up what is
-	// between them once they run out of room.
-	lw.spool.Write(p)
-
-	n := len(p)
-	lw.written += int64(n)
-	if !lw.truncat && lw.written > lw.maxStored {
-		// The stored copy has run out of room. What it holds between the
-		// beginning and this point is the middle of a long log — the part a
-		// reader can live without, and the part the marker is about to
-		// announce — so it goes back now, and the marker takes its place:
-		// the beginning, one line saying the middle is missing, then the
-		// newest output from here on.
-		lw.truncat = true
-		lw.flushLocked()
-		lw.dropStoredLocked(len(lw.stored))
-		marker := fmt.Sprintf("\n… log truncated (exceeded %s); download the full log …\n", bytesLabel(lw.maxStored))
-		lw.buf = append(lw.buf, marker...)
-		if idx := lw.flushLocked(); idx >= 0 {
-			lw.stored[idx].marker = true
+	// Give the buffer its chance to drain before deciding whether there is
+	// room: a backend that has come back is used again by this very write, so
+	// a buffer that once reached its ceiling is not stuck holding it forever.
+	lw.drainLocked()
+	// The parts are not being stored (a backend that is down, or a store
+	// without one) and the buffer is at its ceiling. Refusing the output is
+	// the only thing left that keeps a runaway stage from taking the server's
+	// memory with it — and it is never silent.
+	if int64(len(lw.buf)) >= maxBufferParts*lw.partBytes {
+		if !lw.overflow {
+			lw.overflow = true
+			log.Printf("tasklog: task %d attempt %d: refusing output past %s in memory: the log parts are not being stored",
+				lw.taskID, lw.attempt, bytesLabel(maxBufferParts*lw.partBytes))
 		}
+		return len(p), nil
 	}
 	lw.buf = append(lw.buf, p...)
-	if len(lw.buf) >= flushBytes {
-		if lw.flushLocked() >= 0 {
-			lw.pruneLocked()
+	lw.drainLocked()
+	return len(p), nil
+}
+
+// drainLocked stores as many full parts as the buffer holds, and stops at the
+// first upload that stores nothing: the bytes stay in the buffer (and the
+// offset in the part's name is still where the stream is), so retrying the
+// same bytes would spin. Callers hold mu.
+func (lw *LogWriter) drainLocked() {
+	for int64(len(lw.buf)) >= lw.partBytes {
+		if !lw.uploadLocked(int(lw.partBytes)) {
+			return
 		}
 	}
-	return n, nil
 }
 
 // setCloseHook registers a function to run once, after Close has finished.
@@ -276,8 +267,8 @@ func (lw *LogWriter) setCloseHook(fn func()) {
 	lw.onClose = fn
 }
 
-// Close flushes the remaining buffer, stops the background timer and uploads
-// the run's complete log.
+// Close stores whatever is still buffered and stops the writer: once it
+// returns, the parts hold the stage's whole log.
 func (lw *LogWriter) Close() {
 	lw.mu.Lock()
 	if lw.closed {
@@ -285,248 +276,135 @@ func (lw *LogWriter) Close() {
 		return
 	}
 	lw.closed = true
-	if lw.timer != nil {
-		lw.timer.Stop()
-	}
-	lw.flushLocked()
-	sp := lw.spool
+	lw.uploadLocked(len(lw.buf))
 	hook := lw.onClose
 	lw.onClose = nil
-	// Dropped under the lock, before the upload: a reader that asks for the
-	// tail afterwards gets nothing rather than a file that is being removed.
-	lw.spool = nil
 	lw.mu.Unlock()
-
-	// Outside the lock: the upload talks to object storage, and nothing will
-	// write to the spool again anyway.
-	lw.uploadFullLog(sp)
 	if hook != nil {
 		hook()
 	}
 }
 
-// SnapshotLog copies the stage's output so far into a reader the caller closes
-// (which removes the copy), with its length. It is what a download of a log
-// that is still being written is served from: the complete output up to this
-// moment, where the stored chunks hold only its beginning and its end.
-//
-// It reports false when there is nothing to serve — no spool (it never opened,
-// or Close has taken it away), an empty log, or a failed copy.
-func (lw *LogWriter) SnapshotLog() (io.ReadCloser, int64, bool) {
-	lw.mu.Lock()
-	defer lw.mu.Unlock()
-	sp := lw.spool
-	if sp == nil {
-		return nil, 0, false
-	}
-	size := sp.Size()
-	if size == 0 {
-		return nil, 0, false
-	}
-	rc, n, err := sp.Snapshot()
-	if err != nil {
-		log.Printf("tasklog: task %d attempt %d: snapshot the live log: %v", lw.taskID, lw.attempt, err)
-		return nil, 0, false
-	}
-	return rc, n, true
-}
-
-// Flush stores any buffered output immediately, without closing the writer
-// (called before the task outcome is derived from the log).
+// Flush stores what is buffered now, without closing the writer (called before
+// the stage's outcome is derived, so the run that reports it describes a log
+// that is already complete).
 func (lw *LogWriter) Flush() {
-	lw.mu.Lock()
-	defer lw.mu.Unlock()
-	lw.flushLocked()
-}
-
-// Tail returns the last n bytes of the stage's output — what a reader that
-// wants its outcome asks for. It reads the spool, not the stored chunks, so a
-// stage that ran past the stored cap still yields the output it ended with
-// (the stored tail is then a truncation marker). It returns "" when no spool
-// is available (it never was, or Close has already taken it away), and the
-// caller falls back to the stored chunks.
-func (lw *LogWriter) Tail(n int) string {
-	lw.mu.Lock()
-	defer lw.mu.Unlock()
-	return lw.spool.Tail(n)
-}
-
-// uploadFullLog stores the stage's complete output as its run's log object and
-// records the key on the run. Every failure is logged and swallowed: the
-// stored chunks are the log of record whenever this does not work, and a
-// stage's outcome never depends on the network.
-//
-// It is always called with the spool the writer stopped using, and owns
-// closing it (which removes the file).
-func (lw *LogWriter) uploadFullLog(sp *logSpool) {
-	if sp == nil {
-		return
-	}
-	defer func() {
-		if err := sp.Close(); err != nil {
-			log.Printf("tasklog: task %d attempt %d: remove the log spool: %v", lw.taskID, lw.attempt, err)
-		}
-	}()
-	if sp.broken() || sp.Size() == 0 || !lw.ownLog {
-		return
-	}
-	objs := lw.store.Objects()
-	if objs == nil {
-		// Object storage is mandatory in a deployment, but a store opened
-		// without one (the adduser path, most unit tests) still runs
-		// stages — with the chunks as the only copy.
-		return
-	}
-	runID := lw.runID
-	if runID == 0 {
-		// The run row is created with the attempt, which may have happened
-		// after this writer was constructed.
-		if run, err := lw.store.FindTaskRun(lw.taskID, lw.attempt); err == nil {
-			runID = run.ID
-		}
-	}
-	if runID == 0 {
-		return
-	}
-
-	key := storage.ArtifactKey(objs.KeyPrefix(), runID, store.ArtifactKindLog, fullLogName, 0)
-	size := sp.Size()
-	ctx, cancel := context.WithTimeout(context.Background(), logPutTimeout)
-	defer cancel()
-	if _, err := objs.PutStream(ctx, key, sp.Reader(), size); err != nil {
-		log.Printf("tasklog: task %d attempt %d: upload the full log: %v", lw.taskID, lw.attempt, err)
-		return
-	}
-	ok, err := lw.store.SetRunLogObject(runID, key, size)
-	if err != nil {
-		log.Printf("tasklog: task %d attempt %d: record the full log on run %d: %v", lw.taskID, lw.attempt, runID, err)
-		return
-	}
-	if !ok {
-		// The run is gone (a re-dispatch replaced it while this stage was
-		// finishing): nothing will ever reference the object, so drop it
-		// now rather than leaving it to the sweep.
-		if err := objs.Delete(ctx, key); err != nil {
-			log.Printf("tasklog: task %d attempt %d: remove the unreferenced full log %s: %v", lw.taskID, lw.attempt, key, err)
-		}
-	}
-}
-
-// flushLocked stores the buffered bytes as the next chunk. Callers hold mu.
-//
-// It returns the chunk's index in the stored (prunable) list, or -1 when it
-// stored nothing or the chunk belongs to the head region — which is never
-// given back, so its caller has nothing to mark.
-func (lw *LogWriter) flushLocked() int {
-	if len(lw.buf) == 0 {
-		lw.lastFlush = time.Now()
-		return -1
-	}
-	content := string(lw.buf)
-	n := int64(len(content))
-	lw.buf = lw.buf[:0]
-	lw.seq++
-	if err := lw.store.AppendTaskLog(&store.TaskLog{
-		TaskID: lw.taskID, Attempt: lw.attempt, RunID: lw.runID,
-		Seq: lw.seq, Content: content,
-	}); err != nil {
-		// A failed chunk is dropped (with its sequence number) — the next
-		// chunk still lands; log persistence must never kill a task.
-		lw.seq--
-		log.Printf("tasklog: append task %d attempt %d seq %d: %v", lw.taskID, lw.attempt, lw.seq+1, err)
-		return -1
-	}
-	lw.lastFlush = time.Now()
-	lw.kept += n
-	if lw.headBytes < lw.headBudget() {
-		lw.headBytes += n
-		return -1
-	}
-	lw.stored = append(lw.stored, chunkRef{seq: lw.seq, n: n})
-	return len(lw.stored) - 1
-}
-
-// pruneLocked gives the cap back: it drops the oldest stored chunks, never the
-// head region and never the marker, until the stored copy fits again. What a
-// reader loses is the middle of a log that ran past the cap — the newest
-// output keeps arriving, which is the point. Callers hold mu.
-//
-// Removing a chunk is invisible to a reader: a poll asks for sequences past
-// the last one it was given, and the sequences dropped here are always behind
-// every cursor that has been served.
-func (lw *LogWriter) pruneLocked() {
-	var (
-		victims []chunkRef
-		freed   int64
-	)
-	// The loop measures what dropping the victims collected so far would
-	// leave, not what is stored right now: kept only shrinks once the delete
-	// has actually happened.
-	for lw.kept-freed > lw.maxStored {
-		idx := -1
-		// The newest chunk always stays: it is where the writer's sequence
-		// continues, and a reader must never be shown the log ending before
-		// the output the stage has already written.
-		for i := 0; i < len(lw.stored)-1; i++ {
-			if !lw.stored[i].marker {
-				idx = i
-				break
-			}
-		}
-		if idx < 0 {
-			break
-		}
-		victims = append(victims, lw.stored[idx])
-		freed += lw.stored[idx].n
-		lw.stored = append(lw.stored[:idx:idx], lw.stored[idx+1:]...)
-	}
-	lw.dropLocked(victims)
-}
-
-// dropStoredLocked gives back the first n stored chunks: the middle of a log
-// that has just run out of room, which the marker takes the place of.
-func (lw *LogWriter) dropStoredLocked(n int) {
-	if n > len(lw.stored) {
-		n = len(lw.stored)
-	}
-	victims := append([]chunkRef(nil), lw.stored[:n]...)
-	lw.stored = append([]chunkRef(nil), lw.stored[n:]...)
-	lw.dropLocked(victims)
-}
-
-// dropLocked deletes stored chunks from the database. The accounting follows
-// the database, never the other way round: a failed delete puts the chunks
-// back where they came from, so the next flush tries again and the cap is
-// measured against what is really stored. Callers hold mu.
-func (lw *LogWriter) dropLocked(victims []chunkRef) {
-	if len(victims) == 0 {
-		return
-	}
-	var freed int64
-	seqs := make([]int, 0, len(victims))
-	for _, v := range victims {
-		seqs = append(seqs, v.seq)
-		freed += v.n
-	}
-	if err := lw.store.DeleteTaskLogChunks(lw.taskID, lw.attempt, seqs); err != nil {
-		lw.stored = append(append([]chunkRef(nil), victims...), lw.stored...)
-		log.Printf("tasklog: give back %d chunk(s) of task %d attempt %d: %v", len(seqs), lw.taskID, lw.attempt, err)
-		return
-	}
-	lw.kept -= freed
-}
-
-// tick is the background flush; it re-arms until closed.
-func (lw *LogWriter) tick() {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()
 	if lw.closed {
 		return
 	}
-	if time.Since(lw.lastFlush) >= flushInterval {
-		lw.flushLocked()
+	lw.uploadLocked(len(lw.buf))
+}
+
+// Tail returns the last n bytes of the stage's output — what a reader that
+// wants its outcome asks for (the summary line, the last error of a failed
+// command). The newest output is in memory, so this answers without object
+// storage whenever the buffer covers it; otherwise the last stored part
+// supplies the rest (one part is as far back as it reads: the tail is bounded
+// work, not a read of the whole log). It returns "" for a writer that has
+// produced nothing.
+func (lw *LogWriter) Tail(n int) string {
+	lw.mu.Lock()
+	if n <= 0 {
+		lw.mu.Unlock()
+		return ""
 	}
-	lw.timer = time.AfterFunc(flushInterval, lw.tick)
+	if len(lw.buf) >= n {
+		out := string(lw.buf[len(lw.buf)-n:])
+		lw.mu.Unlock()
+		return out
+	}
+	buffered := string(lw.buf)
+	var last store.LogPart
+	havePart := len(lw.parts) > 0
+	if havePart {
+		last = lw.parts[len(lw.parts)-1]
+	}
+	objs := lw.objs
+	lw.mu.Unlock()
+
+	if !havePart || objs == nil {
+		// Nothing but the buffer: either the log is shorter than one part, or
+		// the parts are not being stored at all.
+		return buffered
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), logPutTimeout)
+	defer cancel()
+	data, err := objs.Get(ctx, last.Key)
+	if err != nil {
+		log.Printf("tasklog: task %d attempt %d: read the last log part %s: %v", lw.taskID, lw.attempt, last.Key, err)
+		return buffered
+	}
+	need := n - len(buffered)
+	if need >= len(data) {
+		return string(data) + buffered
+	}
+	return string(data[len(data)-need:]) + buffered
+}
+
+// uploadLocked stores the first n bytes of the buffer as one part, and reports
+// whether they left the buffer. Callers hold mu.
+//
+// A failed upload leaves the bytes where they are: the next attempt stores them
+// together with whatever arrived since, and the offset in the part's name is
+// still where the stream is. The run row follows the store — it is updated only
+// once the object is in — so a reader never goes looking for a part that is not
+// there.
+func (lw *LogWriter) uploadLocked(n int) bool {
+	if n <= 0 {
+		return false
+	}
+	if lw.objs == nil || lw.runID == 0 || lw.orphaned {
+		return false // no backend to store into, or nothing to store for: the log stays in memory
+	}
+	if n > len(lw.buf) {
+		n = len(lw.buf)
+	}
+	key := storage.LogKey(lw.objs.KeyPrefix(), lw.runID, lw.base)
+	ctx, cancel := context.WithTimeout(context.Background(), logPutTimeout)
+	defer cancel()
+	if _, err := lw.objs.Put(ctx, key, lw.buf[:n]); err != nil {
+		log.Printf("tasklog: task %d attempt %d: store the log part at %d: %v", lw.taskID, lw.attempt, lw.base, err)
+		return false
+	}
+	lw.parts = append(lw.parts, store.LogPart{Key: key, Start: lw.base, Size: int64(n)})
+	lw.base += int64(n)
+	lw.overflow = false
+	// The buffer gives those bytes back: object storage keeps the log now, and
+	// the writer's memory only has to hold what is not stored yet.
+	copy(lw.buf, lw.buf[n:])
+	lw.buf = lw.buf[:len(lw.buf)-n]
+
+	ok, err := lw.store.SetRunLogPrefix(lw.runID, lw.prefix, lw.base)
+	if err != nil {
+		log.Printf("tasklog: task %d attempt %d: record the log prefix on run %d: %v",
+			lw.taskID, lw.attempt, lw.runID, err)
+		return true // the bytes are stored; only the run's pointer lagged
+	}
+	if !ok {
+		log.Printf("tasklog: task %d attempt %d: run %d is gone; its log stays in memory",
+			lw.taskID, lw.attempt, lw.runID)
+		lw.orphaned = true
+	}
+	return true
+}
+
+// bytesLabel renders a byte count for a human reader (one decimal).
+func bytesLabel(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	value := float64(n)
+	for _, u := range units {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.1f %s", value, u)
+		}
+	}
+	return fmt.Sprintf("%.1f PiB", value)
 }
 
 // Compile-time interface checks.

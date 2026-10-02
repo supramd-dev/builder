@@ -459,38 +459,18 @@ func (s *Service) fetchArtifactFile(ctx context.Context, h SSHHost, rc *rootCont
 const logSummaryTailBytes = 256 * 1024
 
 // stageOutput returns the text a stage's summary is derived from: the end of
-// the writer's output, read from its spool. The spool holds the complete log
-// (its end always survives its cap), where the stored chunks stop at their own
-// cap and end in a truncation marker — so a stage that printed 30 MiB and then
-// failed would otherwise have its outcome derived from no output at all. The
-// stored chunks remain the fallback for when there is no spool.
+// the writer's output, whatever the log's length. A stage that printed 30 MiB
+// and then failed must still have its outcome derived from what it ended with,
+// which is why this reads the tail and not the head.
 //
-// It reads the end, not the beginning: a summary is the last thing a stage
-// prints (see ExtractSummary, which takes the last match), so a window at the
-// head of a long log would miss it.
+// The end, not the beginning: a summary is the last thing a stage prints (see
+// ExtractSummary, which takes the last match), so a window at the head of a
+// long log would miss it.
 func (s *Service) stageOutput(task *store.Task, logw *LogWriter) string {
-	if out := logw.Tail(logSummaryTailBytes); out != "" {
-		return out
-	}
-	return s.readLogTail(task)
-}
-
-// readLogTail re-reads the persisted log tail of the task's current attempt
-// (the LogWriter already closed by defer ordering — read what landed) for
-// summary extraction. It reads the end of the log, not its beginning: the
-// summary line is the last thing a stage prints, and a long stage's output
-// runs past the page size ReadTaskLogs returns, so reading from zero would
-// derive the summary from the head of a log whose outcome is at its tail.
-func (s *Service) readLogTail(task *store.Task) string {
-	logs, err := s.Store.ReadTaskLogTail(task.ID, task.Attempts)
-	if err != nil {
+	if logw == nil {
 		return ""
 	}
-	var all string
-	for _, l := range logs {
-		all += l.Content
-	}
-	return all
+	return logw.Tail(logSummaryTailBytes)
 }
 
 // finishStage records one real stage's attempt: it writes the attempt's run

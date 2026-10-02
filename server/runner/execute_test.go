@@ -401,11 +401,7 @@ func TestExecuteStageArtifactFileMissing(t *testing.T) {
 		t.Errorf("no artifact should be stored: %+v", artifacts)
 	}
 	// The stage log mentions the fetch failure.
-	logs, _ := s.ReadTaskLogs(stage.ID, stage.Attempts, 0)
-	var all string
-	for _, l := range logs {
-		all += l.Content
-	}
+	all := storedLog(t, s, stage, stage.Attempts)
 	if !strings.Contains(all, "artifact build/test_detail.xml") {
 		t.Errorf("log should mention the artifact file: %q", tailLine(all, 3))
 	}
@@ -432,9 +428,8 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 		t.Errorf("clone remote dir wrong: %v", cloner.remoteDirs)
 	}
 	// Clone log was persisted.
-	logs, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
-	if len(logs) == 0 {
-		t.Error("clone task should have log chunks")
+	if storedLog(t, s, cloneTask, cloneTask.Attempts) == "" {
+		t.Error("clone task should have a stored log")
 	}
 
 	// 2. build (dependencies satisfied now)
@@ -829,8 +824,8 @@ func TestRedeployRequeuesGraphInPlace(t *testing.T) {
 	if err := svc.ExecuteTask(context.Background(), cloneTask); err != nil {
 		t.Fatal(err)
 	}
-	logsBefore, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
-	if len(logsBefore) == 0 {
+	logsBefore := storedLog(t, s, cloneTask, cloneTask.Attempts)
+	if logsBefore == "" {
 		t.Fatal("precondition: clone log exists")
 	}
 
@@ -860,11 +855,11 @@ func TestRedeployRequeuesGraphInPlace(t *testing.T) {
 	if again.Attempts != 2 || again.Status != store.StatusPending {
 		t.Errorf("re-armed clone: %+v", again)
 	}
-	if logs, _ := s.ReadTaskLogs(cloneTask.ID, 1, 0); len(logs) != len(logsBefore) {
-		t.Errorf("the first attempt's log should be kept: %d chunks, want %d", len(logs), len(logsBefore))
+	if kept := storedLog(t, s, cloneTask, 1); kept != logsBefore {
+		t.Errorf("the first attempt's log should be kept: %d bytes, want %d", len(kept), len(logsBefore))
 	}
-	if n, _ := s.MaxTaskLogSeq(cloneTask.ID, 2); n != 0 {
-		t.Errorf("the fresh attempt should start with an empty log, got %d chunks", n)
+	if fresh := storedLog(t, s, cloneTask, 2); fresh != "" {
+		t.Errorf("the fresh attempt should start with an empty log, got %q", fresh)
 	}
 	_ = cloner
 }
@@ -884,11 +879,7 @@ func TestExecuteCaseRunsPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The clone log warns: the fixture environment has no env script.
-	logs, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
-	var cloneLog string
-	for _, l := range logs {
-		cloneLog += l.Content
-	}
+	cloneLog := storedLog(t, s, cloneTask, cloneTask.Attempts)
 	if !strings.Contains(cloneLog, "no env script") {
 		t.Errorf("clone log should warn about the missing env script: %q", cloneLog)
 	}
@@ -1037,11 +1028,7 @@ func TestExecuteEnvScriptWrittenAndSourced(t *testing.T) {
 	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
 		t.Fatal(err)
 	}
-	logs, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
-	var cloneLog string
-	for _, l := range logs {
-		cloneLog += l.Content
-	}
+	cloneLog := storedLog(t, s, cloneTask, cloneTask.Attempts)
 	if !strings.Contains(cloneLog, "wrote env script md-builder-env-") {
 		t.Errorf("clone log should record the env script write: %q", cloneLog)
 	}
@@ -1229,10 +1216,14 @@ func TestExecuteStageRetriesTheClosingWrite(t *testing.T) {
 }
 
 // TestExecuteStageSummarizesTheLogTail: a stage's summary is read out of the
-// END of its log — the summary line is the last thing the command prints, and
-// a log longer than one read page (store.logReadLimit, 1000 chunks) runs past
-// what a single read returns. Reading from the head would summarize a stage
-// from output written long before its result.
+// END of its log — the summary line is the last thing the command prints, and a
+// log longer than the tail the summary is read from (logSummaryTailBytes) is
+// not read from its beginning to find it. Reading the head would summarize a
+// stage from output written long before its result.
+//
+// It also pins what a restarted stage's log looks like: this attempt already has
+// stored output (a previous process wrote it), so the execution continues after
+// it rather than starting over.
 func TestExecuteStageSummarizesTheLogTail(t *testing.T) {
 	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
 	ctx := context.Background()
@@ -1244,14 +1235,18 @@ func TestExecuteStageSummarizesTheLogTail(t *testing.T) {
 	if err != nil || build == nil || build.Kind != store.TaskKindBuild {
 		t.Fatalf("claim build: %v %v", build, err)
 	}
-	// Noise past the size of one read page, then the stage's own output.
-	for i := 1; i <= 1100; i++ {
-		if err := s.AppendTaskLog(&store.TaskLog{
-			TaskID: build.ID, Attempt: build.Attempts, Seq: i, Content: fmt.Sprintf("noise %d\n", i),
-		}); err != nil {
-			t.Fatal(err)
-		}
+	// More output than the summary is read from, stored by whoever ran this
+	// attempt before.
+	var noise strings.Builder
+	for i := 1; i <= 30000; i++ {
+		fmt.Fprintf(&noise, "noise %d\n", i)
 	}
+	if noise.Len() <= logSummaryTailBytes {
+		t.Fatalf("the test's noise (%d bytes) must be longer than the summary tail (%d)",
+			noise.Len(), logSummaryTailBytes)
+	}
+	storeParts(t, s, build, noise.String())
+
 	exec.outcome["cmake -DEXEC=1 ."] = 0
 	exec.output["cmake -DEXEC=1 ."] = "compiling…\nMD-BUILDER-SUMMARY: build ok\n"
 
@@ -1264,5 +1259,14 @@ func TestExecuteStageSummarizesTheLogTail(t *testing.T) {
 	}
 	if strings.Contains(run.Summary, "noise") {
 		t.Errorf("build summary = %q, want the tail of the log, not its head", run.Summary)
+	}
+	// Nothing was written over: the log is the previous output, the seam, and
+	// this execution's own.
+	all := storedLog(t, s, build, build.Attempts)
+	if !strings.HasPrefix(all, noise.String()) {
+		t.Errorf("the log no longer begins with what was already stored: %q", all[:80])
+	}
+	if !strings.Contains(all, "MD-BUILDER-SUMMARY: build ok") {
+		t.Error("the log lost this execution's output")
 	}
 }

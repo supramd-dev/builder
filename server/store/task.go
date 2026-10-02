@@ -899,20 +899,10 @@ func skipTasksTx(tx *gorm.DB, tasks []*Task, reason string) error {
 			}).Error; err != nil {
 			return err
 		}
-		// The reason goes into the log as well: the stage never ran, and a log
-		// that is empty with no explanation reads as a broken task rather than
-		// as a stage an upstream failure stopped.
-		var seq int
-		if err := tx.Model(&TaskLog{}).Where("task_id = ? AND attempt = ?", cur.ID, cur.Attempts).
-			Select("COALESCE(MAX(seq), 0)").Scan(&seq).Error; err != nil {
-			return err
-		}
-		if err := tx.Create(&TaskLog{
-			TaskID: cur.ID, Attempt: cur.Attempts, Seq: seq + 1, RunID: run.ID,
-			Content: "skipped: " + reason + "\n",
-		}).Error; err != nil {
-			return err
-		}
+		// The reason is the node's and the run's summary and nothing else: a
+		// stage that never ran produced no output, so it has no log (the run's
+		// log is what the runner writes, and no runner ever saw this attempt).
+		// The task page shows the summary beside the empty log.
 	}
 	return nil
 }
@@ -1325,13 +1315,6 @@ func (s *Store) DeleteTasksForEnvironment(envID int64) error {
 		}
 		if err := tx.Where("environment_id = ?", envID).Delete(&TestRun{}).Error; err != nil {
 			return err
-		}
-		if len(taskIDs) > 0 {
-			for _, chunk := range chunkIDs(taskIDs, 500) {
-				if err := tx.Where("task_id IN ?", chunk).Delete(&TaskLog{}).Error; err != nil {
-					return err
-				}
-			}
 		}
 		return tx.Where("environment_id = ?", envID).Delete(&Task{}).Error
 	})

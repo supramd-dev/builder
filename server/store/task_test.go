@@ -663,8 +663,8 @@ func TestSkipTasksLeavesAClaimedNodeAlone(t *testing.T) {
 	if run.Status != StatusRunning {
 		t.Errorf("its attempt must stay open for the report: %+v", run)
 	}
-	if logs, err := s.ReadTaskLogs(unit.ID, got.Attempts, 0); err != nil || len(logs) != 0 {
-		t.Errorf("no skip reason should have been logged: %+v (err %v)", logs, err)
+	if run.LogPrefix != "" || run.LogBytes != 0 {
+		t.Errorf("no skip reason should have been logged: %+v", run)
 	}
 }
 
@@ -1030,8 +1030,12 @@ func TestRedeployRootTaskRebuilds(t *testing.T) {
 	for _, task := range []*Task{subs[0], subs[1], subs[2], cases[0], cases[1]} {
 		reportTask(t, s, task.ID, StatusPassed, "ok")
 	}
-	if err := s.AppendTaskLog(&TaskLog{TaskID: subs[0].ID, Attempt: 1, Seq: 1, Content: "clone: 2 repositories\n"}); err != nil {
+	firstRun, err := s.FindTaskRun(subs[0].ID, 1)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if ok, err := s.SetRunLogPrefix(firstRun.ID, "runs/1/log/", 24); err != nil || !ok {
+		t.Fatalf("record the attempt's log: ok=%t err=%v", ok, err)
 	}
 	if before := reloadTask(t, s, root.ID); before.Status != StatusPassed {
 		t.Fatalf("the finished graph should be green: %+v", before)
@@ -1101,14 +1105,13 @@ func TestRedeployRootTaskRebuilds(t *testing.T) {
 	if runs[1].Attempt != 1 || runs[1].Status != StatusPassed {
 		t.Errorf("the first attempt keeps its outcome: %+v", runs[1])
 	}
-	// And so does the first attempt's log: a retry is a new attempt, not a
-	// wipe.
-	logs, err := s.ReadTaskLogs(subs[0].ID, 1, 0)
-	if err != nil || len(logs) != 1 || logs[0].Content != "clone: 2 repositories\n" {
-		t.Errorf("the first attempt's log should survive: %+v (err %v)", logs, err)
+	// And so does the first attempt's log: the run keeps the reference its
+	// parts live under, while the new attempt starts with none.
+	if kept, err := s.GetTestRun(firstRun.ID); err != nil || kept.LogPrefix != "runs/1/log/" || kept.LogBytes != 24 {
+		t.Errorf("the first attempt's log should survive: %+v (err %v)", kept, err)
 	}
-	if logs, err := s.ReadTaskLogs(subs[0].ID, 2, 0); err != nil || len(logs) != 0 {
-		t.Errorf("the new attempt starts with no output: %+v (err %v)", logs, err)
+	if fresh, err := s.GetTestRun(runs[0].ID); err != nil || fresh.LogPrefix != "" || fresh.LogBytes != 0 {
+		t.Errorf("the new attempt starts with no output: %+v (err %v)", fresh, err)
 	}
 }
 
@@ -1122,8 +1125,8 @@ func TestUpsertTaskGraphRetiresDroppedNodes(t *testing.T) {
 	unit := subs[2]
 
 	run := reportTask(t, s, unit.ID, StatusPassed, "12/12 tests passed")
-	if err := s.AppendTaskLog(&TaskLog{TaskID: unit.ID, Attempt: run.Attempt, Seq: 1, RunID: run.ID, Content: "PASS\n"}); err != nil {
-		t.Fatal(err)
+	if ok, err := s.SetRunLogPrefix(run.ID, "runs/9/log/", 5); err != nil || !ok {
+		t.Fatalf("record the attempt's log: ok=%t err=%v", ok, err)
 	}
 
 	// The yaml lost its unit stage: dispatch the nodes that remain.
@@ -1144,8 +1147,8 @@ func TestUpsertTaskGraphRetiresDroppedNodes(t *testing.T) {
 	if runs, err := s.ListTaskRuns(unit.ID); err != nil || len(runs) != 1 || runs[0].Status != StatusPassed {
 		t.Errorf("a retired node keeps its runs: %+v (err %v)", runs, err)
 	}
-	if logs, err := s.ReadTaskLogs(unit.ID, 1, 0); err != nil || len(logs) != 1 {
-		t.Errorf("a retired node keeps its logs: %+v (err %v)", logs, err)
+	if kept, err := s.GetTestRun(run.ID); err != nil || kept.LogPrefix != "runs/9/log/" {
+		t.Errorf("a retired node keeps its logs: %+v (err %v)", kept, err)
 	}
 
 	// But it is out of the current graph: not listed as active, not listed as
@@ -1320,8 +1323,8 @@ func TestDeleteTasksForEnvironment(t *testing.T) {
 	clone := subs[0]
 
 	run := reportTask(t, s, clone.ID, StatusPassed, "ok")
-	if err := s.AppendTaskLog(&TaskLog{TaskID: clone.ID, Attempt: run.Attempt, Seq: 1, RunID: run.ID, Content: "log\n"}); err != nil {
-		t.Fatal(err)
+	if ok, err := s.SetRunLogPrefix(run.ID, "runs/3/log/", 4); err != nil || !ok {
+		t.Fatalf("record the attempt's log: ok=%t err=%v", ok, err)
 	}
 	if err := s.DeleteTasksForEnvironment(root.EnvironmentID); err != nil {
 		t.Fatal(err)
@@ -1339,9 +1342,8 @@ func TestDeleteTasksForEnvironment(t *testing.T) {
 	if _, err := s.GetTestRun(run.ID); !errors.Is(err, ErrTestRunNotFound) {
 		t.Errorf("the runs should be gone, got %v", err)
 	}
-	if logs, err := s.ReadTaskLogs(clone.ID, run.Attempt, 0); err != nil || len(logs) != 0 {
-		t.Errorf("the logs should be gone: %d (err %v)", len(logs), err)
-	}
+	// The log itself lives in object storage; what the database held is the
+	// reference on the run row, gone with the run (asserted above).
 	if artifacts, err := s.ListRunArtifacts(run.ID); err != nil || len(artifacts) != 0 {
 		t.Errorf("the artifacts should be gone: %d (err %v)", len(artifacts), err)
 	}

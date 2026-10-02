@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"log"
+	"path"
+	"strings"
 	"time"
 
 	"md-builder/server/storage"
@@ -14,7 +16,7 @@ import (
 // removed), and removing an object before that transaction commits would lose
 // data if it rolled back. Instead the database stays the index: every sweep
 // compares the bucket against the rows that reference objects — the artifact
-// rows and the runs' complete logs — and deletes what nothing references any
+// rows, and the runs' log prefixes — and deletes what nothing references any
 // more.
 
 // artifactGracePeriod protects a freshly written object. Uploads happen just
@@ -39,22 +41,33 @@ func (s *Store) SweepOrphanObjects(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	// Every key the database still references: the artifacts' objects and the
-	// runs' complete logs. Reading them in one query per owner keeps the sweep
-	// exact: it also reclaims the object of an artifact, or of a log, whose
-	// row was replaced by a newer report of the same run.
+	// Every key the database still references: the artifacts' objects, and the
+	// runs' logs. Reading them in one query per owner keeps the sweep exact: it
+	// also reclaims the object of an artifact, or of a log, whose row was
+	// replaced by a newer report of the same run.
 	var referenced []string
 	if err := s.DB.Model(&TestArtifact{}).Where("object_key <> ''").Pluck("object_key", &referenced).Error; err != nil {
 		return 0, err
 	}
-	var runLogs []string
-	if err := s.DB.Model(&TestRun{}).Where("log_object_key <> ''").Pluck("log_object_key", &runLogs).Error; err != nil {
-		return 0, err
-	}
-	referenced = append(referenced, runLogs...)
 	live := make(map[string]struct{}, len(referenced))
 	for _, key := range referenced {
 		live[key] = struct{}{}
+	}
+	// A run's log is a directory of parts, not one object, so it is kept by
+	// directory. What a run points at is normally the directory itself
+	// (".../log/"); a run whose log was written before it became parts points
+	// at the single object that holds all of it, so the directory that object
+	// sits in is what is kept — which keeps the object with it.
+	var logDirs []string
+	if err := s.DB.Model(&TestRun{}).Where("log_object_key <> ''").Pluck("log_object_key", &logDirs).Error; err != nil {
+		return 0, err
+	}
+	liveDirs := make(map[string]struct{}, len(logDirs))
+	for _, prefix := range logDirs {
+		if !strings.HasSuffix(prefix, "/") {
+			prefix = path.Dir(prefix) + "/"
+		}
+		liveDirs[prefix] = struct{}{}
 	}
 
 	cutoff := time.Now().Add(-artifactGracePeriod)
@@ -62,6 +75,9 @@ func (s *Store) SweepOrphanObjects(ctx context.Context) (int, error) {
 	for i := range listed {
 		obj := listed[i]
 		if _, ok := live[obj.Key]; ok {
+			continue
+		}
+		if _, ok := liveDirs[path.Dir(obj.Key)+"/"]; ok {
 			continue
 		}
 		if !obj.LastModified.IsZero() && obj.LastModified.After(cutoff) {
