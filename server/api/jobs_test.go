@@ -576,6 +576,30 @@ func TestTaskDetailAndLogs(t *testing.T) {
 		t.Errorf("full-log download Content-Length = %q, want %q", got, want)
 	}
 
+	// A stage that is still running has its complete log nowhere but the
+	// writer's spool — the object above only appears once the stage ends —
+	// so the download reads that, rather than the chunks, which hold only
+	// the log's beginning and its end by then.
+	svc := runner.NewService(s)
+	svc.LogLimits = runner.LogLimits{SpoolDir: t.TempDir()}
+	apiServer.SetRunner(svc)
+	live := svc.OpenLog(clone)
+	if _, err := live.Write([]byte("still running: step 7 of 9\n")); err != nil {
+		t.Fatal(err)
+	}
+	live.Flush()
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", clone.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("live log download: expected 200, got %d", rec.Code)
+	}
+	if got, want := rec.Body.String(), "still running: step 7 of 9\n"; got != want {
+		t.Errorf("live log download body = %q, want the stage's output so far (%q)", got, want)
+	}
+	if got, want := rec.Header().Get("Content-Length"), fmt.Sprint(len("still running: step 7 of 9\n")); got != want {
+		t.Errorf("live log download Content-Length = %q, want %q", got, want)
+	}
+	live.Close()
+
 	// An unknown task has no file to download.
 	rec = authed(http.MethodGet, "/api/tasks/99999/log/download")
 	if rec.Code != http.StatusNotFound {

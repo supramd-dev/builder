@@ -10,15 +10,21 @@ const LOG_PAGE = 1000
 // connection for ever. A finished attempt has no next tick, so it is read to
 // the end in one go (the log itself is capped server-side).
 const LOG_PAGES_PER_TICK = 20
+// How long a live view waits after a read finishes before reading again.
+const LOG_POLL_MS = 2000
 
 // TaskLogView shows one attempt's incremental log, polling with
 // after=lastSeq while the task may still write to it. Shared by the task
 // pipeline page (following a running stage) and the run detail page (a
 // finished stage's stdout, or an earlier attempt's).
 //
-// Exactly one reader runs at a time — the effect below is the only caller of
-// getTaskLogs — so a chunk is appended once: two pollers starting together
-// from the same sequence would each append the same page. A new taskId or
+// Exactly one read runs at a time: the next one is scheduled only once the
+// previous has finished, never by a bare interval that can fire a second
+// reader while the first is still working — two readers starting from the same
+// sequence would each append the same page, which is how the same output used
+// to show up twice. The cursor only ever moves forward, and a chunk is
+// appended only if it is past the last one rendered, so even a repeated read
+// cannot double up. A new taskId or
 // attempt is a new stream and resets what is rendered; the task finishing only
 // stops the timer, after one last read, so the lines written between the final
 // tick and the outcome still show up.
@@ -66,9 +72,13 @@ export default function TaskLogView({
 
   useEffect(() => {
     let stop = false
-    async function poll() {
+    let timer: number | undefined
+
+    // Reads one page at a time until the log is caught up (or a live tick has
+    // had its share of the connection).
+    async function read() {
       const maxPages = live ? LOG_PAGES_PER_TICK : Number.POSITIVE_INFINITY
-      for (let page = 0; page < maxPages; page++) {
+      for (let page = 0; page < maxPages && !stop; page++) {
         let res
         try {
           res = await getTaskLogs(taskId, lastSeq.current, showAttempt)
@@ -76,19 +86,29 @@ export default function TaskLogView({
           return // transient; the next tick retries
         }
         if (stop) return
-        lastSeq.current = res.lastSeq
-        if (res.chunks.length === 0) return
-        const joined = res.chunks.map((c) => c.content).join('')
-        setChunks((cur) => [...cur, joined])
+        // Only what is past the last line rendered. The cursor moves forward
+        // only, so a read that raced another cannot pull it back — which is
+        // what made the next tick fetch, and append, a page all over again.
+        const fresh = res.chunks.filter((c) => c.seq > lastSeq.current)
+        if (res.lastSeq > lastSeq.current) lastSeq.current = res.lastSeq
+        if (fresh.length > 0) {
+          const joined = fresh.map((c) => c.content).join('')
+          setChunks((cur) => [...cur, joined])
+        }
         if (res.chunks.length < LOG_PAGE) return
       }
     }
-    poll()
-    if (!live) return () => { stop = true }
-    const timer = setInterval(poll, 2000)
+
+    async function tick() {
+      await read()
+      if (stop || !live) return
+      timer = window.setTimeout(tick, LOG_POLL_MS)
+    }
+    tick()
+
     return () => {
       stop = true
-      clearInterval(timer)
+      if (timer !== undefined) window.clearTimeout(timer)
     }
   }, [taskId, showAttempt, live])
 

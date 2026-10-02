@@ -220,6 +220,67 @@ func (sp *logSpool) Reader() io.Reader {
 	return io.MultiReader(readers...)
 }
 
+// Snapshot copies the log assembled so far into a new temp file, positioned at
+// its start, with its length: what a reader that cannot wait for the stage to
+// end — a download of a log that is still being written — reads instead. It
+// takes a copy rather than handing out the spool because the ring is rewritten
+// in place as the stage writes, so reading it directly would give out torn
+// bytes. Closing the returned reader removes the copy.
+func (sp *logSpool) Snapshot() (io.ReadCloser, int64, error) {
+	if sp.broken() {
+		return nil, 0, sp.err
+	}
+	f, err := os.CreateTemp(filepath.Dir(sp.path), spoolPrefix+"snapshot-*.tmp")
+	if err != nil {
+		return nil, 0, err
+	}
+	n, err := sp.copyTo(f)
+	if err == nil {
+		_, err = f.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return nil, 0, fmt.Errorf("log spool %s: snapshot: %w", sp.path, err)
+	}
+	return snapshotFile{f}, n, nil
+}
+
+// snapshotFile is a snapshot the reader consumes and then throws away with the
+// file it lives in.
+type snapshotFile struct{ *os.File }
+
+func (s snapshotFile) Close() error {
+	err := s.File.Close()
+	if rmErr := os.Remove(s.File.Name()); err == nil {
+		err = rmErr
+	}
+	return err
+}
+
+// copyTo writes the assembled log to w, in order.
+func (sp *logSpool) copyTo(w io.Writer) (int64, error) {
+	var total int64
+	for _, p := range sp.pieces() {
+		var (
+			n   int64
+			err error
+		)
+		if p.text != "" {
+			var written int
+			written, err = io.WriteString(w, p.text)
+			n = int64(written)
+		} else {
+			n, err = io.Copy(w, io.NewSectionReader(sp.f, p.off, p.n))
+		}
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
 // Tail returns the last n bytes of the assembled log (fewer when it is
 // shorter) — what a reader that wants the stage's outcome asks for. It reads
 // the spool, not the stored chunks, so a capped stage still yields the output

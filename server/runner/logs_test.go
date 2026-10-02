@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,9 +58,15 @@ func TestLogWriterCapsHugeOutput(t *testing.T) {
 	s := openTestStore(t)
 	lw := NewLogWriter(s, logTask(7), LogLimits{})
 
-	// Far more than defaultMaxLogBytes: everything past the cap is dropped.
-	payload := strings.Repeat("x", 1<<20) // 1 MiB
-	for i := 0; i < defaultMaxLogBytes/(1<<20)+2; i++ {
+	// Far more than defaultMaxLogBytes: the beginning and the newest output
+	// are kept, the middle is given back as new output arrives. Every 1 MiB
+	// write ends in a tag naming it, so the test can say which parts survived.
+	// The extra 9 MiB past the cap refill the window after the crossing and
+	// then make it roll, which is the steady state of a stage that keeps
+	// writing.
+	const writes = defaultMaxLogBytes/(1<<20) + 9
+	for i := 0; i < writes; i++ {
+		payload := strings.Repeat("x", 1<<20-len(fmt.Sprintf("END-%03d\n", i))) + fmt.Sprintf("END-%03d\n", i)
 		if _, err := lw.Write([]byte(payload)); err != nil {
 			t.Fatal(err)
 		}
@@ -67,17 +74,174 @@ func TestLogWriterCapsHugeOutput(t *testing.T) {
 	lw.Close()
 
 	logs, _ := s.ReadTaskLogs(7, 1, 0)
-	var total int
-	var last string
+	var (
+		total int
+		all   strings.Builder
+	)
 	for _, l := range logs {
 		total += len(l.Content)
-		last = l.Content
+		all.WriteString(l.Content)
 	}
-	if total > defaultMaxLogBytes+200 {
-		t.Errorf("log not capped: %d bytes", total)
+	stored := all.String()
+
+	// The copy stays bounded — and by the whole cap, not by some fraction of
+	// it: the head region and the window over the end share it.
+	if total > defaultMaxLogBytes {
+		t.Errorf("stored log not capped: %d bytes", total)
 	}
-	if !strings.Contains(last, "log truncated") {
-		t.Errorf("truncation marker missing in last chunk %q", last[:min(80, len(last))])
+	if total < defaultMaxLogBytes/2 {
+		t.Errorf("stored log gave back too much: %d bytes", total)
+	}
+	// The stage's first output and its last are both there...
+	if !strings.HasPrefix(stored, "xxxx") || !strings.Contains(stored, "END-000\n") {
+		t.Error("the stored log lost its beginning")
+	}
+	if !strings.Contains(stored, fmt.Sprintf("END-%03d\n", writes-1)) {
+		t.Error("the stored log lost the newest output")
+	}
+	// ...the middle is not, and one marker says so...
+	if strings.Contains(stored, "END-003\n") {
+		t.Error("the stored log kept output the cap should have given back")
+	}
+	if n := strings.Count(stored, "log truncated"); n != 1 {
+		t.Errorf("stored log carries the truncation marker %d times, want 1", n)
+	}
+	// ...and the marker sits where the gap is, right after the beginning.
+	if head := strings.Index(stored, "log truncated"); head > storedHeadBytes+flushBytes {
+		t.Errorf("truncation marker at %d, want it at the end of the head region (%d)", head, storedHeadBytes)
+	}
+
+	// Sequence numbers stay monotonic and keep rising as the window rolls, so
+	// a reader following the log is never handed a sequence twice.
+	for i := 1; i < len(logs); i++ {
+		if logs[i].Seq <= logs[i-1].Seq {
+			t.Fatalf("sequence went backwards at %d: %d after %d", i, logs[i].Seq, logs[i-1].Seq)
+		}
+	}
+	if logs[0].Seq != 1 {
+		t.Errorf("first stored chunk is seq %d, want the log's first chunk (1)", logs[0].Seq)
+	}
+}
+
+// TestLogWriterFollowsPastTheCap is the property a live view depends on: a
+// reader that follows a stage keeps being handed its new output after the log
+// runs past the stored cap. Before the window rolled, the chunk stream stopped
+// at the cap, so the viewer's cursor never advanced again and the follow died
+// on the truncation marker — with the stage's last words, the ones that say
+// how it failed, never arriving.
+func TestLogWriterFollowsPastTheCap(t *testing.T) {
+	s := openTestStore(t)
+	limits := LogLimits{MaxStoredBytes: 8 * 1024, SpoolDir: t.TempDir()}
+	lw := NewLogWriter(s, logTask(followTaskID), limits)
+
+	// A reader polls the way the viewer does: after=<last seq it was given>.
+	cursor := 0
+	read := func() string {
+		t.Helper()
+		logs, err := s.ReadTaskLogs(followTaskID, 1, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out strings.Builder
+		for _, l := range logs {
+			out.WriteString(l.Content)
+			cursor = l.Seq
+		}
+		return out.String()
+	}
+
+	// Fill the cap and then some, reading every so often.
+	for i := 0; i < 40; i++ {
+		lw.Write([]byte(strings.Repeat("chatter\n", 200)))
+		read()
+	}
+
+	// The reader is caught up: the next output must reach it.
+	lw.Write([]byte("line after the cap\n"))
+	lw.Flush()
+	got := read()
+	if !strings.Contains(got, "line after the cap") {
+		t.Fatalf("a reader past the cap was not handed the newest output: %q", got)
+	}
+
+	// And it keeps arriving, one line at a time, with no repeats.
+	seen := map[string]bool{}
+	for i := 0; i < 20; i++ {
+		line := fmt.Sprintf("tick %d\n", i)
+		lw.Write([]byte(line))
+		lw.Flush()
+		got := read()
+		if got != line {
+			t.Fatalf("read after tick %d = %q, want exactly %q", i, got, line)
+		}
+		if seen[got] {
+			t.Fatalf("line %q delivered twice", got)
+		}
+		seen[got] = true
+	}
+	lw.Close()
+
+	// What the reader rendered is what a page opened now would show: the
+	// beginning, the marker, and the newest output.
+	full, err := s.ReadTaskLogs(followTaskID, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored strings.Builder
+	for _, l := range full {
+		stored.WriteString(l.Content)
+	}
+	if !strings.Contains(stored.String(), "tick 19") {
+		t.Error("stored log lost the newest output")
+	}
+	if !strings.Contains(stored.String(), "log truncated") {
+		t.Error("stored log lost the marker")
+	}
+}
+
+// TestLogWriterHandsOutTheLiveLog: a download of a stage that is still running
+// reads the writer's spool — the only complete copy at that moment — and stops
+// finding one once the stage has closed its writer.
+func TestLogWriterHandsOutTheLiveLog(t *testing.T) {
+	s := openTestStore(t)
+	svc := NewService(s)
+	svc.LogLimits = LogLimits{MaxStoredBytes: 8 * 1024, SpoolDir: t.TempDir()}
+	lw := svc.OpenLog(logTask(liveLogTaskID))
+
+	lw.Write([]byte("step 1\nstep 2\n"))
+	lw.Flush()
+
+	rc, size, ok := svc.LiveLog(liveLogTaskID, 1)
+	if !ok {
+		t.Fatal("no live log for a stage this process is running")
+	}
+	body, err := io.ReadAll(rc)
+	name := rc.Close() // closing removes the snapshot behind it
+	if err != nil {
+		t.Fatalf("read the live log: %v", err)
+	}
+	if name != nil {
+		t.Errorf("closing the live log: %v", name)
+	}
+	if string(body) != "step 1\nstep 2\n" {
+		t.Errorf("live log = %q", body)
+	}
+	if int64(len(body)) != size {
+		t.Errorf("live log size = %d, want the %d bytes it served", size, len(body))
+	}
+
+	// A task this process is not running has no live log.
+	if _, _, ok := svc.LiveLog(liveLogTaskID, 2); ok {
+		t.Error("a live log was offered for an attempt nobody is running")
+	}
+	if _, _, ok := svc.LiveLog(followTaskID, 1); ok {
+		t.Error("a live log was offered for a task nobody is running")
+	}
+
+	// Once the stage ends, the object takes over: the live log is gone.
+	lw.Close()
+	if _, _, ok := svc.LiveLog(liveLogTaskID, 1); ok {
+		t.Error("a closed writer is still offered as a live log")
 	}
 }
 
@@ -122,6 +286,8 @@ const (
 	tailTaskID      = 90005
 	fallbackTaskID  = 90006
 	noObjectsTaskID = 90007
+	followTaskID    = 90008
+	liveLogTaskID   = 90009
 )
 
 // createRun inserts the run row a full log hangs off (its object key lives on
@@ -331,8 +497,11 @@ func TestLogWriterTailSurvivesTheStoredCap(t *testing.T) {
 	for _, l := range logs {
 		stored.WriteString(l.Content)
 	}
-	if strings.Contains(stored.String(), "MD-BUILDER-SUMMARY") {
-		t.Error("the stored chunks unexpectedly hold the summary: the test no longer pins anything")
+	// Both copies keep the end: the viewer and the download read the stored
+	// chunks, so a reader that opens a capped log must find what the stage
+	// ended with there too — not only in the spool.
+	if !strings.Contains(stored.String(), "MD-BUILDER-SUMMARY") {
+		t.Error("the stored chunks lost the stage's last output")
 	}
 	if !strings.Contains(stored.String(), "log truncated") {
 		t.Errorf("stored log = %q, want the truncation marker", stored.String())

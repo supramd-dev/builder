@@ -36,6 +36,20 @@ func (s *Store) AppendTaskLog(log *TaskLog) error {
 // show the head of a long log and nothing else.
 const logReadLimit = 1000
 
+// DeleteTaskLogChunks removes the given sequences of one attempt's log. The
+// runner's writer calls it to give back the room a long log's middle occupies,
+// so the stored copy stays bounded while the newest output keeps arriving (see
+// runner.LogWriter): it never drops the beginning or the marker, and it drops
+// only sequences a reader has already been served — polls ask for the ones
+// past their cursor, so they never see a chunk disappear.
+func (s *Store) DeleteTaskLogChunks(taskID int64, attempt int, seqs []int) error {
+	if len(seqs) == 0 {
+		return nil
+	}
+	return s.DB.Where("task_id = ? AND attempt = ? AND seq IN ?", taskID, attempt, seqs).
+		Delete(&TaskLog{}).Error
+}
+
 // ReadTaskLogs returns log chunks of one attempt with Seq > afterSeq, in
 // order, at most logReadLimit of them: callers continue from the last Seq.
 func (s *Store) ReadTaskLogs(taskID int64, attempt, afterSeq int) ([]TaskLog, error) {

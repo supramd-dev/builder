@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -214,5 +215,56 @@ func TestReadTaskLogTailReturnsTheEnd(t *testing.T) {
 	// Another attempt's tail is its own.
 	if logs, err := s.ReadTaskLogTail(clone.ID, 2); err != nil || len(logs) != 0 {
 		t.Errorf("attempt 2 tail = %d logs err %v, want empty", len(logs), err)
+	}
+}
+
+// TestDeleteTaskLogChunks: the writer gives back the room a long log's middle
+// occupies, and it must take exactly what it asked for — another attempt's
+// chunks, and the sequences a reader has yet to be handed, are not its to
+// remove.
+func TestDeleteTaskLogChunks(t *testing.T) {
+	s := newTestTaskStore(t)
+	_, subs := seedTaskGraph(t, s, "logprune")
+	clone := subs[0]
+
+	for i := 1; i <= 5; i++ {
+		appendChunk(t, s, clone.ID, 1, i, fmt.Sprintf("attempt 1 line %d\n", i))
+	}
+	appendChunk(t, s, clone.ID, 2, 1, "attempt 2 line 1\n")
+	appendChunk(t, s, clone.ID, 2, 2, "attempt 2 line 2\n")
+
+	if err := s.DeleteTaskLogChunks(clone.ID, 1, []int{2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := s.ReadTaskLogs(clone.ID, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seqs []int
+	for _, l := range logs {
+		seqs = append(seqs, l.Seq)
+	}
+	if want := []int{1, 4, 5}; !slices.Equal(seqs, want) {
+		t.Errorf("attempt 1 left with seq %v, want %v", seqs, want)
+	}
+	// A reader that had been served up to 1 keeps reading from there: the
+	// chunks it is yet to see are all still present, in order.
+	rest, err := s.ReadTaskLogs(clone.ID, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) != 2 || rest[0].Seq != 4 {
+		t.Errorf("read after a prune = %+v, want the chunks past the cursor", rest)
+	}
+	// The other attempt is untouched.
+	if other, err := s.ReadTaskLogs(clone.ID, 2, 0); err != nil || len(other) != 2 {
+		t.Errorf("attempt 2 = %d chunks err %v, want 2", len(other), err)
+	}
+	// Nothing to delete is not an error, and neither is deleting twice.
+	if err := s.DeleteTaskLogChunks(clone.ID, 1, nil); err != nil {
+		t.Errorf("empty delete: %v", err)
+	}
+	if err := s.DeleteTaskLogChunks(clone.ID, 1, []int{2, 3}); err != nil {
+		t.Errorf("repeat delete: %v", err)
 	}
 }

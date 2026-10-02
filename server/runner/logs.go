@@ -21,7 +21,10 @@ import (
 //     flushInterval (or earlier when the buffer reaches flushBytes). The
 //     frontend polls GET /api/tasks/{id}/log?after=<seq> for new chunks, so
 //     this copy stays small and bounded (MaxStoredBytes) — a live log is
-//     read a page at a time through an indexed query.
+//     read a page at a time through an indexed query. Past the cap it keeps
+//     its beginning and a rolling window over its end (see chunkRef): a
+//     reader that follows a stage must see the output it is writing now, and
+//     a reader opening it later must still find where it ended.
 //   - the complete log, spooled to a local file while the stage runs and
 //     uploaded once, when it ends, as one object per run. That object is what
 //     the download serves and what the run's summary is derived from, so a
@@ -34,9 +37,15 @@ const (
 	flushBytes = 32 * 1024
 	// flushInterval is the maximum time output waits before being stored.
 	flushInterval = 2 * time.Second
-	// defaultMaxLogBytes is the per-task cap on the stored chunks; output
-	// beyond it is dropped from the database (it stays in the full log).
+	// defaultMaxLogBytes is the per-task cap on the stored chunks; past it the
+	// beginning and the newest output are kept and the middle is given back as
+	// new output arrives (it all stays in the full log).
 	defaultMaxLogBytes = 8 * 1024 * 1024
+	// storedHeadBytes is how much of the beginning the stored chunks hold onto
+	// verbatim — the command line, the first error, the context a reader wants
+	// before the noise. The rest of the cap rolls over the newest output. It
+	// matches the spool's head region so both copies start the same way.
+	storedHeadBytes = spoolHeadBytes
 	// defaultMaxFileBytes is the per-run cap on the full log object.
 	defaultMaxFileBytes = 64 * 1024 * 1024
 	// logPutTimeout bounds the full-log upload. The payload is up to
@@ -52,7 +61,9 @@ const fullLogName = "full.log"
 // LogLimits bounds a stage's two log copies, as configured under the `logs`
 // section. The zero value is the documented default for each field.
 type LogLimits struct {
-	// MaxStoredBytes caps the chunks kept in the database (0 = 8 MiB).
+	// MaxStoredBytes caps the chunks kept in the database (0 = 8 MiB). Past
+	// it the stored log keeps its beginning and its newest output and gives
+	// the middle back: see LogWriter.
 	MaxStoredBytes int64
 	// MaxFileBytes caps the complete log kept in object storage (0 = 64
 	// MiB). Its beginning and its end both survive a cap: see logSpool.
@@ -113,14 +124,41 @@ type LogWriter struct {
 	// path, which is cumulative.
 	ownLog bool
 
+	// onClose runs once, after Close has finished with the writer: what the
+	// Service uses to stop offering this writer's spool as a live log.
+	onClose func()
+
 	mu        sync.Mutex
 	buf       []byte
 	seq       int
-	written   int64 // total bytes accepted (for the stored-chunk cap)
+	written   int64 // total bytes accepted from the session
+	headBytes int64 // bytes of the stored copy held as the beginning
+	stored    []chunkRef
+	kept      int64 // bytes of the stored copy, the head region included
 	truncat   bool
 	timer     *time.Timer
 	closed    bool
 	lastFlush time.Time
+}
+
+// chunkRef is one stored chunk beyond the head region: what the writer has to
+// know to give the cap back as new output arrives. The marker is never given
+// back — it is the line that tells a reader the middle is missing, and it
+// belongs right after the beginning, where the gap is.
+type chunkRef struct {
+	seq    int
+	n      int64
+	marker bool
+}
+
+// headBudget is how much of the stored copy is the protected beginning.
+func (lw *LogWriter) headBudget() int64 {
+	// Narrowed for a cap too small to hold a head region and a tail at once,
+	// so that something always remains prunable and the copy stays bounded.
+	if half := lw.maxStored / 2; half < storedHeadBytes {
+		return half
+	}
+	return storedHeadBytes
 }
 
 // NewLogWriter returns a LogWriter appending to a task's CURRENT attempt, so a
@@ -198,28 +236,44 @@ func (lw *LogWriter) Write(p []byte) (int, error) {
 		p = []byte(lw.redact(string(p)))
 	}
 	// The spool takes every byte (within its own cap, which keeps the end);
-	// the stored chunks stop at theirs.
+	// the stored chunks keep their head and their end, and give up what is
+	// between them once they run out of room.
 	lw.spool.Write(p)
 
 	n := len(p)
-	if lw.written+int64(n) > lw.maxStored {
-		if !lw.truncat {
-			lw.truncat = true
-			marker := fmt.Sprintf("\n… log truncated (exceeded %s); download the full log …\n", bytesLabel(lw.maxStored))
-			lw.buf = append(lw.buf, marker...)
-		}
-		lw.written += int64(n)
-		if len(lw.buf) >= flushBytes {
-			lw.flushLocked()
-		}
-		return n, nil
-	}
 	lw.written += int64(n)
+	if !lw.truncat && lw.written > lw.maxStored {
+		// The stored copy has run out of room. What it holds between the
+		// beginning and this point is the middle of a long log — the part a
+		// reader can live without, and the part the marker is about to
+		// announce — so it goes back now, and the marker takes its place:
+		// the beginning, one line saying the middle is missing, then the
+		// newest output from here on.
+		lw.truncat = true
+		lw.flushLocked()
+		lw.dropStoredLocked(len(lw.stored))
+		marker := fmt.Sprintf("\n… log truncated (exceeded %s); download the full log …\n", bytesLabel(lw.maxStored))
+		lw.buf = append(lw.buf, marker...)
+		if idx := lw.flushLocked(); idx >= 0 {
+			lw.stored[idx].marker = true
+		}
+	}
 	lw.buf = append(lw.buf, p...)
 	if len(lw.buf) >= flushBytes {
-		lw.flushLocked()
+		if lw.flushLocked() >= 0 {
+			lw.pruneLocked()
+		}
 	}
 	return n, nil
+}
+
+// setCloseHook registers a function to run once, after Close has finished.
+// It is meant to be called right after construction, before the writer is
+// shared.
+func (lw *LogWriter) setCloseHook(fn func()) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	lw.onClose = fn
 }
 
 // Close flushes the remaining buffer, stops the background timer and uploads
@@ -236,6 +290,8 @@ func (lw *LogWriter) Close() {
 	}
 	lw.flushLocked()
 	sp := lw.spool
+	hook := lw.onClose
+	lw.onClose = nil
 	// Dropped under the lock, before the upload: a reader that asks for the
 	// tail afterwards gets nothing rather than a file that is being removed.
 	lw.spool = nil
@@ -244,6 +300,35 @@ func (lw *LogWriter) Close() {
 	// Outside the lock: the upload talks to object storage, and nothing will
 	// write to the spool again anyway.
 	lw.uploadFullLog(sp)
+	if hook != nil {
+		hook()
+	}
+}
+
+// SnapshotLog copies the stage's output so far into a reader the caller closes
+// (which removes the copy), with its length. It is what a download of a log
+// that is still being written is served from: the complete output up to this
+// moment, where the stored chunks hold only its beginning and its end.
+//
+// It reports false when there is nothing to serve — no spool (it never opened,
+// or Close has taken it away), an empty log, or a failed copy.
+func (lw *LogWriter) SnapshotLog() (io.ReadCloser, int64, bool) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	sp := lw.spool
+	if sp == nil {
+		return nil, 0, false
+	}
+	size := sp.Size()
+	if size == 0 {
+		return nil, 0, false
+	}
+	rc, n, err := sp.Snapshot()
+	if err != nil {
+		log.Printf("tasklog: task %d attempt %d: snapshot the live log: %v", lw.taskID, lw.attempt, err)
+		return nil, 0, false
+	}
+	return rc, n, true
 }
 
 // Flush stores any buffered output immediately, without closing the writer
@@ -328,12 +413,17 @@ func (lw *LogWriter) uploadFullLog(sp *logSpool) {
 }
 
 // flushLocked stores the buffered bytes as the next chunk. Callers hold mu.
-func (lw *LogWriter) flushLocked() {
+//
+// It returns the chunk's index in the stored (prunable) list, or -1 when it
+// stored nothing or the chunk belongs to the head region — which is never
+// given back, so its caller has nothing to mark.
+func (lw *LogWriter) flushLocked() int {
 	if len(lw.buf) == 0 {
 		lw.lastFlush = time.Now()
-		return
+		return -1
 	}
 	content := string(lw.buf)
+	n := int64(len(content))
 	lw.buf = lw.buf[:0]
 	lw.seq++
 	if err := lw.store.AppendTaskLog(&store.TaskLog{
@@ -344,9 +434,86 @@ func (lw *LogWriter) flushLocked() {
 		// chunk still lands; log persistence must never kill a task.
 		lw.seq--
 		log.Printf("tasklog: append task %d attempt %d seq %d: %v", lw.taskID, lw.attempt, lw.seq+1, err)
-		return
+		return -1
 	}
 	lw.lastFlush = time.Now()
+	lw.kept += n
+	if lw.headBytes < lw.headBudget() {
+		lw.headBytes += n
+		return -1
+	}
+	lw.stored = append(lw.stored, chunkRef{seq: lw.seq, n: n})
+	return len(lw.stored) - 1
+}
+
+// pruneLocked gives the cap back: it drops the oldest stored chunks, never the
+// head region and never the marker, until the stored copy fits again. What a
+// reader loses is the middle of a log that ran past the cap — the newest
+// output keeps arriving, which is the point. Callers hold mu.
+//
+// Removing a chunk is invisible to a reader: a poll asks for sequences past
+// the last one it was given, and the sequences dropped here are always behind
+// every cursor that has been served.
+func (lw *LogWriter) pruneLocked() {
+	var (
+		victims []chunkRef
+		freed   int64
+	)
+	// The loop measures what dropping the victims collected so far would
+	// leave, not what is stored right now: kept only shrinks once the delete
+	// has actually happened.
+	for lw.kept-freed > lw.maxStored {
+		idx := -1
+		// The newest chunk always stays: it is where the writer's sequence
+		// continues, and a reader must never be shown the log ending before
+		// the output the stage has already written.
+		for i := 0; i < len(lw.stored)-1; i++ {
+			if !lw.stored[i].marker {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 {
+			break
+		}
+		victims = append(victims, lw.stored[idx])
+		freed += lw.stored[idx].n
+		lw.stored = append(lw.stored[:idx:idx], lw.stored[idx+1:]...)
+	}
+	lw.dropLocked(victims)
+}
+
+// dropStoredLocked gives back the first n stored chunks: the middle of a log
+// that has just run out of room, which the marker takes the place of.
+func (lw *LogWriter) dropStoredLocked(n int) {
+	if n > len(lw.stored) {
+		n = len(lw.stored)
+	}
+	victims := append([]chunkRef(nil), lw.stored[:n]...)
+	lw.stored = append([]chunkRef(nil), lw.stored[n:]...)
+	lw.dropLocked(victims)
+}
+
+// dropLocked deletes stored chunks from the database. The accounting follows
+// the database, never the other way round: a failed delete puts the chunks
+// back where they came from, so the next flush tries again and the cap is
+// measured against what is really stored. Callers hold mu.
+func (lw *LogWriter) dropLocked(victims []chunkRef) {
+	if len(victims) == 0 {
+		return
+	}
+	var freed int64
+	seqs := make([]int, 0, len(victims))
+	for _, v := range victims {
+		seqs = append(seqs, v.seq)
+		freed += v.n
+	}
+	if err := lw.store.DeleteTaskLogChunks(lw.taskID, lw.attempt, seqs); err != nil {
+		lw.stored = append(append([]chunkRef(nil), victims...), lw.stored...)
+		log.Printf("tasklog: give back %d chunk(s) of task %d attempt %d: %v", len(seqs), lw.taskID, lw.attempt, err)
+		return
+	}
+	lw.kept -= freed
 }
 
 // tick is the background flush; it re-arms until closed.

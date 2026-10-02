@@ -53,11 +53,15 @@ logs:
   # viewer polls (small, indexed, streamed); the complete log is one object
   # per run (runs/<runID>/log/full.log in the bucket below), which is what
   # "download log" serves — and what the run's summary is derived from, so a
-  # failure at the end of a very long log is still read and reported.
+  # failure at the end of a very long log is still read and reported. While a
+  # stage is running, "download log" reads the spool below: the complete log
+  # at that moment, since the object only appears when the stage ends.
 
-  # Cap on the chunks kept in the database, in bytes. Past it the stored log
-  # ends in a truncation marker pointing at the download. 0 = 8 MiB.
-  # Override with MD_BUILDER_LOG_MAX_STORED.
+  # Cap on the chunks kept in the database, in bytes. Past it a long log keeps
+  # its beginning (1 MiB) and a rolling window over its newest output, with a
+  # truncation marker between them: the viewer follows a long stage to its
+  # end, and a page opened later still finds what the stage last wrote.
+  # 0 = 8 MiB. Override with MD_BUILDER_LOG_MAX_STORED.
   maxStoredBytes: 8388608
 
   # Cap on the complete log kept in object storage, in bytes. A log that runs

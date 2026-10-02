@@ -301,11 +301,14 @@ type logChunkJSON struct {
 // attempt's whole log as one text file.
 //
 // A finished attempt has its complete log in object storage, and that object
-// is streamed here: it is the whole output, where the stored chunks stop at
-// their cap and end in a truncation marker. An attempt that has no object —
-// still running, never ran, written before the full log existed, or a stage
-// whose spool failed — falls back to the stored chunks, read batch by batch
-// (ReadTaskLogs caps how many it returns).
+// is streamed here: it is the whole output, where the stored chunks keep only
+// the log's beginning and its end. An attempt that has no object yet but is
+// being run by this process is served from the writer's spool, which holds the
+// complete output up to now — waiting for the stage to end is not what someone
+// downloading a log to see what it is doing has in mind. Anything else — an
+// attempt that never ran, one another process runs, one written before the
+// full log existed, or a stage whose spool failed — falls back to the stored
+// chunks, read batch by batch (ReadTaskLogs caps how many it returns).
 func (s *Server) taskLogDownload(w http.ResponseWriter, r *http.Request, id int64) {
 	task, ok := s.loadTask(w, id, "task log download")
 	if !ok {
@@ -338,6 +341,21 @@ func (s *Server) taskLogDownload(w http.ResponseWriter, r *http.Request, id int6
 		}
 		log.Printf("task %d log download: read the full log %s: %v; serving the stored chunks",
 			task.ID, run.LogObjectKey, openErr)
+	}
+
+	// A stage this process is still running: its complete log lives in the
+	// writer's spool until the stage ends and the object above appears. The
+	// snapshot has an exact length, so the download is a plain file to the
+	// browser.
+	if s.Runner != nil {
+		if rc, size, live := s.Runner.LiveLog(task.ID, attempt); live {
+			defer rc.Close()
+			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+			if _, err := io.Copy(w, rc); err != nil {
+				log.Printf("task %d log download (live log): %v", task.ID, err)
+			}
+			return
+		}
 	}
 
 	// Walk the log by sequence: each batch continues after the last chunk

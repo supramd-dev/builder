@@ -179,6 +179,65 @@ func TestLogSpoolUnwritableDirIsNotFatal(t *testing.T) {
 	}
 }
 
+// TestLogSpoolSnapshotIsACopy: a reader that cannot wait for the stage — a
+// download of a log still being written — gets every byte assembled so far,
+// and closing it leaves nothing behind.
+func TestLogSpoolSnapshotIsACopy(t *testing.T) {
+	dir := t.TempDir()
+	sp, err := newLogSpool(dir, 8*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sp.Close()
+
+	// Past the cap, so the snapshot covers the head, the marker and the ring.
+	last := ""
+	for i := 0; i < 20; i++ {
+		last = strings.Repeat(string(rune('a'+i%26)), 512) + "\n"
+		sp.Write([]byte(last))
+	}
+	assembled := readAll(t, sp.Reader())
+
+	rc, size, err := sp.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := rc.Close()
+
+	if got := string(body); got != assembled {
+		t.Errorf("snapshot = %d bytes, want the %d the spool assembles", len(got), len(assembled))
+	}
+	if size != int64(len(assembled)) {
+		t.Errorf("snapshot size = %d, want %d", size, len(assembled))
+	}
+	if !strings.Contains(string(body), "dropped") {
+		t.Error("snapshot is missing the marker that names what the cap dropped")
+	}
+	if !strings.HasSuffix(string(body), last) {
+		t.Error("snapshot is missing the output the stage wrote last")
+	}
+	// The copy is gone, and the spool it was taken from is untouched.
+	if name != nil {
+		t.Errorf("closing the snapshot: %v", name)
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range files {
+		if strings.Contains(e.Name(), "snapshot") {
+			t.Errorf("snapshot file left behind: %s", e.Name())
+		}
+	}
+	if got := readAll(t, sp.Reader()); got != assembled {
+		t.Error("the spool changed while the snapshot was taken")
+	}
+}
+
 func TestLogSpoolCloseRemovesTheFile(t *testing.T) {
 	dir := t.TempDir()
 	sp, err := newLogSpool(dir, 8*1024)

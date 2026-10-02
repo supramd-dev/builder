@@ -12,7 +12,9 @@ package runner
 
 import (
 	"context"
+	"io"
 	"log"
+	"sync"
 	"time"
 
 	"md-builder/server/store"
@@ -50,12 +52,72 @@ type Service struct {
 	// chunks and the complete log object). The zero value is the default for
 	// every field; main sets it from the configuration's logs section.
 	LogLimits LogLimits
+
+	// live holds the writer of every log this process is still writing, so a
+	// download can be served a stage's output before the stage ends — the
+	// only time a complete log exists nowhere else. It is process-local: a
+	// deployment that runs its workers on another host has nothing here, and
+	// the download falls back to the stored chunks.
+	liveMu sync.Mutex
+	live   map[liveLogKey]*LogWriter
+}
+
+// liveLogKey identifies one stage's log: a task's attempt, for which only one
+// writer runs at a time.
+type liveLogKey struct {
+	taskID  int64
+	attempt int
 }
 
 // logWriter returns a log writer for a task's current attempt, with the
-// Service's log limits.
+// Service's log limits. Every writer the Service builds is registered here,
+// which is the one place they are built — a writer that is not registered
+// would simply not be offered to a download while its stage runs.
 func (s *Service) logWriter(task *store.Task) *LogWriter {
-	return NewLogWriter(s.Store, task, s.LogLimits)
+	lw := NewLogWriter(s.Store, task, s.LogLimits)
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if s.live == nil {
+		s.live = make(map[liveLogKey]*LogWriter)
+	}
+	key := liveLogKey{taskID: lw.taskID, attempt: lw.attempt}
+	s.live[key] = lw
+	lw.setCloseHook(func() {
+		// Only if it is still ours: a re-dispatch may have started the next
+		// attempt's writer for the same key while this one was closing.
+		s.liveMu.Lock()
+		defer s.liveMu.Unlock()
+		if s.live[key] == lw {
+			delete(s.live, key)
+		}
+	})
+	return lw
+}
+
+// OpenLog starts the log writer for a task's current attempt and registers it
+// as live: what the caller writes to it is the stage's output, and a download
+// can read it before the stage ends. The runner calls this once per stage; it
+// is exported for the tests that need a stage which is still running.
+func (s *Service) OpenLog(task *store.Task) *LogWriter {
+	return s.logWriter(task)
+}
+
+// LiveLog returns the output of a stage this process is still running, as a
+// reader the caller closes (which removes the copy behind it) and its length.
+// ok is false when no writer here is producing that log — a stage that has
+// ended, one another process is running, or a task that does not exist.
+//
+// A reader that wants the log of a stage which is still writing has nowhere
+// else to get all of it: the stored chunks keep its beginning and its end, and
+// the full-log object is only written when the stage ends.
+func (s *Service) LiveLog(taskID int64, attempt int) (io.ReadCloser, int64, bool) {
+	s.liveMu.Lock()
+	lw := s.live[liveLogKey{taskID: taskID, attempt: attempt}]
+	s.liveMu.Unlock()
+	if lw == nil {
+		return nil, 0, false
+	}
+	return lw.SnapshotLog()
 }
 
 // fetchTimeout is the effective deadline for reading the test matrix.
