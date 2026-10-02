@@ -411,8 +411,10 @@ export interface RunCell {
   runId: number
   taskId?: number
   // "skipped" is a status of its own: the stage never ran because an
-  // upstream task failed, and its summary carries the reason.
-  status: 'passed' | 'failed' | 'running' | 'pending' | 'skipped'
+  // upstream task failed, and its summary carries the reason. "timeout" is
+  // one too: the stage ran and its command outlived the timeout
+  // md-builder.yaml gave it, so the cause, not just the outcome, is on show.
+  status: 'passed' | 'failed' | 'timeout' | 'running' | 'pending' | 'skipped'
   total: number
   passed: number
   failed: number
@@ -571,8 +573,9 @@ export interface Run {
   attempt: number
   kind: TaskKind
   // "pending"/"running" are live states: the attempt is open until the stage
-  // reports its outcome.
-  status: 'passed' | 'failed' | 'skipped' | 'pending' | 'running'
+  // reports its outcome. "timeout" is the outcome of a stage whose command
+  // outlived its timeout.
+  status: 'passed' | 'failed' | 'timeout' | 'skipped' | 'pending' | 'running'
   // The task's summary line: the failure text, the skip reason, or what the
   // stage printed for MD-BUILDER-SUMMARY.
   summary: string
@@ -635,6 +638,15 @@ export function testArtifactDownloadUrl(id: number): string {
   return `/api/test-artifacts/${id}/download`
 }
 
+// testArtifactRawUrl is the same bytes for *viewing*: an HTML artifact comes
+// back as a page, which the run page frames and its "open in a new tab" link
+// points at. The server renders HTML in a sandbox (Content-Security-Policy:
+// sandbox), so the page's scripts run from an opaque origin that cannot reach
+// this app's session. Also a plain link, cookie-authenticated like the rest.
+export function testArtifactRawUrl(id: number): string {
+  return `/api/test-artifacts/${id}/raw`
+}
+
 // runArtifactsZipUrl is one attempt's artifacts as a zip. The endpoint 404s
 // when the attempt produced none.
 export function runArtifactsZipUrl(runId: number): string {
@@ -645,7 +657,22 @@ export function runArtifactsZipUrl(runId: number): string {
 
 // TaskStatus is one vocabulary for tasks and runs: a task's status is its
 // latest attempt's (a virtual node's is rolled up from its children).
-export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'skipped'
+// "timeout" is a failure whose cause is the stage's own timeout — the runner
+// records it, and a container whose failures are all timeouts takes it too.
+export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'timeout' | 'skipped'
+
+// isTerminalStatus reports whether a status is final, i.e. can no longer
+// change: everything else (the two in-flight ones, and anything this build
+// does not know — an older row's status, say) is treated as still moving. It
+// mirrors the server's store.TaskStatusTerminal.
+//
+// Callers ask this question the other way round on purpose: a page that
+// follows a task decides to *keep* following, and a whitelist of the live
+// statuses would stop dead — with no request left to notice the change — on
+// a status it does not recognise.
+export function isTerminalStatus(status: string): boolean {
+  return status === 'passed' || status === 'failed' || status === 'timeout' || status === 'skipped'
+}
 
 // TaskKind is a node's role in the graph: the virtual root per (commit,
 // environment), the three real stages, the virtual regression container and
@@ -757,7 +784,8 @@ export async function getTaskRuns(id: number): Promise<Run[]> {
   return res.runs ?? []
 }
 
-// LogChunk is one stored chunk of a task's incremental log.
+// LogChunk is one piece of a task's log as it is read: the text, and the byte
+// offset its end is at (the cursor the next read continues from).
 export interface LogChunk {
   seq: number
   content: string
@@ -768,28 +796,38 @@ export interface TaskLogs {
   // unless the caller asked for another (a retry's log stays readable).
   attempt: number
   chunks: LogChunk[]
+  // lastSeq is where this read ended: pass it as the next read's after. It is
+  // where the read started when there was nothing new.
   lastSeq: number
 }
 
-// getTaskLogs returns log chunks after the given sequence (0 = from the
-// beginning) — poll with the lastSeq to follow a running task. attempt
-// selects one of the task's attempts; omit it for the current one.
+// getTaskLogs reads a task's log from the given byte offset (0 = from the
+// beginning) — poll with the lastSeq to follow a running task. attempt selects
+// one of the task's attempts; omit it for the current one.
+//
+// tail asks for the log's last N bytes instead, for a view that is opening a
+// log whose length is unknown: a first read has no cursor yet, and a log that
+// grew for an hour must not be fetched whole to show its end. The server caps
+// it at one page.
 export async function getTaskLogs(
   id: number,
   after = 0,
   attempt?: number,
+  tail?: number,
 ): Promise<TaskLogs> {
-  const q = new URLSearchParams({ after: String(after) })
+  const q = new URLSearchParams()
+  if (tail !== undefined) q.set('tail', String(tail))
+  else q.set('after', String(after))
   if (attempt !== undefined) q.set('attempt', String(attempt))
   return api<TaskLogs>(`/api/tasks/${id}/log?${q}`)
 }
 
-// taskLogDownloadUrl is one attempt's whole log as a downloadable text file.
-// The viewer follows the stream incrementally and keeps only its tail, so the
-// file is assembled server-side and fetched by the browser itself (a plain
+// taskLogDownloadUrl is one attempt's whole log as a downloadable text file:
+// every part the server holds for the run, including what a stage which is
+// still running has written so far. The browser fetches it itself (a plain
 // link — the session cookie authenticates it). The filename gains an
-// -attempt-N suffix when the caller asks for an attempt other than the
-// current one.
+// -attempt-N suffix when the caller asks for an attempt other than the current
+// one.
 export function taskLogDownloadUrl(id: number, attempt?: number): string {
   const q = attempt === undefined ? '' : `?attempt=${attempt}`
   return `/api/tasks/${id}/log/download${q}`

@@ -4,10 +4,12 @@ import { LoaderCircle, Maximize2 } from 'lucide-react'
 import {
   getTestArtifact,
   getTestRun,
+  isTerminalStatus,
   runArtifactsZipUrl,
   testArtifactDownloadUrl,
   type Run,
   type TaskKind,
+  type TestArtifactRef,
   type TestRunDetail,
 } from './api'
 import { formatDuration, parseGTestResults, type GTestCase } from './gtest'
@@ -63,9 +65,14 @@ export default function TestRunDetailPage({ onError }: Props) {
     }
   }, [runId, onError])
 
-  // A pending/running attempt follows its stage live: poll until the real
-  // outcome lands (status leaves pending/running).
-  const live = run?.status === 'pending' || run?.status === 'running'
+  // An attempt that has not finished follows its stage live: poll until the
+  // real outcome lands. The question is asked as "has it finished?" rather than
+  // "is it pending or running?" so that a status this build does not recognise
+  // keeps the page polling instead of freezing it — a frozen page has no
+  // request left to notice the outcome. (A terminal run needs no such care:
+  // the store never reopens one — a re-run opens a new attempt, and so a new
+  // run with a page of its own.)
+  const live = run !== null && !isTerminalStatus(run.status)
   useEffect(() => {
     if (!live) return
     // The interval is cleared on navigation/unmount, but a request already on
@@ -113,22 +120,27 @@ export default function TestRunDetailPage({ onError }: Props) {
   }
 
   const failed = run.status === 'failed'
+  const timedOut = run.status === 'timeout'
   const skipped = run.status === 'skipped'
   const inFlight = run.status === 'pending' || run.status === 'running'
   const statusCls = failed
     ? 'text-danger'
-    : skipped
-      ? 'text-warn'
-      : inFlight
-        ? 'text-run'
-        : 'text-success'
+    : timedOut
+      ? 'text-timeout'
+      : skipped
+        ? 'text-warn'
+        : inFlight
+          ? 'text-run'
+          : 'text-success'
   const statusText = failed
     ? '✗ failed'
-    : skipped
-      ? '⤼ skipped'
-      : inFlight
-        ? '⏳ ' + run.status
-        : '✓ passed'
+    : timedOut
+      ? '⏱ timed out'
+      : skipped
+        ? '⤼ skipped'
+        : inFlight
+          ? '⏳ ' + run.status
+          : '✓ passed'
 
   return (
     <div>
@@ -214,8 +226,9 @@ export default function TestRunDetailPage({ onError }: Props) {
         <ArtifactsSection run={run} onError={onError} />
       )}
 
-      {/* Plot artifacts (*.plot.json): one interactive Plotly chart per
-          file, fetched and rendered client-side like the results files. */}
+      {/* Plot artifacts (*.plot.json / *.plotly.json): one interactive
+          Plotly chart per file, fetched and rendered client-side like the
+          results files. */}
       {!inFlight && <PlotSection artifacts={run.artifacts} onError={onError} />}
 
       {/* Results files are parsed in the browser (nothing is stored while the
@@ -310,17 +323,15 @@ function AttemptsSection({ run }: { run: TestRunDetail }) {
 }
 
 // LogSection shows the attempt's stdout: the task's log at this run's
-// attempt, so an earlier attempt's page shows that attempt's output.
+// attempt, so an earlier attempt's page shows that attempt's output. The view
+// follows the run's own status, so an attempt that may still write is not read
+// as if its output were complete.
 function LogSection({ run }: { run: TestRunDetail }) {
   if (run.taskId === 0) return null
   return (
     <section>
       <h3 className="task-section-title">Log</h3>
-      <TaskLogView
-        taskId={run.taskId}
-        attempt={run.attempt}
-        live={run.status === 'running'}
-      />
+      <TaskLogView taskId={run.taskId} attempt={run.attempt} status={run.status} />
     </section>
   )
 }
@@ -337,7 +348,7 @@ function ArtifactsSection({
   run: TestRunDetail
   onError: (message: string) => void
 }) {
-  const [preview, setPreview] = useState<number | null>(null)
+  const [preview, setPreview] = useState<TestArtifactRef | null>(null)
   if (run.artifacts.length === 0) return null
   return (
     <section>
@@ -369,9 +380,9 @@ function ArtifactsSection({
                   href=""
                   onClick={(e) => {
                     e.preventDefault()
-                    setPreview(a.id)
+                    setPreview(a)
                   }}
-                  title="Preview the file content in the editor"
+                  title="Preview the file in a dialog — a page or a Markdown document renders, anything else opens as source"
                 >
                   View
                 </a>
@@ -388,8 +399,11 @@ function ArtifactsSection({
         </p>
       )}
       {preview !== null && (
+        // Keyed by artifact: the dialog's mode (rendered or source) is
+        // decided per file and must not carry over from the last one.
         <ArtifactPreviewDialog
-          artifactId={preview}
+          key={preview.id}
+          artifact={preview}
           onClose={() => setPreview(null)}
           onError={onError}
         />

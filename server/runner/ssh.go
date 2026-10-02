@@ -40,11 +40,17 @@ type Result struct {
 
 // ExecResult reports the outcome of a remote command execution.
 type ExecResult struct {
-	Success        bool   `json:"success"`
-	Stdout         string `json:"stdout"`
-	Stderr         string `json:"stderr"`
-	ExitCode       int    `json:"exitCode"`
-	DurationMillis int64  `json:"durationMilliSeconds"`
+	Success  bool   `json:"success"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exitCode"`
+	// TimedOut reports that the session was cut by its deadline rather than by
+	// the command ending: the stage outlived its timeout. It is what lets the
+	// runner record a timeout as its own status instead of matching on the
+	// reason text (the exit code is -1 here, which is also what a dial failure
+	// or a cancelled context looks like).
+	TimedOut       bool  `json:"timedOut,omitempty"`
+	DurationMillis int64 `json:"durationMilliSeconds"`
 }
 
 // SSHHost identifies the remote endpoint of an execution: the fields of a
@@ -211,13 +217,19 @@ func RunSSH(ctx context.Context, h SSHHost, cmd, stdinData string, timeout time.
 	case <-ctx.Done():
 		_ = client.Close()
 		reason := ctx.Err()
-		if timeout > 0 && errors.Is(reason, context.DeadlineExceeded) {
-			reason = fmt.Errorf("command timed out after %s", timeout)
+		// A deadline is a timeout; a cancelled context (service shutdown) is
+		// not. The bound named here is the session's, which is the stage's own
+		// timeout plus the caller's slack — the runner reports the stage's
+		// timeout itself, from the number the yaml gave the stage.
+		timedOut := errors.Is(reason, context.DeadlineExceeded)
+		if timeout > 0 && timedOut {
+			reason = fmt.Errorf("timed out after %s", timeout)
 		}
 		return ExecResult{
 			Success:        false,
 			Stderr:         fmt.Sprintf("%v", reason),
 			ExitCode:       -1,
+			TimedOut:       timedOut,
 			DurationMillis: time.Since(start).Milliseconds(),
 		}
 	}

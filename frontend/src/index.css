@@ -32,6 +32,9 @@
   --success: #28a745;
   --danger: #dc3545;
   --warn: #b7791f;
+  /* A stage killed by its timeout: its own color, between the failure red and
+     the skipped amber — the stage ran, the clock stopped it. */
+  --timeout: #c2410c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -52,6 +55,7 @@
     --success: #2bb34b;
     --danger: #ff3e3e;
     --warn: #e2a33d;
+    --timeout: #ff8a4c;
   }
 }
 
@@ -229,6 +233,10 @@ a.nav-link, a.brand, a.btn {
 
 .text-warn {
   color: var(--warn) !important;
+}
+
+.text-timeout {
+  color: var(--timeout) !important;
 }
 
 .text-run {
@@ -972,6 +980,10 @@ a.dash-st:hover {
   color: var(--danger);
 }
 
+.dash-st-timeout {
+  color: var(--timeout);
+}
+
 .dash-st-skip {
   color: var(--warn);
 }
@@ -1659,9 +1671,67 @@ code {
   color: var(--fg, inherit);
 }
 
-/* Run detail: one rendered *.plot.json figure. The chart is responsive
-   (useResizeHandler + width 100%); the wrapper just keeps the file label
-   and successive figures from crowding. */
+/* Run detail: one rendered plot figure (*.plot.json / *.plotly.json). The
+   chart is responsive (useResizeHandler + width 100%); the wrapper just
+   keeps the file label and successive figures from crowding. */
 .plot-figure {
   margin-bottom: 1rem;
+}
+
+/* The artifact preview dialog's rendered views. The frame is sandboxed to an
+   opaque origin, so the page inside cannot be measured from here and fitted
+   to its content: it fills the dialog body and scrolls on its own. The white
+   background is the page's own paper — it shows around a document that
+   paints none. */
+.artifact-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+/* A rendered Markdown artifact: the docs' own typography (.md-doc) in a box
+   that scrolls, since the dialog body's height is fixed. */
+.artifact-doc {
+  height: 100%;
+  overflow: auto;
+  padding: 0.5rem 1.25rem 1.5rem;
+  line-height: 1.6;
+}
+
+/* The Preview | Source switch in the dialog head: two small buttons, the
+   active one plain text, the other muted. Pushed to the right of the title
+   by the head's own gap, next to the icon actions. */
+.dialog-modes {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.dialog-modes button {
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.dialog-modes button + button {
+  border-left: none;
+}
+
+.dialog-modes button[aria-pressed='true'] {
+  color: var(--text);
+  background: var(--btn-default-bg);
+}
+
+/* The one-line explanation under the head of a sandboxed preview. */
+.dialog-note {
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--muted);
+  font-size: 0.8rem;
 }

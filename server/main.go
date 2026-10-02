@@ -202,6 +202,11 @@ func main() {
 	// --- Runner component: task dispatch + scheduling pool ---
 	runnerSvc := runner.NewService(s)
 	runnerSvc.Workers = cfg.Worker.Count
+	runnerSvc.LogLimits = runner.LogLimits{PartBytes: cfg.Logs.PartBytes}
+	if legacy := cfg.Logs.LegacyKeys(); len(legacy) > 0 {
+		log.Printf("config: logs.%s are no longer used and can be removed: a stage's log now lives in memory and, "+
+			"in parts of logs.partBytes, in object storage", strings.Join(legacy, ", logs."))
+	}
 	if cfg.Worker.Enabled {
 		rootCtx, cancel := context.WithCancel(context.Background())
 		runnerSvc.Start(rootCtx)

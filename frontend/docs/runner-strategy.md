@@ -121,15 +121,16 @@ root (test <sha> on <environment>)   # virtual: the whole pipeline
   numbers are the cases' and the root's are the whole pipeline's.
 - Each node stores a **snapshot** of its config, so later YAML edits or
   manual re-dispatches do not affect already-running graphs.
-- When a sub-task ends without passing — it failed, or it was itself
-  reported `skipped` — everything that (transitively) depends on it is
-  marked **skipped**, with the reason in its summary and a matching line
-  in its log (`skipped: upstream task build failed`). A dependency must
+- When a sub-task ends without passing — it failed, it timed out, or it was
+  itself reported `skipped` — everything that (transitively) depends on it
+  is marked **skipped**, with the reason in its summary and a matching line
+  in its log (`skipped: upstream task build failed`, or `upstream task
+  build timed out`). A dependency must
   pass before the node behind it is ready, so a node that will never pass
   leaves nothing to wait for: the skip happens in the same transaction
   that records the outcome, and no queue is left that cannot drain.
-  `skipped` is a real status of the same vocabulary as `passed` and
-  `failed`, not a display convention: the node never ran, and the
+  `skipped` is a real status of the same vocabulary as `passed`, `failed`
+  and `timeout`, not a display convention: the node never ran, and the
   dashboard says so. Stages that are not part of the graph at all (an
   empty manual stage command, or a case a later dispatch dropped) are not
   "skipped" — they are simply not there, and their cells show "—".
@@ -247,6 +248,11 @@ can never disagree.
   task detail) when the SSH connection fails, the build fails or the stage
   command exits non-zero — the pass/fail of the *tests themselves* is
   visible on the dashboard, not in the task status.
+- A stage command that outlives its timeout lands in **timeout** instead:
+  the same gate, its own status, with the timeout and the command in the
+  error column, a `task timed out: …` line in the log, and the log tail as
+  the summary's tail. A container whose failures are all timeouts takes
+  the status too, so a pipeline stopped by the clock reads as one.
 - **Unit runs** fail when the command exited non-zero **or** the parsed
   artifact files report failed cases (ctest-style wrappers can swallow the
   test binary's exit code). They carry aggregate counts only (total /
@@ -254,11 +260,12 @@ can never disagree.
   skipped included), summed across all configured artifact files; the
   per-test list is parsed in the browser from the stored artifact file.
 - **Regression cases** are judged by their command's exit status alone
-  (exit 0 → passed, anything else — timeout, SSH failure, non-zero →
-  failed); their `artifacts` files are stored on the case's own run for
-  display and never flip the verdict. The container above them rolls up:
-  any failed case fails the stage, and its summary reads
-  "3/4 cases passed; failed: heat".
+  (exit 0 → passed, anything else — SSH failure, non-zero → failed, and a
+  timeout → `timeout`); their `artifacts` files are stored on the case's
+  own run for display and never flip the verdict. The container above them
+  rolls up: any failed case fails the stage, and its summary reads
+  "3/4 cases passed; failed: heat" — or "1/4 cases passed; timed out:
+  poisson" when every failure under it was a timeout.
 - A container's summary always describes its rollup rather than a report:
   "3/4 cases passed; 1 in progress", "2/4 cases passed; 2 queued",
   "4/4 cases skipped (upstream failure)", "4/4 cases passed".
@@ -285,7 +292,7 @@ attempt-N run in status `pending` is created for it:
 
 ```
 dispatch          claim                     outcome
-pending (run)  →  running            →        passed/failed/skipped
+pending (run)  →  running            →        passed/failed/timeout/skipped
                   (ClaimReadyTask)            (FinishAttempt)
 ```
 

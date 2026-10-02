@@ -2,11 +2,12 @@
 // artifacts.
 //
 // Test output files (gtest results XML, build artifacts, per-case series data)
-// live in an S3-compatible store — MinIO in the supported deployment — and the
-// database keeps only a reference: the object key plus its size. Nothing in
+// and each run's task log live in an S3-compatible store — MinIO in the
+// supported deployment — and the database keeps only a reference: the key
+// prefix plus a size. Nothing in
 // this package knows about runs or artifacts; it stores opaque byte blobs
-// under caller-chosen keys, so the store layer owns the key layout
-// (see ArtifactKey) and the API layer owns the read paths.
+// under caller-chosen keys, so this package owns the key layout
+// (see ArtifactKey and LogKey) and the API layer owns the read paths.
 //
 // The backend is mandatory: a deployment without object storage cannot record
 // artifacts, and the server refuses to start without it. Memory is a test
@@ -66,8 +67,8 @@ type Store interface {
 	// "minio 127.0.0.1:9000/md-builder". It must never include
 	// credentials.
 	Describe() string
-	// KeyPrefix is the namespace this backend's artifact keys start with
-	// ("" when the whole bucket is ours). Callers pass it to ArtifactKey.
+	// KeyPrefix is the namespace this backend's keys start with ("" when
+	// the whole bucket is ours). Callers pass it to ArtifactKey and LogKey.
 	KeyPrefix() string
 }
 
@@ -197,6 +198,73 @@ func ArtifactKey(keyPrefix string, runID int64, kind, name string, dup int) stri
 	}
 	return strings.Join(segments, "/")
 }
+
+// Task logs are stored as a run's parts: one object per partBytes of output,
+// each named after the byte offset it starts at, all of them directly under
+// the run's log prefix.
+//
+//   - the offset in the name makes listing order stream order and lets a
+//     reader address any byte of a long log without opening the parts before
+//     it;
+//   - the parts of one run sharing a directory is what lets the orphan sweep
+//     keep a run's whole log alive with one prefix from the database.
+const (
+	// logKindSegment mirrors store.ArtifactKindLog (this package cannot
+	// import the store layer; a test in store pins the two together).
+	logKindSegment = "log"
+	// partNamePrefix starts every part's name.
+	partNamePrefix = "part-"
+	// partNameDigits zero-pads an offset: 12 digits covers a 1 TB log, and
+	// the padding is what makes the names sort by offset.
+	partNameDigits = 12
+)
+
+// LogPrefix is the key namespace of one run's log parts, ending in a slash:
+// "<prefix>/runs/<runID>/log/". The run's parts live directly under it, and a
+// reader lists it to find them (in order, by name).
+func LogPrefix(keyPrefix string, runID int64) string {
+	dir := "runs/" + strconv.FormatInt(runID, 10) + "/" + logKindSegment + "/"
+	if p := strings.Trim(keyPrefix, "/"); p != "" {
+		return p + "/" + dir
+	}
+	return dir
+}
+
+// LogKey builds the key of the part that starts at byte offset off of a run's
+// log: the key ArtifactKey would build for kind "log" and the part's name. An
+// old run's log — one object then, named "full.log" — is still found by
+// listing the prefix it was stored under.
+func LogKey(keyPrefix string, runID, off int64) string {
+	return LogPrefix(keyPrefix, runID) + LogPartName(off)
+}
+
+// LogPartName is the object name of the part starting at byte offset off.
+func LogPartName(off int64) string {
+	return partNamePrefix + fmt.Sprintf("%0*d", partNameDigits, off)
+}
+
+// LogPartOffset returns the byte offset a part name carries: what a reader
+// needs to place the object in the stream. ok is false for a name that is not
+// a part (an older run's "full.log", or anything else under the prefix), which
+// the reader takes to start at zero.
+//
+// The padding is read loosely — any number of digits — so a log past the
+// 999,999,999,999 bytes a 12-digit offset names still reads as its parts
+// rather than as one nameless object at zero. (Listing order does not depend
+// on it: the reader sorts the offsets it parsed.)
+func LogPartOffset(name string) (off int64, ok bool) {
+	digits, found := strings.CutPrefix(name, partNamePrefix)
+	if !found || len(digits) < partNameDigits || !isDigit(digits[0]) {
+		return 0, false
+	}
+	off, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || off < 0 {
+		return 0, false
+	}
+	return off, true
+}
+
+func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 // maxKeySegment bounds one path segment; object stores reject very long keys
 // and the artifact name is an arbitrary source path.

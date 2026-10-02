@@ -1,60 +1,32 @@
-// Plotly plotting for regression case artifacts.
+// Plotly plotting for run artifacts.
 //
-// A case's artifact list may carry one or more `*.plot.json` files —
-// verbatim Plotly figure documents: a `data` array of traces plus an
-// optional `layout` object (exactly what `<Plot/>` expects, minus the
-// DOM-props). This component fetches each matching artifact, validates the
-// JSON shape, and renders one chart per file with Plotly's responsive
-// sizing. Malformed files render their parse error inline instead of
-// breaking the page.
+// A run's artifact list may carry one or more `*.plot.json` /
+// `*.plotly.json` files — verbatim Plotly figure documents: a `data` array
+// of traces plus an optional `layout` object (exactly what `<Plot/>`
+// expects, minus the DOM-props). This component fetches each matching
+// artifact, validates the JSON shape, and renders one chart per file with
+// Plotly's responsive sizing. Malformed files render their parse error
+// inline instead of breaking the page.
 
 import { lazy, Suspense, useEffect, useState } from 'react'
 import type * as Plotly from 'plotly.js'
 import { getTestArtifact, type TestArtifactRef } from '../api'
+import { isPlotArtifact } from '../artifacts'
+import { drawnHeight, heightNote, parsePlotFigure, type PlotFigure } from './figure'
 
 // plotly.js is ~3.5 MB minified, so the <Plot/> component (and everything
 // it drags in) is loaded lazily: the split chunk only downloads when a run
-// actually has *.plot.json artifacts to chart.
+// actually has plot artifacts to chart.
 const Plot = lazy(async () => {
   const mod = await import('react-plotly.js')
   return { default: mod.default }
 })
 
-// PlotFigure is the subset of a Plotly figure the component forwards: the
-// trace array and the layout. Anything else in the file is ignored.
-export interface PlotFigure {
-  data: Plotly.Data[]
-  layout?: Partial<Plotly.Layout>
-}
-
-// isPlotArtifact reports whether an artifact reference looks like a plot
-// document by its stored name (`xxxx.plot.json`).
-export function isPlotArtifact(a: TestArtifactRef): boolean {
-  return /\.plot\.json$/i.test(a.name)
-}
-
-// parsePlotFigure validates a fetched artifact's content as a Plotly
-// figure: an object with a non-empty `data` array. Throws a readable error
-// otherwise — the message is shown under the file name.
-export function parsePlotFigure(content: string, name: string): PlotFigure {
-  let raw: unknown
-  try {
-    raw = JSON.parse(content)
-  } catch (err: unknown) {
-    throw new Error(`invalid JSON: ${err instanceof Error ? err.message : String(err)}`)
-  }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    throw new Error('not a plot document (expected a JSON object)')
-  }
-  const fig = raw as { data?: unknown; layout?: unknown }
-  if (!Array.isArray(fig.data) || fig.data.length === 0) {
-    throw new Error(`not a plot document (${name || 'file'} has no "data" traces)`)
-  }
-  return { data: fig.data as Plotly.Data[], layout: (fig.layout ?? {}) as Partial<Plotly.Layout> }
-}
-
-// PlotSection renders every `*.plot.json` artifact of a run: one fetch per
-// file, one <Plot/> per file. Runs without plot artifacts render nothing.
+// What a figure document is, and how tall to draw it, is in figure.ts: read
+// there, tested there.
+//
+// PlotSection renders every plot artifact of a run: one fetch per file,
+// one <Plot/> per file. Runs without plot artifacts render nothing.
 export default function PlotSection({
   artifacts,
   onError,
@@ -71,7 +43,7 @@ export default function PlotSection({
         Plots{' '}
         <span className="text-muted" style={{ fontWeight: 400 }}>
           ({plots.length} figure{plots.length === 1 ? '' : 's'} from{' '}
-          <code>*.plot.json</code> artifacts)
+          <code>*.plot.json</code> / <code>*.plotly.json</code> artifacts)
         </span>
       </h3>
       {plots.map((ref) => (
@@ -81,10 +53,9 @@ export default function PlotSection({
   )
 }
 
-// PlotFigureView fetches one artifact's content and renders its figure.
-// The chart height honors the file's layout.height (capped) and otherwise
-// defaults to 360px; width is responsive (the layout.width, when the file
-// sets one, wins).
+// PlotFigureView fetches one artifact's content and renders its figure, at
+// the height the document asks for (see drawnHeight) and the width of the
+// container it is in.
 function PlotFigureView({
   ref2,
   onError,
@@ -139,20 +110,27 @@ function PlotFigureView({
   }
   if (!figure) return null
 
-  // The file's own layout wins; responsive height/width defaults keep the
-  // chart readable when the document omits them.
+  // The file's own layout wins. The width is the exception: a document that
+  // carries one would overflow the page until the next resize, so it is
+  // dropped and `autosize` lets Plotly take the container's — the height,
+  // which is the author's choice, is the one dimension passed through.
   const layout: Partial<Plotly.Layout> = {
     margin: { t: 40, r: 20, b: 40, l: 50 },
     ...figure.layout,
+    autosize: true,
   }
-  const fileHeight = typeof figure.layout?.height === 'number' ? figure.layout.height : 0
-  const height = fileHeight > 0 && fileHeight <= 1200 ? fileHeight : 360
+  const declared = typeof figure.layout?.height === 'number' ? figure.layout.height : 0
+  const height = drawnHeight(declared)
+  delete layout.width
   const style: React.CSSProperties = { width: '100%', minWidth: 320 }
 
   return (
     <div className="plot-figure">
       <p className="text-muted" style={{ marginBottom: '0.25rem' }}>
-        <code>{ref2.name}</code>
+        <code>{ref2.name}</code>{' '}
+        {/* Where the height came from, so "the json says nothing" is
+            visible on the page rather than guessed at. */}
+        <span>— {height} px {heightNote(declared, height)}</span>
       </p>
       <Suspense fallback={<p className="text-muted">Loading plot renderer…</p>}>
         <Plot

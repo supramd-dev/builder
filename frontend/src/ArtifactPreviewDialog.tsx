@@ -1,32 +1,66 @@
+// The artifact preview: one stored file, as source or as the thing it is.
+//
+// A "View" click in the artifacts table opens this. Most files have one
+// form — the read-only Monaco editor, with the language picked from the
+// name (gtest XML, JSON including plot figures, yaml, logs, plain text).
+// Two kinds have a second: an HTML page renders in a sandboxed frame, and a
+// Markdown document renders with the app's own renderer. Those open in the
+// rendered form, and a Preview | Source switch in the head goes back to the
+// bytes.
+//
+// The rendered HTML frame points at GET /api/test-artifacts/{id}/raw, the
+// artifact endpoint's view-don't-save form, and is sandboxed twice: the
+// server sends `Content-Security-Policy: sandbox` (no allow-same-origin)
+// and the frame repeats the same list. The page is a build product, so its
+// scripts are not trusted with this session — they run (that is what makes a
+// Plotly export worth framing), but from an opaque origin that reads no
+// cookie or storage and whose requests carry no credentials.
+//
+// Markdown needs no sandbox: markdown.tsx builds React nodes, so nothing in
+// the file is ever interpreted as markup.
+
 import { useEffect, useState } from 'react'
 import Editor, { type OnMount } from '@monaco-editor/react'
-import { X, LoaderCircle, Download } from 'lucide-react'
+import { X, LoaderCircle, Download, ExternalLink } from 'lucide-react'
 import { defineMonacoTheme } from './monacoTheme'
-import { getTestArtifact, type TestArtifactContent } from './api'
+import { getTestArtifact, testArtifactDownloadUrl, testArtifactRawUrl, type TestArtifactRef } from './api'
+import { isHtmlArtifact, isMarkdownArtifact } from './artifacts'
+import { Markdown } from './markdown'
 
 interface Props {
-  artifactId: number
+  artifact: TestArtifactRef
   onClose: () => void
   onError: (message: string) => void
 }
 
-// ArtifactPreviewDialog shows one stored artifact in a read-only Monaco
-// editor: a "view" click in the artifacts table fetches the content and
-// renders it with the language picked from the file name (gtest XML,
-// JSON — including *.plot.json figures — yaml, logs, plain text), so
-// result files and figure sources can be inspected without downloading.
-export default function ArtifactPreviewDialog({ artifactId, onClose, onError }: Props) {
-  const [artifact, setArtifact] = useState<TestArtifactContent | null>(null)
-  const [loading, setLoading] = useState(true)
+// sandbox is the policy a framed page runs under — the list the server sets
+// in the response's Content-Security-Policy, repeated on the frame so the
+// page stays sandboxed whatever the response headers turn out to be.
+const sandbox = 'allow-scripts allow-popups allow-downloads allow-forms allow-modals'
+
+type Mode = 'rendered' | 'source'
+
+export default function ArtifactPreviewDialog({ artifact, onClose, onError }: Props) {
+  const page = isHtmlArtifact(artifact)
+  const markdown = isMarkdownArtifact(artifact)
+  const [mode, setMode] = useState<Mode>(page || markdown ? 'rendered' : 'source')
+
+  // The bytes are fetched only for the views that read them: the editor,
+  // and the Markdown renderer. A framed page streams straight from /raw, so
+  // previewing an HTML artifact costs no fetch at all.
+  const needContent = mode === 'source' || markdown
+  const [content, setContent] = useState('')
+  const [loading, setLoading] = useState(needContent)
   const [error, setError] = useState('')
 
   useEffect(() => {
+    if (!needContent) return
     let cancelled = false
     setLoading(true)
     setError('')
-    getTestArtifact(artifactId)
+    getTestArtifact(artifact.id)
       .then((a) => {
-        if (!cancelled) setArtifact(a)
+        if (!cancelled) setContent(a.content)
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -40,7 +74,7 @@ export default function ArtifactPreviewDialog({ artifactId, onClose, onError }: 
     return () => {
       cancelled = true
     }
-  }, [artifactId, onError])
+  }, [artifact.id, needContent, onError])
 
   // Close on Escape.
   useEffect(() => {
@@ -66,21 +100,48 @@ export default function ArtifactPreviewDialog({ artifactId, onClose, onError }: 
         className="dialog dialog-wide"
         role="dialog"
         aria-modal="true"
-        aria-label={artifact ? `Preview ${artifact.name}` : 'Artifact preview'}
+        aria-label={`Preview ${artifact.name}`}
       >
         <div className="dialog-head">
-          <strong className="dialog-title" title={artifact?.name ?? ''}>
-            {artifact?.name ?? 'Artifact'}
+          <strong className="dialog-title" title={artifact.name}>
+            {artifact.name}
           </strong>
-          {artifact && (
+          {(page || markdown) && (
+            <div className="dialog-modes">
+              <button
+                type="button"
+                aria-pressed={mode === 'rendered'}
+                onClick={() => setMode('rendered')}
+              >
+                Preview
+              </button>
+              <button
+                type="button"
+                aria-pressed={mode === 'source'}
+                onClick={() => setMode('source')}
+              >
+                Source
+              </button>
+            </div>
+          )}
+          {page && (
             <a
               className="dialog-action"
-              href={`/api/test-artifacts/${artifact.id}/download`}
-              title="Download the file"
+              href={testArtifactRawUrl(artifact.id)}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open the rendered page in a new tab (sandboxed too)"
             >
-              <Download size={14} />
+              <ExternalLink size={14} />
             </a>
           )}
+          <a
+            className="dialog-action"
+            href={testArtifactDownloadUrl(artifact.id)}
+            title="Download the file"
+          >
+            <Download size={14} />
+          </a>
           <button
             type="button"
             className="dialog-close"
@@ -90,23 +151,30 @@ export default function ArtifactPreviewDialog({ artifactId, onClose, onError }: 
             <X size={14} />
           </button>
         </div>
+        {page && mode === 'rendered' && (
+          <p className="dialog-note">
+            Framed in a sandbox: the page's own scripts run, but it reads no
+            cookie or storage and its requests carry no credentials. Download
+            the file to open it without one.
+          </p>
+        )}
         <div className="dialog-body">
-          {loading && (
+          {needContent && loading && (
             <p className="text-muted">
               <LoaderCircle size={14} className="spin" /> Loading…
             </p>
           )}
-          {error && <div className="alert alert-danger">{error}</div>}
-          {!loading && !error && artifact && (
+          {needContent && error && <div className="alert alert-danger">{error}</div>}
+          {mode === 'source' && !loading && !error && (
             <Editor
               height="100%"
               language={languageOf(artifact.name)}
-              value={artifact.content}
+              value={content}
               theme="md-builder"
               onMount={handleMount}
               options={{
                 readOnly: true,
-                minimap: { enabled: artifact.content.length > 8000 },
+                minimap: { enabled: content.length > 8000 },
                 fontSize: 13,
                 lineNumbersMinChars: 3,
                 scrollBeyondLastLine: true,
@@ -116,6 +184,19 @@ export default function ArtifactPreviewDialog({ artifactId, onClose, onError }: 
                 wordWrap: 'on',
               }}
             />
+          )}
+          {mode === 'rendered' && page && (
+            <iframe
+              className="artifact-frame"
+              src={testArtifactRawUrl(artifact.id)}
+              title={artifact.name}
+              sandbox={sandbox}
+            />
+          )}
+          {mode === 'rendered' && markdown && !loading && !error && (
+            <div className="artifact-doc">
+              <Markdown source={content} />
+            </div>
           )}
         </div>
       </div>
@@ -133,7 +214,7 @@ function languageOf(name: string): string {
   if (lower.endsWith('.yaml') || lower.endsWith('.yml')) return 'yaml'
   if (lower.endsWith('.py')) return 'python'
   if (lower.endsWith('.sh') || lower.endsWith('.bash')) return 'shell'
-  if (lower.endsWith('.md')) return 'markdown'
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'markdown'
   if (lower.endsWith('.html')) return 'html'
   if (lower.endsWith('.js') || lower.endsWith('.ts')) return 'javascript'
   if (lower.endsWith('.c') || lower.endsWith('.h')) return 'c'

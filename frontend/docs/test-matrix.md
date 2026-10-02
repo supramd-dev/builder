@@ -18,7 +18,9 @@ version: 3
 # Optional defaults, merged into every matrix entry (maps merge key-wise,
 # scalars are overridden per entry).
 defaults:
-  timeout: 3600                 # per-command timeout seconds (hard cap 4h)
+  timeout: 3600                 # per-command timeout seconds (hard cap 4h);
+                                # a command that outlives it is reported
+                                # with the "timeout" status
   env:
     OMP_NUM_THREADS: "4"
   variables:                    # templates, expanded on the environment
@@ -116,9 +118,26 @@ build:
   workdir: "build"   # runs in <code>/build
 ```
 
-Every timeout bounds the stage via the remote `timeout` command; the
-whole SSH session gets the sum of the stage timeouts plus 15 minutes of
-slack.
+Every stage command runs under the remote `timeout` command, bounded by
+the stage's timeout (default 3600s, capped at 4h); the stage's own SSH
+session gets that timeout plus 5 minutes of slack.
+
+A stage whose command outlives its timeout is a **`timeout`**, not a plain
+`failed` — the outcome is the same, but the cause is what the pages show:
+
+- the dashboard cell and the run page read "⏱ timeout" in their own color;
+- the run's error and summary name the timeout and the command
+  (`timed out after 30m0s: make -j8`, plus the log tail);
+- the log gets a `task timed out: timed out after 30m0s: make -j8` line at
+  the point the command was killed (its own output stays above it);
+- the stages behind it are **skipped** with "upstream task build timed out"
+  as the reason, exactly as a failure would leave them.
+
+The remote `timeout` wrapper reports exit 124 when it fires, which is how
+the runner tells a timeout from a command that exited 124 on its own
+(nothing does, in practice). A command that ignores SIGTERM and outlives
+the session's slack as well is cut by the session instead — same status,
+same wording.
 
 ## Regression presets
 
@@ -166,9 +185,11 @@ A matrix entry selects presets with `regression.use` and
 
 A case's verdict is its **command's exit status** — nothing else:
 
-- **exit 0 → passed**; any non-zero exit → failed. That includes the
-  timeout (the runner wraps the command in the remote `timeout`, which
-  exits 124) and a failed `cd` into the workdir.
+- **exit 0 → passed**; any non-zero exit → failed. A timeout is the one
+  non-zero exit with a status of its own — **`timeout`**, recorded by the
+  runner rather than derived from the exit code (see the timeout paragraph
+  under [Field reference](#/docs/test-matrix)) — while a failed `cd` into
+  the workdir is a plain failure.
 - An SSH-level failure (host unreachable, session dropped) fails the
   case the same way, with the transport error as the case's note.
 - The preset's `artifacts` files **never flip the verdict** — they are
@@ -186,11 +207,14 @@ The matrix cell is the **container's** state, which is the rollup of the
 cases under it: any failed case fails the stage and the cell says which
 ones ("3/4 cases passed; failed: heat"), all of them passed and the stage
 passes, and while they are still being claimed it reads "2/4 cases passed;
-2 queued". Cases run independently — one failing case does not stop the
-others. When the clone or build ends without passing — it failed, or it
-was itself reported `skipped` — every case is marked **skipped** with the
-upstream error as its summary (and one log line of its own); if every case
-was skipped, the stage itself reads `skipped`, not `passed`.
+2 queued". A container whose failures are all timeouts reads `timeout`
+instead, and names them ("1/4 cases passed; timed out: poisson"); a mix of
+both reads `failed` and names both causes. Cases run independently — one
+failing case does not stop the others. When the clone or build ends
+without passing — it failed, it timed out, or it was itself reported
+`skipped` — every case is marked **skipped** with the upstream error as
+its summary (and one log line of its own); if every case was skipped, the
+stage itself reads `skipped`, not `passed`.
 
 ## Command lists
 
@@ -470,11 +494,12 @@ Any file the build leaves behind works — logs, `compile_commands.json`,
 size reports. As with the test stages, paths are relative to the build's
 workdir and each file is capped at 8 MiB at fetch time.
 
-### Plot artifacts (`*.plot.json`)
+### Plot artifacts (`*.plot.json` / `*.plotly.json`)
 
 A regression case's artifacts may include **plot figures**: files whose
-name ends in `.plot.json` and whose content is a [Plotly] figure
-document — a `data` array of traces plus an optional `layout` object:
+name ends in `.plot.json` or `.plotly.json` and whose content is a
+[Plotly] figure document — a `data` array of traces plus an optional
+`layout` object:
 
 ```yaml
 presets:
@@ -493,14 +518,32 @@ presets:
 }
 ```
 
-When you open the case's run detail page, every `*.plot.json` artifact
-is fetched and rendered as an interactive chart (zoom, hover, legend
-toggle — the standard Plotly toolbar). The document is passed through
-almost verbatim: every [Plotly trace type] (scatter, bar, heatmap, 3D
-surface, …) works, and the file's `layout` wins over the defaults —
-including `layout.height` (capped at 1200 px; the width is always
-responsive). A malformed file shows its error inline and still downloads
-from the artifacts table.
+When you open the run detail page, every plot artifact is fetched and
+rendered as an interactive chart (zoom, hover, legend toggle — the
+standard Plotly toolbar). The document is passed through almost verbatim:
+every [Plotly trace type] (scatter, bar, heatmap, 3D surface, …) works,
+and the file's `layout` wins over the defaults. A malformed file shows its
+error inline and still downloads from the artifacts table.
+
+**Size.** The height is the file's to choose: `layout.height` is drawn as
+written (a bare root-level `height` is honoured too, for hand-rolled
+exports), inside loose bounds of 120–2000 px so a hairline or a runaway
+value is not taken literally. A document that names no height gets 480 px
+— taller than Plotly's own 450, because a chart on this page spans a
+thousand pixels and a shorter default reads as squashed. The width is
+always the container's: a `layout.width` in the file is dropped rather
+than allowed to overflow the page. The label above each chart states the
+height it was drawn at and where it came from — `800 px (from the file)`,
+`480 px (default)`, or `(capped from 4000)` — so a figure that looks
+wrong says why without anyone having to read the JSON.
+
+The **name is what decides**, case-insensitively: only those two suffixes
+are charted, because the alternative — fetching every JSON artifact and
+checking its shape — would download a run's whole results files and pull
+in the 3.5 MB renderer just to find out they are not figures. A figure
+stored under another name (`results/nvt-compare.plotly.json` is fine;
+`results/figure.json` is not) simply appears in the artifacts table like
+any other file.
 
 [Plotly]: https://plotly.com/javascript/
 [Plotly trace type]: https://plotly.com/javascript/chart-studio/
@@ -509,6 +552,71 @@ Plot files are ordinary artifacts otherwise: stored verbatim, capped at
 8 MiB, downloaded with the zip bundle, and irrelevant to the case's
 verdict (the exit code decides, as always). They also work on unit and
 build runs — the detail page charts them wherever they appear.
+
+### HTML artifacts (`*.html`)
+
+An artifact whose name ends in `.html` (or `.htm`) is shown as the page it
+is: press *View* on its row in the artifacts table and the preview dialog
+opens on the rendered page — with a *Source* switch for the markup, a link
+to open it in a tab of its own, and a line saying it runs sandboxed. A test
+that writes a Plotly HTML export, a coverage report or a self-contained
+results page therefore needs nothing beyond listing the file:
+
+```yaml
+unit:
+  command: "pytest --html=report/report.html"
+  artifacts: ["report/report.html"]
+```
+
+The same naming rule as plots applies — only those two suffixes render, and
+the dialog says so (*Preview* is the view they open on). The rendered page
+is served by `GET /api/test-artifacts/{id}/raw`, the artifact endpoint's
+view-don't-save form: the same bytes as the download, with a type the
+browser renders instead of saving, and for HTML a sandbox.
+
+**Why the sandbox matters.** An artifact is a build product: its content
+comes from the code under test, not from md-builder. Rendered from this
+site's own origin, a page's scripts could call the API with your session
+(the session cookie is HttpOnly, which keeps it from being *read* — not
+from being *used*). The response therefore carries
+`Content-Security-Policy: sandbox allow-scripts …` without
+`allow-same-origin`, and the frame repeats that list: the page's scripts
+still run (a Plotly export has to, that is what makes it a page), but from
+an opaque origin that can read no cookie or storage, and whose requests
+carry no credentials. A report that leans on `localStorage` for its UI
+state will degrade in the preview; download it and open it locally if you
+need the full thing. SVG is deliberately *not* previewed for the same
+reason — it is script-capable too — and neither are archives or binaries:
+those stay downloads.
+
+HTML artifacts are ordinary artifacts otherwise: stored verbatim, capped
+at 8 MiB, and downloaded with the zip bundle. Like plots, they work on
+build, unit and regression runs alike, and they never affect a stage's
+verdict.
+
+### Markdown artifacts (`*.md`)
+
+An artifact whose name ends in `.md` (or `.markdown`) opens in the preview
+dialog as a rendered document — headings, lists, tables, fenced code,
+links — with a *Source* switch for the plain text:
+
+```yaml
+unit:
+  command: "./tools/report.sh > report/summary.md"
+  artifacts: ["report/summary.md"]
+```
+
+It is rendered by md-builder itself (the same renderer the built-in docs
+are shown with), which builds DOM nodes directly: the file's bytes are
+never handed to the browser as markup, so a `.md` file needs no sandbox —
+nothing in it can script the page — and only those two suffixes get the
+rendered view. The rendered document is a reading convenience: the file is
+still stored verbatim, and downloads as it is.
+
+Like a plot or a page, it is a display artifact: it is not one of the
+result formats the matrix counts, so listing one never changes a stage's
+verdict. It is how a run's own notes, a summary a script wrote or a
+per-case report reach the person reading the run.
 
 ### Downloading artifacts
 
@@ -570,10 +678,10 @@ Each matched entry becomes a task graph (see
    MD_ENV_TAGS, MD_TASK_DIR, MD_CODE_DIR plus the yaml env variables,
    sources the env setup script (if any), exports the expanded yaml
    variables and runs the build stage in its working directory.
-3. If the build (or the clone) ends without passing — it failed, or it
-   was itself reported `skipped` — the dependent test stages are marked
-   **skipped**, with the reason in their summary and one line in their
-   log, and the dashboard says so.
+3. If the build (or the clone) ends without passing — it failed, it timed
+   out, or it was itself reported `skipped` — the dependent test stages are
+   marked **skipped**, with the reason in their summary and one line in
+   their log, and the dashboard says so.
 4. **unit**: the stage command runs in its working directory under its
    timeout; the full output streams into the task log and the outcome
    is stored as the attempt's test run.
@@ -593,4 +701,6 @@ MD-BUILDER-SUMMARY: all 8 tests passed, max rel err 3.2e-7
 The text after the prefix becomes the run summary shown on the dashboard.
 Without it, the summary is the exit code plus the last lines of the stage
 log (truncated to 500 characters). For a regression case the summary
-line becomes that case's run summary.
+line becomes that case's run summary. A timed-out stage keeps the
+timeout's wording instead: what a killed command printed on its way out is
+the tail of the summary, not the summary itself.

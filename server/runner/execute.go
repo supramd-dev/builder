@@ -105,11 +105,8 @@ func (s *Service) loadRootContext(task *store.Task) (*rootContext, bool) {
 // matrix cell carries the outcome (and a runId to click through) instead of
 // only the graph showing the failure.
 func (s *Service) failEarly(task *store.Task, msg string) {
-	if cfg, err := s.Store.GetSiteConfig(); err == nil {
-		msg = Redact(msg, cfg.AccessToken)
-		msg = Redact(msg, cfg.SecretToken)
-	}
-	logw := NewLogWriter(s.Store, task)
+	msg = s.redact(msg)
+	logw := s.logWriter(task)
 	fmt.Fprintf(logw, "task failed: %s\n", msg)
 	logw.Close()
 	s.finishStage(task, store.StatusFailed, truncateSummary(msg), msg, stageCounts{}, nil)
@@ -124,7 +121,7 @@ func (rc *rootContext) creds() *GitCredentials {
 // (access token, MD_SECRET_TOKEN) armed for scrubbing — a stage command
 // echoing its environment would otherwise persist them in the log.
 func (s *Service) stageLogWriter(rc *rootContext, task *store.Task) *LogWriter {
-	logw := NewLogWriter(s.Store, task)
+	logw := s.logWriter(task)
 	logw.SetSecrets(rc.cfg.AccessToken, rc.cfg.SecretToken)
 	return logw
 }
@@ -164,7 +161,7 @@ func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 	if !ok {
 		return
 	}
-	logw := NewLogWriter(s.Store, task)
+	logw := s.logWriter(task)
 	defer logw.Close()
 
 	if rc.cfg.CodeRepo == "" {
@@ -258,10 +255,14 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	// Build artifacts (when configured) are fetched back verbatim as file
 	// artifacts — no results parsing, the build verdict is the exit code.
 	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindFile, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
-	logw.Flush() // the build run's summary is derived from the persisted log
+	logw.Flush() // store the output before the run row that reports the outcome
 
 	// Record the dashboard build run from the log tail (no per-case results).
-	output := s.readLogTail(task)
+	output := s.stageOutput(task, logw)
+	if stageTimedOut(res) {
+		s.finishTimeout(task, logw, stage.Timeout, stage.Command, output, stageCounts{}, artifacts)
+		return
+	}
 	summary := ExtractSummary(output, res.ExitCode)
 	if res.ExitCode < 0 {
 		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
@@ -297,13 +298,18 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 
 	counts, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindResults, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
-	logw.Flush() // the summary is derived from the persisted log
+	logw.Flush() // store the output before the run row that reports the outcome
 
 	// The log holds the full output; the summary is derived from it.
-	output := s.readLogTail(task)
+	output := s.stageOutput(task, logw)
+	if stageTimedOut(res) {
+		s.finishTimeout(task, logw, stage.Timeout, stage.Command, output, counts, artifacts)
+		return
+	}
 	summary := ExtractSummary(output, res.ExitCode)
 	if res.ExitCode < 0 {
-		// Session-level failure (dial, timeout): surface the transport error.
+		// Session-level failure (dial, cancellation): surface the transport
+		// error. A timeout never reaches this branch — it is its own status.
 		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
 	} else if !hasSummaryLine(output) {
 		// No MD-BUILDER-SUMMARY line: default to the parsed counts when the
@@ -349,13 +355,8 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 	// parsed here are dropped.
 	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindResults, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
-	logw.Flush() // the case's summary is derived from the persisted log
-	output := s.readLogTail(task)
-
-	summary := ExtractSummary(output, res.ExitCode)
-	if res.ExitCode < 0 {
-		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
-	}
+	logw.Flush() // store the output before the run row that reports the outcome
+	output := s.stageOutput(task, logw)
 
 	// A case is one command and one test, so its run counts as that one test
 	// (0/1 when the command failed) — which is how the demo seeds a case and
@@ -364,6 +365,17 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 	counts := stageCounts{total: 1, failed: 1}
 	if res.ExitCode == 0 {
 		counts.failed = 0
+	}
+	if stageTimedOut(res) {
+		// The one test never finished: the counts say so either way, and the
+		// status says why.
+		s.finishTimeout(task, logw, stage.Timeout, stage.Command, output, counts, artifacts)
+		return
+	}
+
+	summary := ExtractSummary(output, res.ExitCode)
+	if res.ExitCode < 0 {
+		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
 	}
 	s.finishCommand(task, logw, res.ExitCode, res.Stderr, summary, counts, artifacts)
 }
@@ -453,22 +465,24 @@ func (s *Service) fetchArtifactFile(ctx context.Context, h SSHHost, rc *rootCont
 	return content, nil
 }
 
-// readLogTail re-reads the persisted log tail of the task's current attempt
-// (the LogWriter already closed by defer ordering — read what landed) for
-// summary extraction. It reads the end of the log, not its beginning: the
-// summary line is the last thing a stage prints, and a long stage's output
-// runs past the page size ReadTaskLogs returns, so reading from zero would
-// derive the summary from the head of a log whose outcome is at its tail.
-func (s *Service) readLogTail(task *store.Task) string {
-	logs, err := s.Store.ReadTaskLogTail(task.ID, task.Attempts)
-	if err != nil {
+// logSummaryTailBytes is how much of a stage's tail the summary is derived
+// from. The summary line is the last thing a stage prints; anything before it
+// is context a parser should not need.
+const logSummaryTailBytes = 256 * 1024
+
+// stageOutput returns the text a stage's summary is derived from: the end of
+// the writer's output, whatever the log's length. A stage that printed 30 MiB
+// and then failed must still have its outcome derived from what it ended with,
+// which is why this reads the tail and not the head.
+//
+// The end, not the beginning: a summary is the last thing a stage prints (see
+// ExtractSummary, which takes the last match), so a window at the head of a
+// long log would miss it.
+func (s *Service) stageOutput(task *store.Task, logw *LogWriter) string {
+	if logw == nil {
 		return ""
 	}
-	var all string
-	for _, l := range logs {
-		all += l.Content
-	}
-	return all
+	return logw.Tail(logSummaryTailBytes)
 }
 
 // finishStage records one real stage's attempt: it writes the attempt's run
@@ -483,7 +497,10 @@ func (s *Service) readLogTail(task *store.Task) string {
 // wrapper can swallow the test binary's result.
 func (s *Service) finishStage(task *store.Task, status, summary, errMsg string,
 	counts stageCounts, artifacts []store.ArtifactInput) {
-	if counts.failed > 0 {
+	// A results file that reports failed cases fails the stage even on exit 0 —
+	// but never a timeout: a killed run's half-written results file says
+	// nothing about the stage, and the timeout is the more useful answer.
+	if counts.failed > 0 && status != store.StatusTimeout {
 		status = store.StatusFailed
 	}
 	res := store.AttemptResult{
@@ -571,15 +588,76 @@ func (s *Service) failTaskLogged(task *store.Task, logw *LogWriter, msg string) 
 	s.finishStage(task, store.StatusFailed, truncateSummary(msg), truncateSummary(msg), stageCounts{}, nil)
 }
 
+// timeoutExitCode is the exit status the `timeout` wrapper of every stage
+// command reports when it killed the command (GNU coreutils' convention), as
+// opposed to the command exiting with a status of its own. It is the signal
+// that a stage outlived its timeout, since the wrapper is what md-builder put
+// around the command.
+const timeoutExitCode = 124
+
+// stageTimedOut reports whether a stage's command run was cut by its timeout,
+// whichever bound fired first: the remote `timeout` wrapper (exit 124), or the
+// SSH session's deadline (ExecResult.TimedOut — a command that ignores SIGTERM
+// outlives the stage's timeout and its slack, and the session is closed under
+// it).
+func stageTimedOut(res ExecResult) bool {
+	return res.TimedOut || res.ExitCode == timeoutExitCode
+}
+
+// stageTimeoutSeconds resolves the number to name in a timeout report: the
+// stage's resolved timeout, or the default for a graph whose snapshot carries
+// none (dispatched before the stage had a timeout).
+func stageTimeoutSeconds(secs int) int {
+	if secs <= 0 {
+		return DefaultStageTimeoutSeconds
+	}
+	return secs
+}
+
+// finishTimeout closes a stage whose command outlived its timeout. The status
+// is store.StatusTimeout rather than "failed" so the dashboard, the run page
+// and the stages behind it all name the cause, and the log carries the same
+// sentence at the point the command was killed.
+//
+// output is the stage's log tail as read *before* this call (finishCommand's
+// convention): the summary quotes the command's own last words, not the line
+// this function appends.
+func (s *Service) finishTimeout(task *store.Task, logw *LogWriter, stageTimeout int,
+	cmds CommandList, output string, counts stageCounts, artifacts []store.ArtifactInput) {
+	dur := time.Duration(stageTimeoutSeconds(stageTimeout)) * time.Second
+	reason := s.writeTimeout(task, logw,
+		fmt.Sprintf("timed out after %s: %s", dur, cmds.String()))
+	summary := fmt.Sprintf("timed out after %s", dur)
+	if tail := tailLine(output, 3); tail != "" {
+		summary += "; log tail: " + tail
+	}
+	s.finishStage(task, store.StatusTimeout, summary, truncateSummary(reason), counts, artifacts)
+}
+
 // writeFailure redacts the site's secrets out of msg, appends it to the task's
 // log and returns the redacted text (what gets stored on the task's error
 // column).
 func (s *Service) writeFailure(task *store.Task, logw *LogWriter, msg string) string {
+	msg = s.redact(msg)
+	fmt.Fprintf(logw, "task failed: %s\n", msg)
+	return msg
+}
+
+// writeTimeout is writeFailure's twin for a stage that ran out of time: the
+// log line says which of the two happened.
+func (s *Service) writeTimeout(task *store.Task, logw *LogWriter, msg string) string {
+	msg = s.redact(msg)
+	fmt.Fprintf(logw, "task timed out: %s\n", msg)
+	return msg
+}
+
+// redact scrubs the site's write-only secrets out of a message that is about
+// to be stored on a task or written to its log.
+func (s *Service) redact(msg string) string {
 	if cfg, err := s.Store.GetSiteConfig(); err == nil {
 		msg = Redact(msg, cfg.AccessToken)
 		msg = Redact(msg, cfg.SecretToken)
 	}
-	fmt.Fprintf(logw, "task failed: %s\n", msg)
 	return msg
 }
 

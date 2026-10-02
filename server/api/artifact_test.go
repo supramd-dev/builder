@@ -19,6 +19,14 @@ import (
 // and returns the test environment, the build stage's run and the artifact row.
 func artifactFixture(t *testing.T, objs storage.Store) (dashboardTestEnv, *store.TestRun, *store.TestArtifact) {
 	t.Helper()
+	return artifactFixtureNamed(t, objs, "build/test_detail.xml", "<testsuites/>")
+}
+
+// artifactFixtureNamed is artifactFixture with the stored artifact's name and
+// content spelled out — the preview endpoint answers by the name's extension,
+// so the tests that go through it need to choose one.
+func artifactFixtureNamed(t *testing.T, objs storage.Store, name, content string) (dashboardTestEnv, *store.TestRun, *store.TestArtifact) {
+	t.Helper()
 	env := newDashboardEnvWithObjects(t, objs)
 	s := env.server.Store
 
@@ -30,7 +38,7 @@ func artifactFixture(t *testing.T, objs storage.Store) (dashboardTestEnv, *store
 		build: &stageSpec{res: &store.AttemptResult{
 			Status: store.StatusPassed,
 			Artifacts: []store.ArtifactInput{
-				{Kind: store.ArtifactKindResults, Name: "build/test_detail.xml", Content: "<testsuites/>"},
+				{Kind: store.ArtifactKindResults, Name: name, Content: content},
 			},
 		}},
 	})
@@ -120,6 +128,7 @@ func TestArtifactContentServedFromObjectStorage(t *testing.T) {
 	for _, path := range []string{
 		fmt.Sprintf("/api/test-artifacts/%d", a.ID),
 		fmt.Sprintf("/api/test-artifacts/%d/download", a.ID),
+		fmt.Sprintf("/api/test-artifacts/%d/raw", a.ID),
 	} {
 		rec = env.authed(http.MethodGet, path, "")
 		if rec.Code != http.StatusNotFound {
@@ -141,7 +150,76 @@ func TestArtifactContentServedFromObjectStorage(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Errorf("download with a broken backend: expected 502, got %d", rec.Code)
 	}
+	rec = env.authed(http.MethodGet, fmt.Sprintf("/api/test-artifacts/%d/raw", a.ID), "")
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("preview with a broken backend: expected 502, got %d", rec.Code)
+	}
 
+}
+
+// The preview endpoint serves the same bytes as the download, but in a form
+// the browser renders in place instead of saving. It is what the run page's
+// HTML preview frames, so its headers are part of the contract: an HTML
+// artifact is served as a page *and* held in a sandbox (opaque origin —
+// scripts run, the app's session stays out of reach), the readable text
+// formats open as text, and everything else falls back to a download.
+func TestArtifactRawServesPreviewableTypes(t *testing.T) {
+	const page = "<!doctype html><html><body><h1>energy drift</h1></body></html>"
+	for _, tc := range []struct {
+		name        string
+		wantType    string
+		wantInline  bool
+		wantSandbox bool
+	}{
+		{"results/nvt-compare.html", "text/html; charset=utf-8", true, true},
+		{"results/nvt-compare.HTM", "text/html; charset=utf-8", true, true},
+		{"build/test_detail.xml", "text/plain; charset=utf-8", true, false},
+		{"build/.ninja_log", "application/octet-stream", false, false},
+		{"build/report.svg", "application/octet-stream", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := storage.NewMemory()
+			env, _, a := artifactFixtureNamed(t, objs, tc.name, page)
+
+			rec := env.authed(http.MethodGet, fmt.Sprintf("/api/test-artifacts/%d/raw", a.ID), "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("raw: %d %s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != tc.wantType {
+				t.Errorf("Content-Type = %q, want %q", got, tc.wantType)
+			}
+			disp := rec.Header().Get("Content-Disposition")
+			if tc.wantInline && !strings.HasPrefix(disp, "inline") {
+				t.Errorf("Content-Disposition = %q, want inline", disp)
+			}
+			if !tc.wantInline && !strings.HasPrefix(disp, "attachment") {
+				t.Errorf("Content-Disposition = %q, want attachment", disp)
+			}
+			if rec.Body.String() != page {
+				t.Errorf("body = %q, want the stored bytes", rec.Body.String())
+			}
+
+			csp := rec.Header().Get("Content-Security-Policy")
+			if tc.wantSandbox {
+				if !strings.HasPrefix(csp, "sandbox") {
+					t.Errorf("an HTML artifact must be sandboxed, got %q", csp)
+				}
+				// allow-scripts without allow-same-origin: the page renders,
+				// but from an opaque origin that cannot reach this app.
+				if !strings.Contains(csp, "allow-scripts") {
+					t.Errorf("the sandbox must let the page's own scripts run: %q", csp)
+				}
+				if strings.Contains(csp, "allow-same-origin") {
+					t.Errorf("allow-same-origin would undo the sandbox: %q", csp)
+				}
+				if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+					t.Errorf("X-Content-Type-Options = %q", got)
+				}
+			} else if csp != "" {
+				t.Errorf("only HTML is sandboxed; got %q for %s", csp, tc.name)
+			}
+		})
+	}
 }
 
 // A zip download whose backend is down is a 502, not an archive of empty

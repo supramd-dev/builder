@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"errors"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +202,43 @@ func TestMemoryStoreRoundTrip(t *testing.T) {
 	}
 	if got := m.Describe(); got != "memory" {
 		t.Fatalf("describe = %q", got)
+	}
+}
+
+// TestLogKeys pins the layout a run's log parts live under: one directory per
+// run, and a part named after the byte offset it starts at — zero padded, so a
+// listing comes back in stream order.
+func TestLogKeys(t *testing.T) {
+	if got, want := LogPrefix("artifacts", 7), "artifacts/runs/7/log/"; got != want {
+		t.Fatalf("LogPrefix = %q, want %q", got, want)
+	}
+	if got, want := LogPrefix("", 7), "runs/7/log/"; got != want {
+		t.Fatalf("LogPrefix without a key prefix = %q, want %q", got, want)
+	}
+	// A part's key must be the key ArtifactKey would build: the store's log
+	// kind is the "log" segment, and a reader's listing is a plain prefix list.
+	key := LogKey("artifacts", 7, 8<<20)
+	if want := ArtifactKey("artifacts", 7, "log", "part-000008388608", 0); key != want {
+		t.Fatalf("LogKey = %q, want %q", key, want)
+	}
+	if !strings.HasPrefix(key, LogPrefix("artifacts", 7)) {
+		t.Fatalf("LogKey %q is not under %q", key, LogPrefix("artifacts", 7))
+	}
+	names := []string{LogPartName(2 << 20), LogPartName(0), LogPartName(10 << 20)}
+	sort.Strings(names)
+	if want := []string{LogPartName(0), LogPartName(2 << 20), LogPartName(10 << 20)}; !slices.Equal(names, want) {
+		t.Fatalf("part names sort to %v, want %v", names, want)
+	}
+	for _, off := range []int64{0, 1, 8 << 20, 1 << 40} {
+		got, ok := LogPartOffset(LogPartName(off))
+		if !ok || got != off {
+			t.Errorf("LogPartOffset(%q) = %d, %v; want %d, true", LogPartName(off), got, ok, off)
+		}
+	}
+	for _, name := range []string{"full.log", "part-", "part-12", "part-00000000000x"} {
+		if _, ok := LogPartOffset(name); ok {
+			t.Errorf("LogPartOffset(%q) reported a part", name)
+		}
 	}
 }
 

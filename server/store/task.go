@@ -42,6 +42,12 @@ const (
 	StatusRunning = "running"
 	StatusPassed  = "passed"
 	StatusFailed  = "failed"
+	// StatusTimeout is a failure with a cause of its own: the stage's command
+	// outlived the timeout md-builder.yaml gave it and was killed. It is a
+	// status rather than a wording of "failed" so the dashboard, the run page
+	// and the log all name the cause, and it gates the stages behind it
+	// exactly like a failure does.
+	StatusTimeout = "timeout"
 	// StatusSkipped is a real status, not a summary convention: the node never
 	// ran because an upstream task failed. Its reason is free text in Summary.
 	StatusSkipped = "skipped"
@@ -152,7 +158,8 @@ func TaskKindVirtual(kind string) bool {
 
 // TaskStatusTerminal returns whether status is a final state of a node.
 func TaskStatusTerminal(status string) bool {
-	return status == StatusPassed || status == StatusFailed || status == StatusSkipped
+	return status == StatusPassed || status == StatusFailed ||
+		status == StatusTimeout || status == StatusSkipped
 }
 
 // ValidateTaskKind reports whether kind is a known task kind.
@@ -899,20 +906,10 @@ func skipTasksTx(tx *gorm.DB, tasks []*Task, reason string) error {
 			}).Error; err != nil {
 			return err
 		}
-		// The reason goes into the log as well: the stage never ran, and a log
-		// that is empty with no explanation reads as a broken task rather than
-		// as a stage an upstream failure stopped.
-		var seq int
-		if err := tx.Model(&TaskLog{}).Where("task_id = ? AND attempt = ?", cur.ID, cur.Attempts).
-			Select("COALESCE(MAX(seq), 0)").Scan(&seq).Error; err != nil {
-			return err
-		}
-		if err := tx.Create(&TaskLog{
-			TaskID: cur.ID, Attempt: cur.Attempts, Seq: seq + 1, RunID: run.ID,
-			Content: "skipped: " + reason + "\n",
-		}).Error; err != nil {
-			return err
-		}
+		// The reason is the node's and the run's summary and nothing else: a
+		// stage that never ran produced no output, so it has no log (the run's
+		// log is what the runner writes, and no runner ever saw this attempt).
+		// The task page shows the summary beside the empty log.
 	}
 	return nil
 }
@@ -979,12 +976,16 @@ func skipDependentsTx(tx *gorm.DB, rootID, failedID int64, reason string) error 
 const maxReasonLen = 500
 
 // FailureReason is the reason a node's dependents carry once the node ended
-// without passing: which task stopped them and why.
+// without passing: which task stopped them and why. A timeout says so: the
+// stages behind it were stopped by the clock, not by a failing assertion.
 func FailureReason(task *Task, res AttemptResult) string {
 	reason := "upstream task " + task.Name
-	if res.Status == StatusSkipped {
+	switch res.Status {
+	case StatusSkipped:
 		reason += " was skipped"
-	} else {
+	case StatusTimeout:
+		reason += " timed out"
+	default:
 		reason += " failed"
 	}
 	if res.Error != "" {
@@ -1074,15 +1075,18 @@ type virtualRollup struct {
 }
 
 // rollupChildren derives a container's state from its children. The rules:
-// any failed child fails the container; otherwise a child already running
-// makes it running; otherwise a queued child keeps it pending; otherwise a
-// skipped child (an upstream failure stopped it) makes the container skipped;
-// everything else passed.
+// any failed child fails the container; a container whose failures are all
+// timeouts takes the timeout status instead (the cause is the point); otherwise
+// a child already running makes it running; otherwise a queued child keeps it
+// pending; otherwise a skipped child (an upstream failure stopped it) makes the
+// container skipped; everything else passed.
 //
-// A real child counts as one unit; a container child (the root's regression
-// stage) contributes its own children's tally instead of itself, so a
-// container counts the leaves under it and never a wrapper. Timestamps
-// aggregate, so a container answers "how did this stage do?" without a join.
+// A timed-out child counts in the failed tally: it is not a pass either, and
+// the counts column has to add up. A real child counts as one unit; a container
+// child (the root's regression stage) contributes its own children's tally
+// instead of itself, so a container counts the leaves under it and never a
+// wrapper. Timestamps aggregate, so a container answers "how did this stage
+// do?" without a join.
 func rollupChildren(kind string, kids []*Task) virtualRollup {
 	noun := "stages"
 	if kind == TaskKindRegressionStage {
@@ -1095,8 +1099,9 @@ func rollupChildren(kind string, kids []*Task) virtualRollup {
 		out.Summary = "no " + noun
 		return out
 	}
-	var failedNames []string
+	var failedNames, timeoutNames []string
 	runningKids, pendingKids, skippedKids := 0, 0, 0
+	failedKids, timeoutKids := 0, 0
 	for _, kid := range kids {
 		if kid.Virtual {
 			out.Total += kid.Total
@@ -1108,7 +1113,7 @@ func rollupChildren(kind string, kids []*Task) virtualRollup {
 			switch kid.Status {
 			case StatusPassed:
 				out.Passed++
-			case StatusFailed:
+			case StatusFailed, StatusTimeout:
 				out.Failed++
 			case StatusSkipped:
 				out.Skipped++
@@ -1120,7 +1125,11 @@ func rollupChildren(kind string, kids []*Task) virtualRollup {
 		case StatusPending:
 			pendingKids++
 		case StatusFailed:
+			failedKids++
 			failedNames = append(failedNames, kid.Name)
+		case StatusTimeout:
+			timeoutKids++
+			timeoutNames = append(timeoutNames, kid.Name)
 		case StatusSkipped:
 			skippedKids++
 		}
@@ -1128,14 +1137,20 @@ func rollupChildren(kind string, kids []*Task) virtualRollup {
 		out.FinishedAt = laterTime(out.FinishedAt, kid.FinishedAt)
 	}
 	switch {
+	case timeoutKids > 0 && failedKids == 0:
+		out.Status = StatusTimeout
+		out.Summary = fmt.Sprintf("%d/%d %s passed; timed out: %s",
+			out.Passed, out.Total, noun, nameList(timeoutNames))
 	case out.Failed > 0:
 		out.Status = StatusFailed
-		shown := failedNames
-		if len(shown) > 3 {
-			shown = append(shown[:3], "…")
+		summary := fmt.Sprintf("%d/%d %s passed; failed: %s",
+			out.Passed, out.Total, noun, nameList(failedNames))
+		if timeoutKids > 0 {
+			// A mix of both causes: the container reads "failed", and the
+			// timeouts are still named rather than swallowed by the word.
+			summary += "; timed out: " + nameList(timeoutNames)
 		}
-		out.Summary = fmt.Sprintf("%d/%d %s passed; failed: %s",
-			out.Passed, out.Total, noun, strings.Join(shown, ", "))
+		out.Summary = summary
 	case runningKids > 0:
 		out.Status = StatusRunning
 		out.Summary = fmt.Sprintf("%d/%d %s passed; %d in progress",
@@ -1156,6 +1171,15 @@ func rollupChildren(kind string, kids []*Task) virtualRollup {
 		out.Summary = fmt.Sprintf("%d/%d %s passed", out.Passed, out.Total, noun)
 	}
 	return out
+}
+
+// nameList renders the child names of a rollup summary, capped at three with
+// an ellipsis so a wide graph does not turn one cell into a paragraph.
+func nameList(names []string) string {
+	if len(names) > 3 {
+		return strings.Join(names[:3], ", ") + ", …"
+	}
+	return strings.Join(names, ", ")
 }
 
 // earlierTime/laterTime fold a child's timestamps into a container's window.
@@ -1325,13 +1349,6 @@ func (s *Store) DeleteTasksForEnvironment(envID int64) error {
 		}
 		if err := tx.Where("environment_id = ?", envID).Delete(&TestRun{}).Error; err != nil {
 			return err
-		}
-		if len(taskIDs) > 0 {
-			for _, chunk := range chunkIDs(taskIDs, 500) {
-				if err := tx.Where("task_id IN ?", chunk).Delete(&TaskLog{}).Error; err != nil {
-					return err
-				}
-			}
 		}
 		return tx.Where("environment_id = ?", envID).Delete(&Task{}).Error
 	})

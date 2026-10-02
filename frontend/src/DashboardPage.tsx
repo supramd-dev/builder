@@ -570,9 +570,11 @@ function SingleCell({
       ? 'queued — the stage has not reported yet'
       : status === 'running'
         ? 'running — following the stage live'
-        : status === 'skipped'
-          ? 'not executed — an upstream stage failed'
-          : `${cell.passed}/${cell.total} passed`
+        : status === 'timeout'
+          ? 'timed out — the stage outlived its timeout'
+          : status === 'skipped'
+            ? 'not executed — an upstream stage failed'
+            : `${cell.passed}/${cell.total} passed`
   const title = cell.runId
     ? (note || fallback) + ' — click for details'
     : (note || fallback) +

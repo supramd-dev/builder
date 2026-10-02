@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -390,6 +392,184 @@ func TestSweepOrphanObjects(t *testing.T) {
 	}
 }
 
+// A run's log is referenced by the run row, not by an artifact row: the sweep
+// must keep every part of it while the run is there and reclaim the whole
+// directory with the run.
+func TestSweepKeepsTheRunsLogParts(t *testing.T) {
+	s, objs := newTestStoreWithObjects(t)
+	env, commit := seedEnvAndCommit(t, s)
+	_, run := unitRun(t, s, env, commit)
+
+	ctx := context.Background()
+	prefix := storage.LogPrefix(objs.KeyPrefix(), run.ID)
+	first, second := prefix+"part-000000000000", prefix+"part-000000000005"
+	for _, part := range []struct{ key, body string }{{first, "hello"}, {second, " world"}} {
+		if _, err := objs.Put(ctx, part.key, []byte(part.body)); err != nil {
+			t.Fatalf("put %s: %v", part.key, err)
+		}
+	}
+	ok, err := s.SetRunLogPrefix(run.ID, prefix, 11)
+	if err != nil || !ok {
+		t.Fatalf("set run log prefix: ok=%t err=%v", ok, err)
+	}
+	if got, err := s.GetTestRun(run.ID); err != nil || got.LogPrefix != prefix || got.LogBytes != 11 {
+		t.Fatalf("run log fields = %+v, %v", got, err)
+	}
+
+	// Aged past the grace period but still referenced: every part kept.
+	objs.SetLastModified(first, time.Now().Add(-2*artifactGracePeriod))
+	objs.SetLastModified(second, time.Now().Add(-2*artifactGracePeriod))
+	if n, err := s.SweepOrphanObjects(ctx); err != nil || n != 0 {
+		t.Fatalf("sweep with a referenced log: n=%d err=%v", n, err)
+	}
+	if objs.Len() != 2 {
+		t.Fatalf("a referenced log part was swept: %v", objs.Keys())
+	}
+
+	// Deleting the task's runs drops the reference; now they are orphans.
+	if err := s.DeleteTasksForEnvironment(env.ID); err != nil {
+		t.Fatalf("delete environment tasks: %v", err)
+	}
+	if _, err := s.GetTestRun(run.ID); !errors.Is(err, ErrTestRunNotFound) {
+		t.Fatalf("run still there: %v", err)
+	}
+	n, err := s.SweepOrphanObjects(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 2 || objs.Len() != 0 {
+		t.Fatalf("sweep removed %d objects, %d left", n, objs.Len())
+	}
+}
+
+// An older server's log was one object named "full.log". That key is itself a
+// valid prefix, so a run that never re-ran keeps its whole log alive too.
+func TestSweepKeepsALegacyFullLog(t *testing.T) {
+	s, objs := newTestStoreWithObjects(t)
+	env, commit := seedEnvAndCommit(t, s)
+	_, run := unitRun(t, s, env, commit)
+
+	ctx := context.Background()
+	key := storage.ArtifactKey(objs.KeyPrefix(), run.ID, ArtifactKindLog, "full.log", 0)
+	if _, err := objs.Put(ctx, key, []byte("the whole log\n")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if ok, err := s.SetRunLogPrefix(run.ID, key, int64(len("the whole log\n"))); err != nil || !ok {
+		t.Fatalf("set run log prefix: ok=%t err=%v", ok, err)
+	}
+	objs.SetLastModified(key, time.Now().Add(-2*artifactGracePeriod))
+	if n, err := s.SweepOrphanObjects(ctx); err != nil || n != 0 {
+		t.Fatalf("sweep with a referenced full log: n=%d err=%v", n, err)
+	}
+	if objs.Len() != 1 {
+		t.Fatal("a referenced full log was swept")
+	}
+}
+
+// A run that re-runs writes its parts under a new prefix, leaving the old
+// one unreferenced: the sweep reclaims the parts the run no longer points at.
+func TestSweepReclaimsAReplacedLogPrefix(t *testing.T) {
+	s, objs := newTestStoreWithObjects(t)
+	env, commit := seedEnvAndCommit(t, s)
+	_, run := unitRun(t, s, env, commit)
+
+	ctx := context.Background()
+	old := storage.LogPrefix(objs.KeyPrefix(), run.ID)
+	replacement := storage.LogPrefix("elsewhere", run.ID)
+	for _, key := range []string{old + "part-000000000000", replacement + "part-000000000000"} {
+		if _, err := objs.Put(ctx, key, []byte("bytes")); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+		objs.SetLastModified(key, time.Now().Add(-2*artifactGracePeriod))
+	}
+	if ok, err := s.SetRunLogPrefix(run.ID, replacement, 5); err != nil || !ok {
+		t.Fatalf("set run log prefix: ok=%t err=%v", ok, err)
+	}
+	n, err := s.SweepOrphanObjects(ctx)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("sweep removed %d objects, want 1", n)
+	}
+	if keys := objs.Keys(); len(keys) != 1 || keys[0] != replacement+"part-000000000000" {
+		t.Fatalf("left behind %v", keys)
+	}
+}
+
+// SetRunLogPrefix on a run that is gone reports "not stored" rather than
+// failing, so the writer can tell its upload has no owner.
+func TestSetRunLogPrefixWithoutARun(t *testing.T) {
+	s, _ := newTestStoreWithObjects(t)
+	ok, err := s.SetRunLogPrefix(9999, "runs/9999/log/", 12)
+	if err != nil || ok {
+		t.Fatalf("unknown run: ok=%t err=%v", ok, err)
+	}
+	if ok, err := s.SetRunLogPrefix(0, "", 0); err != nil || ok {
+		t.Fatalf("empty reference: ok=%t err=%v", ok, err)
+	}
+	if ok, err := s.SetRunLogPrefix(0, "runs/0/log/", 0); err != nil || ok {
+		t.Fatalf("run zero: ok=%t err=%v", ok, err)
+	}
+}
+
+// ListRunLogParts returns the parts in stream order with the offset each
+// starts at, and reads a legacy single object as a one-part log.
+func TestListRunLogParts(t *testing.T) {
+	s, objs := newTestStoreWithObjects(t)
+	env, commit := seedEnvAndCommit(t, s)
+	_, run := unitRun(t, s, env, commit)
+
+	ctx := context.Background()
+	if _, err := s.ListRunLogParts(ctx, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("empty prefix: %v", err)
+	}
+	prefix := storage.LogPrefix(objs.KeyPrefix(), run.ID)
+	if parts, err := s.ListRunLogParts(ctx, prefix); err != nil || len(parts) != 0 {
+		t.Fatalf("run without a log: parts=%v err=%v", parts, err)
+	}
+
+	// Written out of order, and one part holding binary bytes: the listing
+	// is ordered by the offset in the name, not by the backend's order.
+	for _, part := range []struct {
+		off  int64
+		body string
+	}{{8 << 20, "third"}, {0, "first"}, {2 << 20, "second"}} {
+		if _, err := objs.Put(ctx, storage.LogKey(objs.KeyPrefix(), run.ID, part.off), []byte(part.body)); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	parts, err := s.ListRunLogParts(ctx, prefix)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	want := []LogPart{
+		{Key: storage.LogKey(objs.KeyPrefix(), run.ID, 0), Start: 0, Size: 5},
+		{Key: storage.LogKey(objs.KeyPrefix(), run.ID, 2<<20), Start: 2 << 20, Size: 6},
+		{Key: storage.LogKey(objs.KeyPrefix(), run.ID, 8<<20), Start: 8 << 20, Size: 5},
+	}
+	if !slices.Equal(parts, want) {
+		t.Fatalf("parts = %+v, want %+v", parts, want)
+	}
+	if got := parts[1].End(); got != (2<<20)+6 {
+		t.Fatalf("End = %d, want %d", got, (2<<20)+6)
+	}
+
+	// A legacy run's "full.log" has no offset in its name: it reads as the
+	// single part starting at zero.
+	legacy := storage.ArtifactKey(objs.KeyPrefix(), run.ID, ArtifactKindLog, "full.log", 0)
+	if _, err := objs.Put(ctx, legacy, []byte("done\n")); err != nil {
+		t.Fatalf("put legacy: %v", err)
+	}
+	parts, err = s.ListRunLogParts(ctx, legacy)
+	if err != nil {
+		t.Fatalf("list legacy: %v", err)
+	}
+	if len(parts) != 1 || parts[0].Start != 0 || parts[0].Size != 5 {
+		t.Fatalf("legacy parts = %+v", parts)
+	}
+}
+
 // Objects outside the runs namespace belong to someone else and are left
 // alone.
 func TestSweepIgnoresForeignObjects(t *testing.T) {
@@ -405,5 +585,23 @@ func TestSweepIgnoresForeignObjects(t *testing.T) {
 	}
 	if n != 0 || objs.Len() != 1 {
 		t.Fatalf("sweep removed %d objects (want 0), %d left", n, objs.Len())
+	}
+}
+
+// The key layout of a run's log is built in two packages that cannot import
+// each other: storage owns the path, the store owns the "log" kind. They must
+// agree, or a part written by the runner lands outside the directory the
+// sweep keeps an eye on.
+func TestLogKeyLayoutMatchesTheStoreKind(t *testing.T) {
+	prefix := storage.LogPrefix("artifacts", 7)
+	if want := prefix + storage.LogPartName(8<<20); prefix+storage.LogPartName(8<<20) != want {
+		t.Fatal("LogPartName is not the part's name")
+	}
+	key := storage.LogKey("artifacts", 7, 8<<20)
+	if want := storage.ArtifactKey("artifacts", 7, ArtifactKindLog, storage.LogPartName(8<<20), 0); key != want {
+		t.Fatalf("LogKey = %q, want %q", key, want)
+	}
+	if dir := path.Dir(key) + "/"; dir != prefix {
+		t.Fatalf("a part sits in %q, but the run keeps %q alive", dir, prefix)
 	}
 }

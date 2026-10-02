@@ -67,6 +67,14 @@ const (
 	EnvDisableWorker = "MD_BUILDER_DISABLE_WORKER"
 	// EnvPublicURL overrides server.publicURL.
 	EnvPublicURL = "MD_BUILDER_PUBLIC_URL"
+	// EnvLogPartBytes overrides logs.partBytes.
+	EnvLogPartBytes = "MD_BUILDER_LOG_PART_BYTES"
+	// EnvLogMaxStored overrides logs.maxStoredBytes (no longer used).
+	EnvLogMaxStored = "MD_BUILDER_LOG_MAX_STORED"
+	// EnvLogMaxFile overrides logs.maxFileBytes (no longer used).
+	EnvLogMaxFile = "MD_BUILDER_LOG_MAX_FILE"
+	// EnvLogSpoolDir overrides logs.spoolDir (no longer used).
+	EnvLogSpoolDir = "MD_BUILDER_LOG_SPOOL_DIR"
 )
 
 // DefaultDSN is the database opened when neither the file nor the environment
@@ -116,6 +124,43 @@ type Worker struct {
 	Count int `yaml:"count"`
 }
 
+// Logs is the `logs` section: how a task's output is kept. A running stage
+// holds its newest output in memory; every time that reaches PartBytes it is
+// stored as one part object under the run's log prefix, and the whole log is
+// those parts in order. Nothing about a log is stored in the database.
+type Logs struct {
+	// PartBytes is how much output a running stage holds in memory before it
+	// is stored as one part (0 = 8 MiB): the memory a stage costs, the size
+	// of one object, and how far a viewer in another process can lag. A
+	// smaller part is a fresher remote view at the price of more objects.
+	PartBytes int64 `yaml:"partBytes"`
+
+	// MaxStoredBytes, MaxFileBytes and SpoolDir configured the two copies a
+	// stage's log used to be kept in (capped chunks in the database, and one
+	// spooled file uploaded when the stage ended). Neither exists any more:
+	// they are still accepted so that an older configuration file keeps
+	// loading, and the server says so once at startup. See LegacyKeys.
+	MaxStoredBytes int64  `yaml:"maxStoredBytes"`
+	MaxFileBytes   int64  `yaml:"maxFileBytes"`
+	SpoolDir       string `yaml:"spoolDir"`
+}
+
+// LegacyKeys names the logs settings this build accepts but no longer uses, so
+// the server can point them out rather than leave them looking effective.
+func (l Logs) LegacyKeys() []string {
+	var keys []string
+	if l.MaxStoredBytes != 0 {
+		keys = append(keys, "maxStoredBytes")
+	}
+	if l.MaxFileBytes != 0 {
+		keys = append(keys, "maxFileBytes")
+	}
+	if l.SpoolDir != "" {
+		keys = append(keys, "spoolDir")
+	}
+	return keys
+}
+
 // Config is the whole configuration file, and also the resolved configuration
 // Load returns: the file's values with the environment overlaid on top.
 type Config struct {
@@ -127,6 +172,8 @@ type Config struct {
 	Dist string `yaml:"dist"`
 	// Worker is the scheduling pool.
 	Worker Worker `yaml:"worker"`
+	// Logs bounds the task output kept per stage.
+	Logs Logs `yaml:"logs"`
 	// ObjectStorage configures the artifact store (MinIO / S3).
 	ObjectStorage storage.Config `yaml:"objectStorage"`
 }
@@ -308,6 +355,29 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Worker.Enabled = !disabled
 	}
+
+	// The log limits are byte counts; a value that does not parse is an
+	// error rather than a silent fallback to the default (a typo would
+	// otherwise cap a log the operator meant to keep).
+	for _, b := range []struct {
+		key string
+		dst *int64
+	}{
+		{EnvLogPartBytes, &cfg.Logs.PartBytes},
+		{EnvLogMaxStored, &cfg.Logs.MaxStoredBytes},
+		{EnvLogMaxFile, &cfg.Logs.MaxFileBytes},
+	} {
+		v := strings.TrimSpace(os.Getenv(b.key))
+		if v == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("%s: %q is not a positive number of bytes", b.key, v)
+		}
+		*b.dst = n
+	}
+	setString(EnvLogSpoolDir, &cfg.Logs.SpoolDir)
 
 	setString("MD_BUILDER_S3_ENDPOINT", &cfg.ObjectStorage.Endpoint)
 	setString("MD_BUILDER_S3_ACCESS_KEY", &cfg.ObjectStorage.AccessKey)

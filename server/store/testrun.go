@@ -53,7 +53,16 @@ func RunKindValid(kind string) bool {
 
 // AttemptStatusValid reports whether status may end an attempt.
 func AttemptStatusValid(status string) bool {
-	return status == StatusPassed || status == StatusFailed || status == StatusSkipped
+	return status == StatusPassed || status == StatusFailed ||
+		status == StatusTimeout || status == StatusSkipped
+}
+
+// AttemptStatusGatesDependents reports whether an attempt's outcome means the
+// stages behind it can never run: a failure or a timeout stopped them, and a
+// skip already came from such a gate further up. Only a passing attempt lets
+// the graph move on.
+func AttemptStatusGatesDependents(status string) bool {
+	return status == StatusFailed || status == StatusTimeout || status == StatusSkipped
 }
 
 // TestRun is one attempt of one real task: when it ran, how long it took and
@@ -95,14 +104,47 @@ type TestRun struct {
 	// never disagree; which of the two a reader uses is a matter of what it
 	// already has in hand (the matrix and the task page read the node, the run
 	// page reads the run).
-	Total      int `gorm:"not null;default:0"`
-	Passed     int `gorm:"not null;default:0"`
-	Failed     int `gorm:"not null;default:0"`
-	Skipped    int `gorm:"not null;default:0"`
+	Total   int `gorm:"not null;default:0"`
+	Passed  int `gorm:"not null;default:0"`
+	Failed  int `gorm:"not null;default:0"`
+	Skipped int `gorm:"not null;default:0"`
+	// LogPrefix is where the run's log lives in object storage — the
+	// directory its parts are written under, "<prefix>/runs/<id>/log/" — and
+	// "" when it has none (a stage that never ran, or one whose process
+	// died before its first part was uploaded). The runner writes the parts
+	// and the API reads them back by byte offset; LogBytes is how many bytes
+	// of the log are stored there, and LogPrefix is what the orphan sweep
+	// keeps alive.
+	//
+	// The column keeps its old name: before the log became parts it held one
+	// object's key, which is itself a valid (single-object) prefix, so the
+	// logs of runs written by an older server are still found by listing it.
+	//
+	// It is on the run (not the task) because a run is one attempt: a retry
+	// is a new attempt with a new log, and the previous attempt keeps its own.
+	LogPrefix  string `gorm:"column:log_object_key;not null;default:''"`
+	LogBytes   int64  `gorm:"not null;default:0"`
 	StartedAt  time.Time
 	FinishedAt time.Time
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+}
+
+// SetRunLogPrefix records where a run's log parts live and how many bytes of
+// them are stored. The writer calls it after each part, so the run always
+// describes what a reader will find; the parts of a run whose row has been
+// replaced by a re-dispatch are unreferenced and the sweep reclaims them.
+// ok is false when no such run exists. A missing run is not an error.
+func (s *Store) SetRunLogPrefix(runID int64, prefix string, size int64) (bool, error) {
+	if runID == 0 || prefix == "" {
+		return false, nil
+	}
+	res := s.DB.Model(&TestRun{}).Where("id = ?", runID).
+		Updates(map[string]any{"log_object_key": prefix, "log_bytes": size})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // EnvCommit keys a run by its environment and commit.
@@ -322,14 +364,15 @@ func (s *Store) FinishAttempt(taskID int64, res AttemptResult) (*TestRun, error)
 		}).Error; err != nil {
 			return err
 		}
-		if res.Status != StatusFailed && res.Status != StatusSkipped {
+		if !AttemptStatusGatesDependents(res.Status) {
 			return rollupTx(tx, task.RootID)
 		}
 		// A node that did not pass gates everything behind it: its dependents
 		// can never be claimed (taskDepsPassed waits for passed), so they are
 		// skipped here — with their own attempts' runs — instead of staying
 		// pending for ever. The reason reads the way the runner used to write
-		// it, now for both outcomes.
+		// it, now for every outcome that stops the graph (a failure, a timeout,
+		// and a skip that came from one of them).
 		if err := skipDependentsTx(tx, task.RootID, task.ID, FailureReason(task, res)); err != nil {
 			return err
 		}

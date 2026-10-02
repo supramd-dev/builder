@@ -13,6 +13,7 @@ package runner
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"md-builder/server/store"
@@ -45,6 +46,60 @@ type Service struct {
 
 	// FetchTimeout caps the md-builder.yaml read (0 = defaultFetchTimeout).
 	FetchTimeout time.Duration
+
+	// LogLimits bounds a stage's log: the part size, which is the memory a
+	// running stage holds and what one object holds. The zero value is the
+	// default; main sets it from the configuration's logs section.
+	LogLimits LogLimits
+
+	// live holds the writer of every log this process is still writing: its
+	// buffer is the newest output of those stages, so a reader following one
+	// sees it immediately and a download gets the whole log as it stands. It
+	// is process-local: a deployment that runs its workers on another host has
+	// nothing here, and readers there see the stored parts instead.
+	liveMu sync.Mutex
+	live   map[liveLogKey]*LogWriter
+}
+
+// liveLogKey identifies one stage's log: a task's attempt, for which only one
+// writer runs at a time.
+type liveLogKey struct {
+	taskID  int64
+	attempt int
+}
+
+// logWriter returns a log writer for a task's current attempt, with the
+// Service's log limits. Every writer the Service builds is registered here,
+// which is the one place they are built — a writer that is not registered
+// would simply not be readable while its stage runs (see OpenLogSource).
+func (s *Service) logWriter(task *store.Task) *LogWriter {
+	lw := NewLogWriter(s.Store, task, s.LogLimits)
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if s.live == nil {
+		s.live = make(map[liveLogKey]*LogWriter)
+	}
+	key := liveLogKey{taskID: lw.taskID, attempt: lw.attempt}
+	s.live[key] = lw
+	lw.setCloseHook(func() {
+		// Only if it is still ours: a re-dispatch may have started the next
+		// attempt's writer for the same key while this one was closing.
+		s.liveMu.Lock()
+		defer s.liveMu.Unlock()
+		if s.live[key] == lw {
+			delete(s.live, key)
+		}
+	})
+	return lw
+}
+
+// OpenLog starts the log writer for a task's current attempt and registers it
+// as live: what the caller writes to it is the stage's output, and a reader can
+// follow it (or download it) before the stage ends. The runner calls this once
+// per stage; it is exported for the tests that need a stage which is still
+// running.
+func (s *Service) OpenLog(task *store.Task) *LogWriter {
+	return s.logWriter(task)
 }
 
 // fetchTimeout is the effective deadline for reading the test matrix.

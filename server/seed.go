@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +13,7 @@ import (
 	"md-builder/server/auth"
 	"md-builder/server/config"
 	"md-builder/server/runner"
+	"md-builder/server/storage"
 	"md-builder/server/store"
 )
 
@@ -578,9 +580,9 @@ func demoAttempt(start, end time.Time, status, summary, errMsg string, counts de
 	}
 }
 
-// finishDemoStage reports one stage's attempt and appends its log, the way the
-// runner does: the outcome through store.FinishAttempt, then the log chunks
-// under the attempt the store left in flight.
+// finishDemoStage reports one stage's attempt and stores its log, the way the
+// runner does: the outcome through store.FinishAttempt, then the log as the
+// attempt's first part.
 func finishDemoStage(s *store.Store, node *store.Task, res store.AttemptResult, lines []string) error {
 	if node == nil {
 		return errors.New("demo stage is missing from the graph")
@@ -591,10 +593,18 @@ func finishDemoStage(s *store.Store, node *store.Task, res store.AttemptResult, 
 	return appendDemoLog(s, node, lines)
 }
 
-// appendDemoLog stores one stage's log lines as the sequential chunks of the
-// attempt the node is on.
+// appendDemoLog stores one stage's log lines as the first part of the attempt
+// the node is on (see runner.LogWriter: a log is the parts stored under the
+// run's prefix, and a demo log is a few lines, so one part is all of it). A
+// demo seeded without object storage has no logs — the page shows the stage's
+// summary and an empty log — rather than failing the seed.
 func appendDemoLog(s *store.Store, node *store.Task, lines []string) error {
-	if len(lines) == 0 {
+	text := strings.Join(lines, "")
+	if text == "" {
+		return nil
+	}
+	objs := s.Objects()
+	if objs == nil {
 		return nil
 	}
 	task, err := s.GetTask(node.ID)
@@ -605,12 +615,13 @@ func appendDemoLog(s *store.Store, node *store.Task, lines []string) error {
 	if err != nil {
 		return err
 	}
-	for i, content := range lines {
-		if err := s.AppendTaskLog(&store.TaskLog{
-			TaskID: task.ID, Attempt: task.Attempts, Seq: i + 1, RunID: run.ID, Content: content,
-		}); err != nil {
-			return err
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := objs.Put(ctx, storage.LogKey(objs.KeyPrefix(), run.ID, 0), []byte(text)); err != nil {
+		return fmt.Errorf("store the demo log of task %d: %w", task.ID, err)
+	}
+	if _, err := s.SetRunLogPrefix(run.ID, storage.LogPrefix(objs.KeyPrefix(), run.ID), int64(len(text))); err != nil {
+		return err
 	}
 	return nil
 }

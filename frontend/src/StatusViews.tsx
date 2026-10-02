@@ -15,9 +15,10 @@ export function commitUrl(repoUrl: string | undefined, sha: string): string {
 }
 
 // StageStatus renders a dashboard stage as plain colored text — "✓ pass" /
-// "✗ fail" / "⤼ skip" / spinner "run" / gray "pending" — linking to the run
-// or task details when clickable. label overrides the pass/fail word (e.g.
-// the passed/total counts on the unit and regression dashboards).
+// "✗ fail" / "⏱ timeout" / "⤼ skip" / spinner "run" / gray "pending" —
+// linking to the run or task details when clickable. label overrides the
+// pass/fail word (e.g. the passed/total counts on the unit and regression
+// dashboards).
 export function StageStatus({ status, label, onClick, title }: {
   status: string
   label?: string
@@ -27,9 +28,10 @@ export function StageStatus({ status, label, onClick, title }: {
   const cls =
     status === 'passed' ? 'dash-st-ok'
       : status === 'failed' ? 'dash-st-fail'
-        : status === 'skipped' ? 'dash-st-skip'
-          : status === 'running' ? 'dash-st-run'
-            : 'dash-st-pending'
+        : status === 'timeout' ? 'dash-st-timeout'
+          : status === 'skipped' ? 'dash-st-skip'
+            : status === 'running' ? 'dash-st-run'
+              : 'dash-st-pending'
   const inner =
     status === 'running' ? (
       <>
@@ -37,8 +39,9 @@ export function StageStatus({ status, label, onClick, title }: {
       </>
     )
       : status === 'pending' ? 'pending'
-        : status === 'skipped' ? '⤼ skip'
-          : `${status === 'passed' ? '✓' : '✗'} ${label ?? (status === 'passed' ? 'pass' : 'fail')}`
+        : status === 'timeout' ? '⏱ timeout'
+          : status === 'skipped' ? '⤼ skip'
+            : `${status === 'passed' ? '✓' : '✗'} ${label ?? (status === 'passed' ? 'pass' : 'fail')}`
   if (onClick) {
     return (
       <a
@@ -62,9 +65,9 @@ export function StageStatus({ status, label, onClick, title }: {
 }
 
 // StatusText renders a task's or a run's status as colored inline text: ✓
-// passed / ✗ failed / ⤼ skipped / spinner running / gray · pending. Tasks and
-// runs share one status vocabulary — a task's status is its latest attempt's
-// — so one component serves both page titles and node rows.
+// passed / ✗ failed / ⏱ timed out / ⤼ skipped / spinner running / gray ·
+// pending. Tasks and runs share one status vocabulary — a task's status is its
+// latest attempt's — so one component serves both page titles and node rows.
 export function StatusText({ status }: { status: string }) {
   if (status === 'running') {
     return (
@@ -76,10 +79,12 @@ export function StatusText({ status }: { status: string }) {
   const [cls, text] =
     status === 'passed'
       ? ['text-success', '✓ passed']
-      : status === 'skipped'
-        ? ['text-warn', '⤼ skipped']
-        : status === 'pending'
-          ? ['text-muted', '· pending']
-          : ['text-danger', '✗ failed']
+      : status === 'timeout'
+        ? ['text-timeout', '⏱ timed out']
+        : status === 'skipped'
+          ? ['text-warn', '⤼ skipped']
+          : status === 'pending'
+            ? ['text-muted', '· pending']
+            : ['text-danger', '✗ failed']
   return <span className={cls}>{text}</span>
 }

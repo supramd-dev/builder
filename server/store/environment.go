@@ -202,9 +202,6 @@ func (s *Store) DeleteEnvironment(id int64) error {
 			return err
 		}
 		if len(taskIDs) > 0 {
-			if err := tx.Where("task_id IN ?", taskIDs).Delete(&TaskLog{}).Error; err != nil {
-				return err
-			}
 			if err := tx.Where("id IN ?", taskIDs).Delete(&Task{}).Error; err != nil {
 				return err
 			}

@@ -29,6 +29,12 @@ type fakeExecer struct {
 	outcome map[string]int
 	output  map[string]string
 
+	// timedOut marks a marker whose session was cut by its deadline (what
+	// RunSSH returns for a command that outlives the stage timeout plus its
+	// slack): the result carries TimedOut and a negative exit code instead of
+	// the remote `timeout` wrapper's 124.
+	timedOut map[string]bool
+
 	// onScript, when set, is called with each script as it "executes" — the
 	// moment a real command would be running on the host, which is when
 	// tests observe the state the run pages read.
@@ -44,6 +50,7 @@ func (f *fakeExecer) RunScript(ctx context.Context, h SSHHost, cmd, script strin
 		if strings.Contains(script, marker) {
 			res.ExitCode = code
 			res.Success = code == 0
+			res.TimedOut = f.timedOut[marker]
 			if out := f.output[marker]; out != "" {
 				_, _ = stdout.Write([]byte(out))
 			}
@@ -401,11 +408,7 @@ func TestExecuteStageArtifactFileMissing(t *testing.T) {
 		t.Errorf("no artifact should be stored: %+v", artifacts)
 	}
 	// The stage log mentions the fetch failure.
-	logs, _ := s.ReadTaskLogs(stage.ID, stage.Attempts, 0)
-	var all string
-	for _, l := range logs {
-		all += l.Content
-	}
+	all := storedLog(t, s, stage, stage.Attempts)
 	if !strings.Contains(all, "artifact build/test_detail.xml") {
 		t.Errorf("log should mention the artifact file: %q", tailLine(all, 3))
 	}
@@ -432,9 +435,8 @@ func TestExecuteFullChainHappyPath(t *testing.T) {
 		t.Errorf("clone remote dir wrong: %v", cloner.remoteDirs)
 	}
 	// Clone log was persisted.
-	logs, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
-	if len(logs) == 0 {
-		t.Error("clone task should have log chunks")
+	if storedLog(t, s, cloneTask, cloneTask.Attempts) == "" {
+		t.Error("clone task should have a stored log")
 	}
 
 	// 2. build (dependencies satisfied now)
@@ -797,6 +799,178 @@ func TestExecuteStageFailureRecordsFailedRun(t *testing.T) {
 	}
 }
 
+// A stage that outlives its timeout is not a plain failure: the remote
+// `timeout` wrapper reports exit 124, and the node, the run and the log all
+// say the clock stopped it. The unit stage of execYAML has `timeout: 60`.
+func TestExecuteStageTimeoutRecordsTimeoutStatus(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
+	exec.outcome["ctest -L unit"] = timeoutExitCode
+	exec.output["ctest -L unit"] = "Running 3 tests...\n[2/3] still running\n"
+
+	ctx := context.Background()
+	unit := runUntilStage(t, svc, s, cloneTask, store.TaskKindUnit)
+	if err := svc.ExecuteTask(ctx, unit); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := s.GetTask(unit.ID)
+	if got.Status != store.StatusTimeout {
+		t.Fatalf("a killed-by-timeout unit stage reads timeout, got %s (%+v)", got.Status, got)
+	}
+	run := runOf(t, s, unit)
+	if run.Status != store.StatusTimeout {
+		t.Fatalf("timed-out unit run wrong: %+v", run)
+	}
+	// The error names the timeout and the command that ran out of it; the
+	// summary quotes the command's own last words.
+	if !strings.Contains(got.Error, "timed out after 1m0s") || !strings.Contains(got.Error, "ctest -L unit") {
+		t.Errorf("the node's error should name the timeout and the command: %q", got.Error)
+	}
+	if !strings.Contains(run.Summary, "timed out after 1m0s") || !strings.Contains(run.Summary, "still running") {
+		t.Errorf("summary should carry the timeout and the log tail: %q", run.Summary)
+	}
+	// The log carries the same sentence, at the point the command was killed —
+	// after everything the command managed to print.
+	log := storedLog(t, s, unit, unit.Attempts)
+	if !strings.Contains(log, "task timed out: timed out after 1m0s: ctest -L unit") {
+		t.Errorf("the log should say why the stage ended: %q", log)
+	}
+	if !strings.Contains(log, "still running") {
+		t.Errorf("the log should keep the command's output: %q", log)
+	}
+	if strings.Index(log, "still running") > strings.Index(log, "task timed out:") {
+		t.Errorf("the timeout line belongs after the output: %q", log)
+	}
+
+	// The graph reads timeout too — a timed-out stage is not a plain failure
+	// anywhere the run is reported, the container included.
+	root, _ := s.GetTask(got.RootID)
+	if root.Status != store.StatusTimeout {
+		t.Errorf("the graph of a timed-out stage reads timeout, got %s", root.Status)
+	}
+	if !strings.Contains(root.Summary, "timed out: unit tests") {
+		t.Errorf("the container's summary should name the timed-out stage: %q", root.Summary)
+	}
+}
+
+// A command that ignores SIGTERM outlives the remote `timeout` wrapper and is
+// cut by the SSH session's deadline instead — the other way a stage runs out of
+// time. ExecResult.TimedOut is what carries that, since the exit code is -1
+// exactly as it is for a dial failure.
+func TestExecuteStageSessionDeadlineRecordsTimeoutStatus(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
+	exec.outcome["ctest -L unit"] = -1
+	exec.timedOut = map[string]bool{"ctest -L unit": true}
+	exec.output["ctest -L unit"] = "ignoring SIGTERM\n"
+
+	ctx := context.Background()
+	unit := runUntilStage(t, svc, s, cloneTask, store.TaskKindUnit)
+	if err := svc.ExecuteTask(ctx, unit); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := s.GetTask(unit.ID)
+	if got.Status != store.StatusTimeout {
+		t.Fatalf("a session cut by its deadline is a timeout, got %s (%+v)", got.Status, got)
+	}
+	run := runOf(t, s, unit)
+	if run.Status != store.StatusTimeout {
+		t.Fatalf("timed-out unit run wrong: %+v", run)
+	}
+	// The number named is the stage's own timeout, not the session bound the
+	// transport knows about (the stage's 1m0s plus the runner's 5m slack).
+	if !strings.Contains(got.Error, "timed out after 1m0s") {
+		t.Errorf("the node's error should name the stage's timeout: %q", got.Error)
+	}
+	if strings.Contains(got.Error, "ssh execution failed") {
+		t.Errorf("a timeout is not an ssh failure: %q", got.Error)
+	}
+	if log := storedLog(t, s, unit, unit.Attempts); !strings.Contains(log, "task timed out:") {
+		t.Errorf("the log should say why the stage ended: %q", log)
+	}
+}
+
+// The regression container of a timed-out case reads timeout too, and the
+// case's single test counts as not passed.
+func TestExecuteCaseTimeoutRollsUpAsTimeout(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
+	// Both presets run out of time (heat's own preset timeout is 120s).
+	for _, cmd := range []string{"python3 run_heat.py", "python3 run_poisson.py"} {
+		exec.outcome[cmd] = timeoutExitCode
+		exec.output[cmd] = "solving...\n"
+	}
+
+	ctx := context.Background()
+	// Build and unit pass first (the cases depend on the build), then both
+	// cases run out of time.
+	first := runUntilStage(t, svc, s, cloneTask, store.TaskKindRegressionCase)
+	if err := svc.ExecuteTask(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.ClaimReadyTask()
+	if err != nil || second == nil || second.Kind != store.TaskKindRegressionCase {
+		t.Fatalf("claim the second case: %v %v", second, err)
+	}
+	if err := svc.ExecuteTask(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := s.GetTask(first.ID)
+	if got.Status != store.StatusTimeout {
+		t.Fatalf("the case should read timeout, got %s (%+v)", got.Status, got)
+	}
+	if !strings.Contains(got.Error, "timed out after 2m0s") {
+		t.Errorf("the case's own preset timeout should be named: %q", got.Error)
+	}
+	run := runOf(t, s, first)
+	if run.Status != store.StatusTimeout || run.Total != 1 || run.Passed != 0 {
+		t.Errorf("a timed-out case's one test did not pass: %+v", run)
+	}
+
+	// The container of the two cases is a timeout, and it names them.
+	stage, err := regressionStage(s, cloneTask)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage, _ = s.GetTask(stage.ID)
+	if stage.Status != store.StatusTimeout {
+		t.Errorf("the regression container should read timeout: %+v", stage)
+	}
+	if !strings.Contains(stage.Summary, "timed out: regression: heat, regression: poisson") {
+		t.Errorf("the container should name the timed-out cases: %q", stage.Summary)
+	}
+}
+
+// The two signals a timeout arrives by, and the two it must never be confused
+// with: an ordinary non-zero exit and a transport failure that never ran the
+// command (both of which have a diagnosis of their own to give).
+func TestStageTimedOutSignals(t *testing.T) {
+	cases := []struct {
+		name string
+		res  ExecResult
+		want bool
+	}{
+		{"the remote timeout wrapper killed the command", ExecResult{ExitCode: timeoutExitCode}, true},
+		{"the ssh session was cut by its deadline", ExecResult{ExitCode: -1, TimedOut: true}, true},
+		{"an ordinary non-zero exit", ExecResult{ExitCode: 1}, false},
+		{"a dial failure", ExecResult{ExitCode: -1, Stderr: "dial tcp: connection refused"}, false},
+		{"a successful run", ExecResult{ExitCode: 0, Success: true}, false},
+	}
+	for _, c := range cases {
+		if got := stageTimedOut(c.res); got != c.want {
+			t.Errorf("%s: stageTimedOut = %t, want %t", c.name, got, c.want)
+		}
+	}
+	// The number a report names is the stage's own; a graph whose snapshot
+	// carries none falls back to the default the script generator uses.
+	if got := stageTimeoutSeconds(0); got != DefaultStageTimeoutSeconds {
+		t.Errorf("stageTimeoutSeconds(0) = %d, want the default", got)
+	}
+	if got := stageTimeoutSeconds(60); got != 60 {
+		t.Errorf("stageTimeoutSeconds(60) = %d, want 60", got)
+	}
+}
+
 func TestExecuteUnknownKindFails(t *testing.T) {
 	svc, s, _, _, _ := newExecuteFixture(t, execYAML)
 	task := &store.Task{ID: 9999, Kind: "perf", RootID: 1}
@@ -829,8 +1003,8 @@ func TestRedeployRequeuesGraphInPlace(t *testing.T) {
 	if err := svc.ExecuteTask(context.Background(), cloneTask); err != nil {
 		t.Fatal(err)
 	}
-	logsBefore, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
-	if len(logsBefore) == 0 {
+	logsBefore := storedLog(t, s, cloneTask, cloneTask.Attempts)
+	if logsBefore == "" {
 		t.Fatal("precondition: clone log exists")
 	}
 
@@ -860,11 +1034,11 @@ func TestRedeployRequeuesGraphInPlace(t *testing.T) {
 	if again.Attempts != 2 || again.Status != store.StatusPending {
 		t.Errorf("re-armed clone: %+v", again)
 	}
-	if logs, _ := s.ReadTaskLogs(cloneTask.ID, 1, 0); len(logs) != len(logsBefore) {
-		t.Errorf("the first attempt's log should be kept: %d chunks, want %d", len(logs), len(logsBefore))
+	if kept := storedLog(t, s, cloneTask, 1); kept != logsBefore {
+		t.Errorf("the first attempt's log should be kept: %d bytes, want %d", len(kept), len(logsBefore))
 	}
-	if n, _ := s.MaxTaskLogSeq(cloneTask.ID, 2); n != 0 {
-		t.Errorf("the fresh attempt should start with an empty log, got %d chunks", n)
+	if fresh := storedLog(t, s, cloneTask, 2); fresh != "" {
+		t.Errorf("the fresh attempt should start with an empty log, got %q", fresh)
 	}
 	_ = cloner
 }
@@ -884,11 +1058,7 @@ func TestExecuteCaseRunsPreset(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The clone log warns: the fixture environment has no env script.
-	logs, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
-	var cloneLog string
-	for _, l := range logs {
-		cloneLog += l.Content
-	}
+	cloneLog := storedLog(t, s, cloneTask, cloneTask.Attempts)
 	if !strings.Contains(cloneLog, "no env script") {
 		t.Errorf("clone log should warn about the missing env script: %q", cloneLog)
 	}
@@ -1037,11 +1207,7 @@ func TestExecuteEnvScriptWrittenAndSourced(t *testing.T) {
 	if err := svc.ExecuteTask(ctx, cloneTask); err != nil {
 		t.Fatal(err)
 	}
-	logs, _ := s.ReadTaskLogs(cloneTask.ID, cloneTask.Attempts, 0)
-	var cloneLog string
-	for _, l := range logs {
-		cloneLog += l.Content
-	}
+	cloneLog := storedLog(t, s, cloneTask, cloneTask.Attempts)
 	if !strings.Contains(cloneLog, "wrote env script md-builder-env-") {
 		t.Errorf("clone log should record the env script write: %q", cloneLog)
 	}
@@ -1229,10 +1395,14 @@ func TestExecuteStageRetriesTheClosingWrite(t *testing.T) {
 }
 
 // TestExecuteStageSummarizesTheLogTail: a stage's summary is read out of the
-// END of its log — the summary line is the last thing the command prints, and
-// a log longer than one read page (store.logReadLimit, 1000 chunks) runs past
-// what a single read returns. Reading from the head would summarize a stage
-// from output written long before its result.
+// END of its log — the summary line is the last thing the command prints, and a
+// log longer than the tail the summary is read from (logSummaryTailBytes) is
+// not read from its beginning to find it. Reading the head would summarize a
+// stage from output written long before its result.
+//
+// It also pins what a restarted stage's log looks like: this attempt already has
+// stored output (a previous process wrote it), so the execution continues after
+// it rather than starting over.
 func TestExecuteStageSummarizesTheLogTail(t *testing.T) {
 	svc, s, exec, _, cloneTask := newExecuteFixture(t, execYAML)
 	ctx := context.Background()
@@ -1244,14 +1414,18 @@ func TestExecuteStageSummarizesTheLogTail(t *testing.T) {
 	if err != nil || build == nil || build.Kind != store.TaskKindBuild {
 		t.Fatalf("claim build: %v %v", build, err)
 	}
-	// Noise past the size of one read page, then the stage's own output.
-	for i := 1; i <= 1100; i++ {
-		if err := s.AppendTaskLog(&store.TaskLog{
-			TaskID: build.ID, Attempt: build.Attempts, Seq: i, Content: fmt.Sprintf("noise %d\n", i),
-		}); err != nil {
-			t.Fatal(err)
-		}
+	// More output than the summary is read from, stored by whoever ran this
+	// attempt before.
+	var noise strings.Builder
+	for i := 1; i <= 30000; i++ {
+		fmt.Fprintf(&noise, "noise %d\n", i)
 	}
+	if noise.Len() <= logSummaryTailBytes {
+		t.Fatalf("the test's noise (%d bytes) must be longer than the summary tail (%d)",
+			noise.Len(), logSummaryTailBytes)
+	}
+	storeParts(t, s, build, noise.String())
+
 	exec.outcome["cmake -DEXEC=1 ."] = 0
 	exec.output["cmake -DEXEC=1 ."] = "compiling…\nMD-BUILDER-SUMMARY: build ok\n"
 
@@ -1264,5 +1438,14 @@ func TestExecuteStageSummarizesTheLogTail(t *testing.T) {
 	}
 	if strings.Contains(run.Summary, "noise") {
 		t.Errorf("build summary = %q, want the tail of the log, not its head", run.Summary)
+	}
+	// Nothing was written over: the log is the previous output, the seam, and
+	// this execution's own.
+	all := storedLog(t, s, build, build.Attempts)
+	if !strings.HasPrefix(all, noise.String()) {
+		t.Errorf("the log no longer begins with what was already stored: %q", all[:80])
+	}
+	if !strings.Contains(all, "MD-BUILDER-SUMMARY: build ok") {
+		t.Error("the log lost this execution's output")
 	}
 }

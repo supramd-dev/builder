@@ -48,6 +48,30 @@ worker:
   # MD_BUILDER_WORKERS.
   count: 2
 
+logs:
+  # A stage's log lives in the object store below and nowhere else — no log
+  # text is ever written to the database, and no log is capped or truncated.
+  # It is stored as an ordered series of parts, runs/<runID>/log/part-<offset>,
+  # and the run row keeps only the prefix and the byte count.
+  #
+  # A stage that is running here keeps the output it has not stored yet in
+  # memory; a viewer following it reads that buffer (so a live view costs no
+  # object-storage round trips), and a page opened later reads the parts by
+  # byte offset. The log a stage's summary is derived from is read the same
+  # way, from its end.
+
+  # How much output a running stage holds in memory before it is uploaded as
+  # one part: the memory a stage costs, the size of one object, and how far a
+  # viewer in another process lags behind a running stage. A smaller part is a
+  # fresher remote view at the price of more objects. 0 = 8 MiB (8388608).
+  # Override with MD_BUILDER_LOG_PART_BYTES.
+  partBytes: 8388608
+
+  # maxStoredBytes, maxFileBytes and spoolDir configured the two capped copies
+  # a log used to be kept in. Neither exists any more: the keys are still
+  # accepted so an existing configuration loads, and the server logs a warning
+  # at startup when one is set. Remove them.
+
 objectStorage:
   # MinIO / S3 endpoint, host and port, no scheme.
   endpoint: 127.0.0.1:9000

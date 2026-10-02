@@ -58,6 +58,22 @@ Backend dev server (builds nothing, uses Go source directly, on :8080):
 make dev-backend
 ```
 
+Tests — the Go packages, then the frontend's:
+
+```sh
+make test
+```
+
+The frontend has no test framework: it runs `node --test` over the `src`
+modules whose logic is not rendering (`artifacts.ts`, `plot/figure.ts`),
+which node loads directly, stripping the types itself. Anything tested there
+has to stay out of the `.tsx` files, since node does not read those. Run it
+alone with `cd frontend && npm test` — it needs no `npm install`.
+
+Type-check the frontend with `npx tsc -b` (or `npm run build`). `npx tsc
+--noEmit` checks nothing here: the root `frontend/tsconfig.json` is
+solution-style, so plain `tsc` sees no files at all.
+
 ## Build & run
 
 ```sh

@@ -1,0 +1,34 @@
+{
+  /* The test files (src, named `something.test.ts`) run under node --test,
+     not in a browser, so their project is the app's options with node in
+     place of vite/client: node' s builtin types, so `node:test` and
+     `node:assert` resolve.
+
+     They are left out of tsconfig.app.json on purpose. Checking them there
+     would put node's globals in scope for the app's own code as well — a
+     setTimeout returning a Timeout, a process, a Buffer — none of which
+     exist in the browser this code is built for. */
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    /* Bundler mode — the same resolution the app is checked with, since a
+       test imports the app's modules exactly as the app's own imports do */
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["src/**/*.test.ts"]
+}

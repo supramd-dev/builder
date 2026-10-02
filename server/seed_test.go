@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -14,9 +15,39 @@ import (
 
 // The seed is the demo data every screenshot and manual end-to-end session
 // starts from, and it writes through the same store calls the runner uses
-// (UpsertTaskGraph, FinishAttempt, AppendTaskLog), so the graph it produces is
-// also the cheapest end-to-end check of the task/run model there is: if the
+// (UpsertTaskGraph, FinishAttempt, SetRunLogPrefix), so the graph it produces
+// is also the cheapest end-to-end check of the task/run model there is: if the
 // rollup, the attempts or the artifact plumbing drift, these tests fail.
+
+// storedLog reads a task attempt's log the way a reader does: the parts the run
+// points at, in order. A stage that never ran has none.
+func storedLog(t *testing.T, s *store.Store, taskID int64, attempt int) string {
+	t.Helper()
+	run, err := s.FindTaskRun(taskID, attempt)
+	if err != nil {
+		t.Fatalf("find the run of task %d attempt %d: %v", taskID, attempt, err)
+	}
+	if run.LogPrefix == "" {
+		return ""
+	}
+	ctx := context.Background()
+	parts, err := s.ListRunLogParts(ctx, run.LogPrefix)
+	if err != nil {
+		t.Fatalf("list the log parts of task %d: %v", taskID, err)
+	}
+	var out strings.Builder
+	for _, p := range parts {
+		data, err := s.Objects().Get(ctx, p.Key)
+		if err != nil {
+			t.Fatalf("read the log part %s: %v", p.Key, err)
+		}
+		out.Write(data)
+	}
+	if out.Len() != int(run.LogBytes) {
+		t.Fatalf("task %d's log reads %d bytes, but the run records %d", taskID, out.Len(), run.LogBytes)
+	}
+	return out.String()
+}
 
 // newSeedStore opens a throwaway SQLite database backed by the in-memory
 // object store, so the demo matrix can be seeded and inspected without a real
@@ -182,12 +213,8 @@ func TestSeedDemoMatrix(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unit run: %v", err)
 		}
-		logs, err := s.ReadTaskLogs(unitNode.ID, run.Attempt, 0)
-		if err != nil {
-			t.Fatalf("unit logs: %v", err)
-		}
-		if len(logs) == 0 || !strings.Contains(logs[len(logs)-1].Content, "MD-BUILDER-SUMMARY: all 4 unit tests passed") {
-			t.Errorf("unit log missing its summary line: %+v", logs)
+		if got := storedLog(t, s, unitNode.ID, run.Attempt); !strings.Contains(got, "MD-BUILDER-SUMMARY: all 4 unit tests passed") {
+			t.Errorf("unit log missing its summary line: %q", got)
 		}
 		// The unit run's gtest XML is the artifact the run page parses.
 		arts, err := s.ListRunArtifacts(run.ID)
@@ -240,13 +267,13 @@ func TestSeedDemoMatrix(t *testing.T) {
 		if unitNode.Status != store.StatusSkipped {
 			t.Fatalf("unit status = %q, want %q", unitNode.Status, store.StatusSkipped)
 		}
-		// A skipped stage explains itself in its log.
-		logs, err := s.ReadTaskLogs(unitNode.ID, unitNode.Attempts, 0)
-		if err != nil {
-			t.Fatalf("unit logs: %v", err)
+		// A skipped stage explains itself in its summary — it produced no
+		// output, so it has no log to explain it in.
+		if !strings.Contains(unitNode.Summary, "upstream task build failed") {
+			t.Errorf("skipped unit summary = %q, want the skip reason", unitNode.Summary)
 		}
-		if len(logs) == 0 || !strings.Contains(logs[0].Content, "skipped: upstream task build failed") {
-			t.Errorf("skipped unit log = %+v, want the skip reason", logs)
+		if got := storedLog(t, s, unitNode.ID, unitNode.Attempts); got != "" {
+			t.Errorf("a stage that never ran has no output, got %q", got)
 		}
 		// A stage that never ran has no start, only the moment it was skipped
 		// (that is what store.skipTasksTx leaves behind).

@@ -805,10 +805,12 @@ type runDetailJSON struct {
 }
 
 // handleTestArtifact routes GET /api/test-artifacts/{id} — one stored
-// artifact's raw content (the run detail lists references only; this is the
-// fetch entry point for the browser-side results parsing and the future
-// regression "analyze" view) — and GET /api/test-artifacts/{id}/download,
-// the same bytes as a file download.
+// artifact's raw content as JSON (the run detail lists references only; this
+// is the fetch entry point for the browser-side results parsing and the
+// future regression "analyze" view) — GET /api/test-artifacts/{id}/download,
+// the same bytes as a file download, and GET /api/test-artifacts/{id}/raw,
+// the same bytes again for viewing: a type the browser renders instead of
+// saving, with HTML held in a sandbox (see serveArtifactInline).
 func (s *Server) handleTestArtifact(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	if r.Method != http.MethodGet {
@@ -831,6 +833,10 @@ func (s *Server) handleTestArtifact(w http.ResponseWriter, r *http.Request, user
 	}
 	if sub == "download" {
 		s.downloadArtifact(w, r, id)
+		return
+	}
+	if sub == "raw" {
+		s.serveArtifactInline(w, r, id)
 		return
 	}
 	if sub != "" {
@@ -881,26 +887,111 @@ func (s *Server) artifactReadError(w http.ResponseWriter, what string, a *store.
 // "build/test_detail.xml"); an empty or dotted name falls back to a
 // kind-based default so the browser always gets a sensible filename.
 func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request, id int64) {
+	a, ok := s.artifactOrError(w, id, "artifact download")
+	if !ok {
+		return
+	}
+	s.streamArtifact(w, r, a, "artifact download", artifactDownloadHeaders(a))
+}
+
+// artifactDownloadHeaders is the response of an artifact nobody can render
+// in place: opaque bytes, saved under its own name.
+func artifactDownloadHeaders(a *store.TestArtifact) http.Header {
+	return http.Header{
+		"Content-Type":        []string{"application/octet-stream"},
+		"Content-Disposition": []string{fmt.Sprintf("attachment; filename=%q", artifactDownloadName(a, a.ID))},
+	}
+}
+
+// artifactSandboxPolicy is the policy an inline HTML artifact is rendered
+// under: the scripts and their pop-ups work, the document itself gets an
+// opaque origin. The list matches the run page's <iframe sandbox> attribute,
+// so a page behaves the same framed in the app and opened on its own.
+const artifactSandboxPolicy = "sandbox allow-scripts allow-popups allow-downloads allow-forms allow-modals"
+
+// artifactInlineTypes maps the file extensions the preview endpoint serves
+// in place to the type it serves them as. HTML is the reason the endpoint
+// exists — the one format a browser renders as a page — and it is the only
+// entry that gets a sandbox. The text formats are there so a click opens a
+// readable tab instead of a download; anything unlisted (an archive, a
+// binary, and deliberately SVG, which is script-capable too) stays a
+// download, where the browser applies its own file handling.
+var artifactInlineTypes = map[string]string{
+	".html": "text/html; charset=utf-8",
+	".htm":  "text/html; charset=utf-8",
+	".json": "text/plain; charset=utf-8",
+	".xml":  "text/plain; charset=utf-8",
+	".txt":  "text/plain; charset=utf-8",
+	".log":  "text/plain; charset=utf-8",
+	".csv":  "text/plain; charset=utf-8",
+	".md":   "text/plain; charset=utf-8",
+	".yaml": "text/plain; charset=utf-8",
+	".yml":  "text/plain; charset=utf-8",
+}
+
+// serveArtifactInline streams one artifact for viewing rather than saving:
+// the same object as the download, with a type the browser renders and, for
+// HTML, a sandbox around what it renders.
+//
+// An artifact is a build product — its content comes from the code under
+// test, not from this app — so it is not trusted the way the app's own pages
+// are. Rendered from this origin, a page's scripts could call the API with
+// the visitor's session. `sandbox` without `allow-same-origin` puts the
+// document in an opaque origin instead: its scripts still run (a Plotly HTML
+// export works, CDN and all) but it reads no cookie or storage and its
+// requests carry no credentials. A page that needs more than that can still
+// be downloaded and opened locally.
+func (s *Server) serveArtifactInline(w http.ResponseWriter, r *http.Request, id int64) {
+	a, ok := s.artifactOrError(w, id, "artifact preview")
+	if !ok {
+		return
+	}
+	contentType, inline := artifactInlineTypes[strings.ToLower(path.Ext(strings.TrimSpace(a.Name)))]
+	if !inline {
+		s.streamArtifact(w, r, a, "artifact preview", artifactDownloadHeaders(a))
+		return
+	}
+	headers := http.Header{
+		"Content-Type":           []string{contentType},
+		"Content-Disposition":    []string{fmt.Sprintf("inline; filename=%q", artifactDownloadName(a, id))},
+		"X-Content-Type-Options": []string{"nosniff"},
+	}
+	if strings.HasPrefix(contentType, "text/html") {
+		headers.Set("Content-Security-Policy", artifactSandboxPolicy)
+	}
+	s.streamArtifact(w, r, a, "artifact preview", headers)
+}
+
+// artifactOrError loads one artifact, answering the 404/500 itself and
+// reporting whether the caller should go on.
+func (s *Server) artifactOrError(w http.ResponseWriter, id int64, what string) (*store.TestArtifact, bool) {
 	a, err := s.Store.GetArtifact(id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "artifact not found"})
-			return
+			return nil, false
 		}
-		log.Printf("artifact download: %v", err)
+		log.Printf("%s: %v", what, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-		return
+		return nil, false
 	}
+	return a, true
+}
+
+// streamArtifact copies one artifact's object into the response under the
+// headers its caller decided on. Content-Length is set only when the backend
+// knows the size, so a backend that cannot tell still streams.
+func (s *Server) streamArtifact(w http.ResponseWriter, r *http.Request, a *store.TestArtifact, what string, headers http.Header) {
 	rc, size, err := s.Store.OpenArtifact(r.Context(), a)
 	if err != nil {
-		s.artifactReadError(w, "artifact download", a, err)
+		s.artifactReadError(w, what, a, err)
 		return
 	}
 	defer rc.Close()
 
-	name := artifactDownloadName(a, id)
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	for k, v := range headers {
+		w.Header()[k] = v
+	}
 	if size >= 0 {
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	}
@@ -908,7 +999,7 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request, id int
 		if _, err := io.Copy(w, rc); err != nil {
 			// The client is usually gone by now; nothing can be
 			// reported in the response, so log and stop.
-			log.Printf("artifact download: artifact %d: stream: %v", id, err)
+			log.Printf("%s: artifact %d: stream: %v", what, a.ID, err)
 		}
 	}
 }

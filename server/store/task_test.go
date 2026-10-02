@@ -142,6 +142,10 @@ func reportTask(t *testing.T, s *Store, taskID int64, status, summary string) *T
 		res.Passed = 1
 	case StatusFailed:
 		res.Failed = 1
+	case StatusTimeout:
+		// A timeout tallies as a failure: it is not a pass either, and the
+		// counts have to add up. Its status is what names the cause.
+		res.Failed = 1
 	case StatusSkipped:
 		res.Skipped = 1
 	}
@@ -508,6 +512,41 @@ func TestSkippedReportSkipsDependents(t *testing.T) {
 	}
 }
 
+// A node that ran out of time stops its dependents like a failure does, and
+// says so: the stages behind it were stopped by the clock, not by a broken
+// assertion, and a reader of the skip reason has to be able to tell which.
+func TestTimeoutReportGatesAndNamesTheDependents(t *testing.T) {
+	s := newTestTaskStore(t)
+	root, subs := seedTaskGraph(t, s, "timeoutgate")
+	build, unit, stage := subs[1], subs[2], subs[3]
+
+	reportTask(t, s, subs[0].ID, StatusPassed, "cloned")
+	// The report the runner writes for a timed-out stage: both columns carry
+	// the sentence, so the reason travels into the dependents' summaries.
+	const reason = "timed out after 30m0s: make -j"
+	if _, err := s.FinishAttempt(build.ID, AttemptResult{
+		Status: StatusTimeout, Summary: reason, Error: reason, Total: 1, Failed: 1,
+	}); err != nil {
+		t.Fatalf("report the timeout: %v", err)
+	}
+	requireNoReadyTask(t, s)
+
+	for _, task := range append([]*Task{unit}, caseNodes(t, s, stage)...) {
+		got := reloadTask(t, s, task.ID)
+		if got.Status != StatusSkipped {
+			t.Errorf("%s: want skipped, got %s", got.NodeKey, got.Status)
+		}
+		if !strings.Contains(got.Summary, build.Name+" timed out: "+reason) {
+			t.Errorf("%s summary should name the timeout and its reason: %q", got.NodeKey, got.Summary)
+		}
+	}
+	// The graph as a whole reports a timeout, not a failure.
+	gotRoot := reloadTask(t, s, root.ID)
+	if gotRoot.Status != StatusTimeout || !strings.Contains(gotRoot.Summary, "timed out") {
+		t.Errorf("the graph of a timed-out stage should read timeout: %+v", gotRoot)
+	}
+}
+
 // SkipDependents remains the manual entry point: a caller that skips a node
 // for a reason of its own passes that reason on to everything behind it. The
 // node it names is not touched — it is the caller's to end.
@@ -663,8 +702,8 @@ func TestSkipTasksLeavesAClaimedNodeAlone(t *testing.T) {
 	if run.Status != StatusRunning {
 		t.Errorf("its attempt must stay open for the report: %+v", run)
 	}
-	if logs, err := s.ReadTaskLogs(unit.ID, got.Attempts, 0); err != nil || len(logs) != 0 {
-		t.Errorf("no skip reason should have been logged: %+v (err %v)", logs, err)
+	if run.LogPrefix != "" || run.LogBytes != 0 {
+		t.Errorf("no skip reason should have been logged: %+v", run)
 	}
 }
 
@@ -911,6 +950,47 @@ func TestRollupTaskTree(t *testing.T) {
 		}
 	})
 
+	t.Run("a timed-out child times out the container", func(t *testing.T) {
+		s := newTestTaskStore(t)
+		root, subs := seedTaskGraph(t, s, "rolluptimeout")
+
+		reportTask(t, s, subs[0].ID, StatusPassed, "2 repositories fetched")
+		reportTask(t, s, subs[2].ID, StatusTimeout, "timed out after 30m0s: ctest -L unit")
+
+		// The container takes the timeout status rather than "failed": the
+		// cause is the point, and it is the only failure under it.
+		got := reloadTask(t, s, root.ID)
+		if got.Status != StatusTimeout {
+			t.Errorf("a container whose only failure is a timeout reads timeout, got %s", got.Status)
+		}
+		// Counted as a failure all the same: it is not a pass.
+		if got.Total != 5 || got.Passed != 1 || got.Failed != 1 || got.Skipped != 0 {
+			t.Errorf("counts: %+v", got)
+		}
+		if got.Summary != "1/5 stages passed; timed out: unit tests" {
+			t.Errorf("summary should name the timed-out node: %q", got.Summary)
+		}
+	})
+
+	t.Run("a failure beside a timeout keeps the container failed", func(t *testing.T) {
+		s := newTestTaskStore(t)
+		root, subs := seedTaskGraph(t, s, "rollupmixed")
+
+		// The unit stage first: a failure here would have skipped it.
+		reportTask(t, s, subs[2].ID, StatusTimeout, "timed out after 30m0s: ctest -L unit")
+		reportTask(t, s, subs[1].ID, StatusFailed, "make: no rule to make target")
+
+		got := reloadTask(t, s, root.ID)
+		if got.Status != StatusFailed {
+			t.Errorf("a real failure outranks a timeout, got %s", got.Status)
+		}
+		// Both causes are named: a timeout must not be swallowed by the word
+		// "failed" when it shares the container with one.
+		if got.Summary != "0/5 stages passed; failed: build; timed out: unit tests" {
+			t.Errorf("summary should name both causes: %q", got.Summary)
+		}
+	})
+
 	t.Run("a virtual child contributes its own totals", func(t *testing.T) {
 		s := newTestTaskStore(t)
 		root, subs := seedTaskGraph(t, s, "rollupvirtual")
@@ -1030,8 +1110,12 @@ func TestRedeployRootTaskRebuilds(t *testing.T) {
 	for _, task := range []*Task{subs[0], subs[1], subs[2], cases[0], cases[1]} {
 		reportTask(t, s, task.ID, StatusPassed, "ok")
 	}
-	if err := s.AppendTaskLog(&TaskLog{TaskID: subs[0].ID, Attempt: 1, Seq: 1, Content: "clone: 2 repositories\n"}); err != nil {
+	firstRun, err := s.FindTaskRun(subs[0].ID, 1)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if ok, err := s.SetRunLogPrefix(firstRun.ID, "runs/1/log/", 24); err != nil || !ok {
+		t.Fatalf("record the attempt's log: ok=%t err=%v", ok, err)
 	}
 	if before := reloadTask(t, s, root.ID); before.Status != StatusPassed {
 		t.Fatalf("the finished graph should be green: %+v", before)
@@ -1101,14 +1185,13 @@ func TestRedeployRootTaskRebuilds(t *testing.T) {
 	if runs[1].Attempt != 1 || runs[1].Status != StatusPassed {
 		t.Errorf("the first attempt keeps its outcome: %+v", runs[1])
 	}
-	// And so does the first attempt's log: a retry is a new attempt, not a
-	// wipe.
-	logs, err := s.ReadTaskLogs(subs[0].ID, 1, 0)
-	if err != nil || len(logs) != 1 || logs[0].Content != "clone: 2 repositories\n" {
-		t.Errorf("the first attempt's log should survive: %+v (err %v)", logs, err)
+	// And so does the first attempt's log: the run keeps the reference its
+	// parts live under, while the new attempt starts with none.
+	if kept, err := s.GetTestRun(firstRun.ID); err != nil || kept.LogPrefix != "runs/1/log/" || kept.LogBytes != 24 {
+		t.Errorf("the first attempt's log should survive: %+v (err %v)", kept, err)
 	}
-	if logs, err := s.ReadTaskLogs(subs[0].ID, 2, 0); err != nil || len(logs) != 0 {
-		t.Errorf("the new attempt starts with no output: %+v (err %v)", logs, err)
+	if fresh, err := s.GetTestRun(runs[0].ID); err != nil || fresh.LogPrefix != "" || fresh.LogBytes != 0 {
+		t.Errorf("the new attempt starts with no output: %+v (err %v)", fresh, err)
 	}
 }
 
@@ -1122,8 +1205,8 @@ func TestUpsertTaskGraphRetiresDroppedNodes(t *testing.T) {
 	unit := subs[2]
 
 	run := reportTask(t, s, unit.ID, StatusPassed, "12/12 tests passed")
-	if err := s.AppendTaskLog(&TaskLog{TaskID: unit.ID, Attempt: run.Attempt, Seq: 1, RunID: run.ID, Content: "PASS\n"}); err != nil {
-		t.Fatal(err)
+	if ok, err := s.SetRunLogPrefix(run.ID, "runs/9/log/", 5); err != nil || !ok {
+		t.Fatalf("record the attempt's log: ok=%t err=%v", ok, err)
 	}
 
 	// The yaml lost its unit stage: dispatch the nodes that remain.
@@ -1144,8 +1227,8 @@ func TestUpsertTaskGraphRetiresDroppedNodes(t *testing.T) {
 	if runs, err := s.ListTaskRuns(unit.ID); err != nil || len(runs) != 1 || runs[0].Status != StatusPassed {
 		t.Errorf("a retired node keeps its runs: %+v (err %v)", runs, err)
 	}
-	if logs, err := s.ReadTaskLogs(unit.ID, 1, 0); err != nil || len(logs) != 1 {
-		t.Errorf("a retired node keeps its logs: %+v (err %v)", logs, err)
+	if kept, err := s.GetTestRun(run.ID); err != nil || kept.LogPrefix != "runs/9/log/" {
+		t.Errorf("a retired node keeps its logs: %+v (err %v)", kept, err)
 	}
 
 	// But it is out of the current graph: not listed as active, not listed as
@@ -1320,8 +1403,8 @@ func TestDeleteTasksForEnvironment(t *testing.T) {
 	clone := subs[0]
 
 	run := reportTask(t, s, clone.ID, StatusPassed, "ok")
-	if err := s.AppendTaskLog(&TaskLog{TaskID: clone.ID, Attempt: run.Attempt, Seq: 1, RunID: run.ID, Content: "log\n"}); err != nil {
-		t.Fatal(err)
+	if ok, err := s.SetRunLogPrefix(run.ID, "runs/3/log/", 4); err != nil || !ok {
+		t.Fatalf("record the attempt's log: ok=%t err=%v", ok, err)
 	}
 	if err := s.DeleteTasksForEnvironment(root.EnvironmentID); err != nil {
 		t.Fatal(err)
@@ -1339,9 +1422,8 @@ func TestDeleteTasksForEnvironment(t *testing.T) {
 	if _, err := s.GetTestRun(run.ID); !errors.Is(err, ErrTestRunNotFound) {
 		t.Errorf("the runs should be gone, got %v", err)
 	}
-	if logs, err := s.ReadTaskLogs(clone.ID, run.Attempt, 0); err != nil || len(logs) != 0 {
-		t.Errorf("the logs should be gone: %d (err %v)", len(logs), err)
-	}
+	// The log itself lives in object storage; what the database held is the
+	// reference on the run row, gone with the run (asserted above).
 	if artifacts, err := s.ListRunArtifacts(run.ID); err != nil || len(artifacts) != 0 {
 		t.Errorf("the artifacts should be gone: %d (err %v)", len(artifacts), err)
 	}
@@ -1454,9 +1536,12 @@ func TestTaskKindAndStatusPredicates(t *testing.T) {
 		t.Error("an unknown kind must not validate")
 	}
 
-	for _, status := range []string{StatusPassed, StatusFailed, StatusSkipped} {
+	for _, status := range []string{StatusPassed, StatusFailed, StatusTimeout, StatusSkipped} {
 		if !TaskStatusTerminal(status) {
 			t.Errorf("%q ends an attempt", status)
+		}
+		if !AttemptStatusValid(status) {
+			t.Errorf("%q can end an attempt", status)
 		}
 	}
 	if TaskStatusTerminal(StatusPending) || TaskStatusTerminal(StatusRunning) {
@@ -1466,6 +1551,18 @@ func TestTaskKindAndStatusPredicates(t *testing.T) {
 	for _, status := range []string{StatusPending, StatusRunning, "bogus"} {
 		if AttemptStatusValid(status) {
 			t.Errorf("%q cannot end an attempt", status)
+		}
+	}
+	// A failure, a timeout and a skip all stop the graph behind them: only a
+	// pass lets a dependent be claimed.
+	for _, status := range []string{StatusFailed, StatusTimeout, StatusSkipped} {
+		if !AttemptStatusGatesDependents(status) {
+			t.Errorf("%q must gate the dependents", status)
+		}
+	}
+	for _, status := range []string{StatusPassed, StatusPending, StatusRunning, "bogus"} {
+		if AttemptStatusGatesDependents(status) {
+			t.Errorf("%q does not gate anything", status)
 		}
 	}
 
