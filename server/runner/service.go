@@ -12,7 +12,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"time"
 
@@ -121,109 +120,14 @@ func (s *Service) loop(ctx context.Context) {
 	}
 }
 
-// runClaimed executes one claimed sub-task and then updates the graph
-// state: skipping blocked dependents on failure and refreshing the root.
+// runClaimed executes one claimed sub-task. The node's outcome and everything
+// it implies are the store's business: the report (store.FinishAttempt) writes
+// the attempt's run, the task's cache and the containers' rollup, and skips
+// the nodes behind a task that did not pass — a dependent can never run once
+// its dependency failed or was skipped. Every stage of a graph is a node here,
+// so no stage can be left queued with no way forward.
 func (s *Service) runClaimed(ctx context.Context, task *store.Task) {
-	// The stage's placeholder run (seeded at dispatch) flips to running so
-	// the matrix cell and run detail page follow the live stage.
-	s.markStageRunRunning(task)
 	if err := s.ExecuteTask(ctx, task); err != nil {
 		log.Printf("runner: task %d: execute: %v", task.ID, err)
-	}
-
-	// Re-read the terminal state the executor wrote.
-	final, err := s.Store.GetTask(task.ID)
-	if err != nil {
-		log.Printf("runner: task %d: reread: %v", task.ID, err)
-		return
-	}
-	if final.Status == store.TaskFailed {
-		if err := s.Store.SkipDependents(final.RootID, final.ID,
-			"skipped: upstream task "+final.Name+" failed"); err != nil {
-			log.Printf("runner: task %d: skip dependents: %v", final.ID, err)
-		}
-		// A test stage that never ran still needs its dashboard cell.
-		s.recordSkippedRuns(final)
-	}
-	if _, _, err := s.Store.RefreshRootStatus(final.RootID); err != nil {
-		log.Printf("runner: root %d: refresh: %v", final.RootID, err)
-	}
-}
-
-// recordSkippedRuns writes the dashboard rows for skipped unit/regression
-// markStageRunRunning flips the claimed stage's placeholder run from
-// pending to running (a no-op for stages without a run). The run detail
-// page and matrix cell follow the stage live from this moment on.
-func (s *Service) markStageRunRunning(task *store.Task) {
-	var kind string
-	switch task.Kind {
-	case store.TaskKindBuild:
-		kind = store.RunKindBuild
-	case store.TaskKindUnit:
-		kind = store.RunKindUnit
-	case store.TaskKindRegression:
-		kind = store.RunKindRegression
-	default:
-		return // clone: no run
-	}
-	if err := s.Store.MarkRunRunning(task.EnvironmentID, task.CommitID, kind); err != nil {
-		log.Printf("runner: task %d: mark %s run running: %v", task.ID, kind, err)
-	}
-}
-
-// sub-tasks so the matrix shows ✗ instead of a blank cell. A skipped unit
-// or build stage gets a failed run (the build row normally comes from the
-// build stage itself — this covers builds that were skipped by an upstream
-// clone failure); a skipped regression case sub-task gets a skipped child
-// run (the parent aggregates them — all-skipped surfaces as the "skipped:"
-// summary the dashboard translates). Every skipped stage's placeholder run
-// (pending since dispatch) is replaced by the real skipped outcome.
-func (s *Service) recordSkippedRuns(failed *store.Task) {
-	subs, err := s.Store.ListSubTasks(failed.RootID)
-	if err != nil {
-		return
-	}
-	for i := range subs {
-		sub := &subs[i]
-		if sub.Status != store.TaskSkipped {
-			continue
-		}
-		switch sub.Kind {
-		case store.TaskKindUnit, store.TaskKindBuild:
-			input := &store.RunInput{
-				EnvironmentID: sub.EnvironmentID,
-				CommitID:      sub.CommitID,
-				Kind:          sub.Kind,
-				TaskID:        sub.ID,
-				Status:        store.StatusFailed,
-				Summary:       "skipped: " + failed.Name + " failed: " + failed.Error,
-			}
-			if _, err := s.Store.UpsertTestRun(input); err != nil {
-				log.Printf("runner: task %d: record skipped %s run: %v", sub.ID, sub.Kind, err)
-			}
-		case store.TaskKindRegression:
-			// The preset name (and its description) come from the sub-task's
-			// case snapshot.
-			name := sub.Name
-			desc := ""
-			var stage CaseStageConfig
-			if err := json.Unmarshal([]byte(sub.Config), &stage); err == nil {
-				if stage.Case != "" {
-					name = stage.Case
-				}
-				desc = stage.Description
-			}
-			if _, _, err := s.Store.UpsertCaseRun(&store.CaseRunInput{
-				EnvironmentID: sub.EnvironmentID,
-				CommitID:      sub.CommitID,
-				TaskID:        sub.ID,
-				Name:          name,
-				Description:   desc,
-				Status:        store.StatusSkipped,
-				Message:       failed.Name + " failed: " + failed.Error,
-			}); err != nil {
-				log.Printf("runner: task %d: record skipped case %s: %v", sub.ID, name, err)
-			}
-		}
 	}
 }

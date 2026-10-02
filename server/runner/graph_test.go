@@ -28,33 +28,50 @@ func TestBuildTaskGraphShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tasks) != 5 { // clone, build, unit, regression:heat, regression:poisson
-		t.Fatalf("want 5 nodes (clone, build, unit, 2 cases), got %d", len(tasks))
+	// clone, build, unit, the virtual regression stage, and one node per case.
+	if len(tasks) != 6 {
+		t.Fatalf("want 6 nodes (clone, build, unit, stage, 2 cases), got %d", len(tasks))
 	}
 	wantKinds := []string{
 		store.TaskKindClone, store.TaskKindBuild, store.TaskKindUnit,
-		store.TaskKindRegression, store.TaskKindRegression,
+		store.TaskKindRegressionStage, store.TaskKindRegressionCase, store.TaskKindRegressionCase,
 	}
 	for i, kind := range wantKinds {
 		if tasks[i].Kind != kind {
 			t.Errorf("node %d kind: want %s, got %s", i, kind, tasks[i].Kind)
 		}
 	}
-	// Case nodes are named after their presets.
-	if tasks[3].Name != "regression: heat" || tasks[4].Name != "regression: poisson" {
-		t.Errorf("case node names: %q %q", tasks[3].Name, tasks[4].Name)
+	// The stage is the container the cases nest under: it runs nothing, and
+	// its node key is what a re-dispatch matches on.
+	if tasks[3].NodeKey != RegressionStageKey {
+		t.Errorf("stage node key: %q", tasks[3].NodeKey)
+	}
+	if tasks[4].ParentKey != RegressionStageKey || tasks[5].ParentKey != RegressionStageKey {
+		t.Errorf("case nodes should nest under the stage: %q %q", tasks[4].ParentKey, tasks[5].ParentKey)
+	}
+	// Case nodes are named after their presets, and keyed by them too.
+	if tasks[4].Name != "regression: heat" || tasks[5].Name != "regression: poisson" {
+		t.Errorf("case node names: %q %q", tasks[4].Name, tasks[5].Name)
+	}
+	if tasks[4].NodeKey != RegressionCaseKey("heat") || tasks[5].NodeKey != RegressionCaseKey("poisson") {
+		t.Errorf("case node keys: %q %q", tasks[4].NodeKey, tasks[5].NodeKey)
 	}
 	// clone has no dependencies: the root is a container, not a gate (it
 	// only reaches a terminal state once every sub-task has).
 	if len(tasks[0].Deps) != 0 {
 		t.Errorf("clone deps: %v", tasks[0].Deps)
 	}
+	// The container is never a gate either: nothing may depend on it.
+	if len(tasks[3].Deps) != 0 {
+		t.Errorf("the stage must not depend on anything: %v", tasks[3].Deps)
+	}
 	// build depends on clone (index 0).
 	if len(tasks[1].Deps) != 1 || tasks[1].Deps[0] != store.TaskSubPlaceholderBase+0 {
 		t.Errorf("build deps: %v", tasks[1].Deps)
 	}
-	// unit and both cases depend on build (index 1).
-	for _, i := range []int{2, 3, 4} {
+	// unit and both cases depend on build (index 1), not on the container
+	// that holds the cases.
+	for _, i := range []int{2, 4, 5} {
 		if len(tasks[i].Deps) != 1 || tasks[i].Deps[0] != store.TaskSubPlaceholderBase+1 {
 			t.Errorf("node %d deps: %v", i, tasks[i].Deps)
 		}
@@ -83,14 +100,14 @@ func TestBuildTaskGraphShape(t *testing.T) {
 
 	// The case snapshots carry the preset name, command and timeout.
 	var heat CaseStageConfig
-	if err := json.Unmarshal([]byte(tasks[3].Config), &heat); err != nil {
+	if err := json.Unmarshal([]byte(tasks[4].Config), &heat); err != nil {
 		t.Fatal(err)
 	}
 	if heat.Case != "heat" || heat.Command.String() != "python3 run_heat.py" || heat.Timeout != 200 {
 		t.Errorf("heat case snapshot wrong: %+v", heat)
 	}
 	var poisson CaseStageConfig
-	if err := json.Unmarshal([]byte(tasks[4].Config), &poisson); err != nil {
+	if err := json.Unmarshal([]byte(tasks[5].Config), &poisson); err != nil {
 		t.Fatal(err)
 	}
 	// Timeout 0 on the case falls back to the entry timeout (300).
@@ -116,7 +133,7 @@ func TestBuildTaskGraphArtifactsPassthrough(t *testing.T) {
 		t.Errorf("unit artifacts not passed through: %+v", unit)
 	}
 	var heat CaseStageConfig
-	if err := json.Unmarshal([]byte(tasks[3].Config), &heat); err != nil {
+	if err := json.Unmarshal([]byte(tasks[4].Config), &heat); err != nil {
 		t.Fatal(err)
 	}
 	if len(heat.Artifacts) != 1 || heat.Artifacts[0] != "reg/results.json" || heat.Workdir != "regression/heat" {
@@ -200,15 +217,23 @@ func TestBuildTaskGraphDescriptionPassthrough(t *testing.T) {
 		t.Errorf("unit description not snapshotted: %+v", unit)
 	}
 	var heat CaseStageConfig
-	if err := json.Unmarshal([]byte(tasks[3].Config), &heat); err != nil {
+	if err := json.Unmarshal([]byte(tasks[4].Config), &heat); err != nil {
 		t.Fatal(err)
 	}
 	if heat.Description != "Heat equation convergence" {
 		t.Errorf("case description not snapshotted: %+v", heat)
 	}
+	// The stage's own description rides the stage node (not a snapshot: the
+	// container runs nothing) and the case's rides its node.
+	if tasks[3].Description != "Run regression tests" {
+		t.Errorf("stage description not carried: %+v", tasks[3])
+	}
+	if tasks[4].Description != "Heat equation convergence" {
+		t.Errorf("case description not carried: %+v", tasks[4])
+	}
 	// A case without a preset description stays empty.
 	var poisson CaseStageConfig
-	if err := json.Unmarshal([]byte(tasks[4].Config), &poisson); err != nil {
+	if err := json.Unmarshal([]byte(tasks[5].Config), &poisson); err != nil {
 		t.Fatal(err)
 	}
 	if poisson.Description != "" {

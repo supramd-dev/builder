@@ -4,6 +4,7 @@ import Editor, { type OnMount } from '@monaco-editor/react'
 import { defineMonacoTheme } from './monacoTheme'
 import { formatDuration } from './gtest'
 import {
+  ApiError,
   cachedSiteConfig,
   execEnvironment,
   execScript,
@@ -11,6 +12,7 @@ import {
   triggerManualTest,
   triggerManualYAML,
   type ExecResult,
+  type ManualTestRoot,
   type ScriptLanguage,
   type TestEnvironment,
 } from './api'
@@ -261,7 +263,12 @@ function ExecTab({ onError }: RunPageProps) {
                 <Editor
                   height="320px"
                   language={language === 'python' ? 'python' : 'shell'}
-                  value={DEFAULT_SCRIPTS[language]}
+                  // Uncontrolled on purpose: a `value` prop is pushed into the
+                  // model whenever it changes, which would wipe a typed script
+                  // on every language flip. The skeleton is the initial text,
+                  // and switchLanguage replaces it only when the editor still
+                  // holds an untouched default.
+                  defaultValue={DEFAULT_SCRIPTS[language]}
                   onMount={handleEditorMount}
                   theme="md-builder"
                   options={{
@@ -508,6 +515,14 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       setError(msg)
+      // A partial failure: the environments dispatched before the one that
+      // failed were queued and are running, so list them next to the error
+      // instead of reporting that nothing happened.
+      const roots =
+        err instanceof ApiError
+          ? (err.body as { roots?: ManualTestRoot[] } | null)?.roots
+          : undefined
+      if (roots?.length) setDispatched(roots.map((r) => r.taskId))
     } finally {
       setSubmitting(false)
     }
@@ -674,7 +689,7 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
 
       {error && <div className="alert alert-danger">{error}</div>}
 
-      {dispatched.length > 0 && !error && (
+      {dispatched.length > 0 && (
         <p>
           Dispatched {dispatched.length} task graph{dispatched.length === 1 ? '' : 's'}:{' '}
           {dispatched.map((id, i) => (
@@ -683,6 +698,7 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
               <Link to={`/tasks/${id}`}>task #{id}</Link>
             </span>
           ))}
+          {error ? ' — queued before the failure reported above' : ''}
         </p>
       )}
     </div>

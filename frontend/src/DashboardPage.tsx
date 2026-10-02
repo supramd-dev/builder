@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Network, TriangleAlert } from 'lucide-react'
 import TimeAgo from 'react-timeago'
@@ -42,8 +42,11 @@ export default function DashboardPage({ onError }: Props) {
   const [dispatchNote, setDispatchNote] = useState<DispatchNote | null>(null)
 
   // While data for the selected kind is in flight, "loading" is derived —
-  // no synchronous setState inside the effect.
-  const effectiveKind = loadedKind ?? kind
+  // no synchronous setState inside the effect. Nothing has been loaded before
+  // the first reply, so `loadedKind` starts out as "no payload at all" rather
+  // than as the kind being asked for: otherwise the first paint looks loaded
+  // and renders nothing at all.
+  const effectiveKind = loadedKind
 
   // Both dashboard payloads carry repoFilter: the commit repo the matrix is
   // scoped to (empty = no site codeRepo configured → all repos). Shown in the
@@ -52,23 +55,38 @@ export default function DashboardPage({ onError }: Props) {
   const repoFilter = (full ?? dash)?.repoFilter ?? ''
   const repoUrl = (full ?? dash)?.repoUrl ?? ''
 
+  // Tabs can be switched while a request is still in flight: only the newest
+  // request may write state. A slow reply for the tab the user has left would
+  // otherwise land after the newer one and leave loadedKind pointing at data
+  // whose tab is no longer selected — which renders as "Loading…" for ever,
+  // since nothing re-fetches on its own.
+  const reqSeq = useRef(0)
+
   const refresh = useCallback(
     async (k: DashboardKind) => {
+      const seq = ++reqSeq.current
       try {
         if (k === 'full') {
           const d = await getFullDashboard()
+          if (seq !== reqSeq.current) return // a newer tab answered first
           setFull(d)
           setDash(null)
         } else {
           const d = await getDashboard(k)
+          if (seq !== reqSeq.current) return
           setDash(d)
           setFull(null)
         }
         setLoadedKind(k)
         setError('')
       } catch (err) {
+        if (seq !== reqSeq.current) return
         const msg = err instanceof Error ? err.message : 'Failed to load'
         setError(msg)
+        // The previous tab's payload is not this tab's data: drop it, so the
+        // failure shows the message instead of a matrix that looks loaded.
+        setDash(null)
+        setFull(null)
         setLoadedKind(k)
         onError(msg)
       }
@@ -389,8 +407,8 @@ function MatrixTable({
 }
 
 // stageToRunCell adapts a full-matrix stage to the RunCell shape the
-// SingleCell renderer expects. The full view does not show counts, so the
-// totals stay zero; the stage's taskId is carried for the live link.
+// SingleCell renderer expects. The full view does not show counts, so they
+// stay zero; the stage's taskId is carried for the live link.
 function stageToRunCell(st: FullStage | undefined): RunCell | null {
   if (!st) return null
   return {
@@ -400,6 +418,8 @@ function stageToRunCell(st: FullStage | undefined): RunCell | null {
     total: 0,
     passed: 0,
     failed: 0,
+    skipped: 0,
+    summary: st.summary,
     startedAt: st.startedAt,
     finishedAt: st.finishedAt,
     error: st.error,
@@ -539,17 +559,24 @@ function SingleCell({
     showCounts && (status === 'passed' || status === 'failed')
       ? `${cell.passed}/${cell.total}`
       : undefined
+  // A node's own line about itself: the failure text, or the reason it was
+  // skipped (an upstream task failed before it could run).
+  const note = cell.error || cell.summary
+  // Status-aware fallback, for a cell whose node has no run of its own — the
+  // virtual regression container, whose counts are the cases': every status it
+  // can end in (the rollup) must read right, not only the live ones.
+  const fallback =
+    status === 'pending'
+      ? 'queued — the stage has not reported yet'
+      : status === 'running'
+        ? 'running — following the stage live'
+        : status === 'skipped'
+          ? 'not executed — an upstream stage failed'
+          : `${cell.passed}/${cell.total} passed`
   const title = cell.runId
-    ? (cell.error ||
-        (status === 'pending'
-          ? 'queued — the stage has not reported yet'
-          : status === 'running'
-            ? 'running — following the stage live'
-            : `${cell.passed}/${cell.total} passed`)) + ' — click for details'
-    : cell.error ||
-      (status === 'pending'
-        ? 'Task queued — click for details'
-        : 'Task running — click to follow the log')
+    ? (note || fallback) + ' — click for details'
+    : (note || fallback) +
+      ((cell.taskId || fallbackTaskId) ? " — click for the stage's cases" : '')
   return (
     <>
       <StageStatus status={status} label={label} onClick={onClick} title={title} />

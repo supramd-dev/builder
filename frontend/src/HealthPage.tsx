@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { RefreshCw, LoaderCircle } from 'lucide-react'
 import { getDeepHealth, getHealth, type DeepHealth, type HealthCheck } from './api'
 import { formatTime } from './timezone'
@@ -24,9 +24,16 @@ export default function HealthPage({ onError }: Props) {
 
   // load runs both probes: the cheap liveness endpoint (the page itself
   // being served already proves the HTTP server is up — this makes it an
-  // explicit row) and the deep probe.
-  const load = () => {
+  // explicit row) and the deep probe. A re-check supersedes whatever is still
+  // in flight: its replies are dropped rather than allowed to overwrite the
+  // newer result (and its timestamp) once they land.
+  const cancelLoad = useRef<() => void>(() => {})
+  const load = useCallback(() => {
+    cancelLoad.current()
     let cancelled = false
+    cancelLoad.current = () => {
+      cancelled = true
+    }
     setLoading(true)
     setError('')
     getHealth()
@@ -49,12 +56,14 @@ export default function HealthPage({ onError }: Props) {
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
-    return () => {
-      cancelled = true
-    }
-  }
+  }, [onError])
 
-  useEffect(load, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // The first probe runs on mount; leaving the page cancels whatever it is
+  // still waiting on.
+  useEffect(() => {
+    load()
+    return () => cancelLoad.current()
+  }, [load])
 
   const checks: HealthCheck[] = [
     // The backend row is client-side truth: this page loading over HTTP is

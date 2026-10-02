@@ -2,539 +2,107 @@ package store
 
 import (
 	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	"gorm.io/gorm"
 )
 
-// Test run kinds. "build" records the outcome of the build stage on an
-// environment (the dashboard shows it as a third matrix kind); a build run
-// has no per-case results — its summary is the compiler/command output tail.
+// Test run kinds: the stage kind of the task the run belongs to. A regression
+// case's run is a "regression" run — the case is the task, and the kind groups
+// the runs the matrix and the dashboards filter by. The virtual nodes (the
+// root, the regression stage) have no runs.
 const (
-	RunKindRegression = "regression"
-	RunKindUnit       = "unit"
+	RunKindClone      = "clone"
 	RunKindBuild      = "build"
+	RunKindUnit       = "unit"
+	RunKindRegression = "regression"
 )
-
-// Test case / run statuses. StatusPending/StatusRunning are placeholder
-// statuses: the runner writes them at dispatch time (one run per stage
-// sub-task, before the stage executes) so the matrix cells and run detail
-// pages exist and follow the stage live. They never come from reporters —
-// UpsertTestRun/UpsertCaseRun overwrite them with the real outcome.
-// StatusSkipped is a case-level status only (a child run whose sub-task was
-// skipped because an upstream task failed).
-const (
-	StatusPending = "pending"
-	StatusRunning = "running"
-	StatusPassed  = "passed"
-	StatusFailed  = "failed"
-	StatusSkipped = "skipped"
-)
-
-// TestRun is the result of one test kind on one environment at one commit —
-// a cell of the dashboard matrix. Regression cases are nested runs: a child
-// row (ParentID set, Name = preset name) under the parent regression run, so
-// the detail API's `cases` list and the child's own detail page share one
-// representation. Top-level runs have ParentID 0 and an empty Name.
-//
-// The (environment, commit, kind, parent, name) tuple is unique: reporting
-// again for it replaces the stored result. TaskID links the stage sub-task
-// that produced the run (its task_logs hold the stage's stdout; 0 = external
-// report with no task). Unit runs carry aggregate counts only — the per-case
-// detail comes from the results-file artifact parsed in the browser.
-type TestRun struct {
-	ID             int64   `gorm:"primaryKey"`
-	EnvironmentID  int64   `gorm:"uniqueIndex:idx_test_runs_env_commit_kind_name;not null"`
-	CommitID       int64   `gorm:"uniqueIndex:idx_test_runs_env_commit_kind_name;not null"`
-	Kind           string  `gorm:"uniqueIndex:idx_test_runs_env_commit_kind_name;not null"` // "regression", "unit" or "build"
-	ParentID       int64   `gorm:"uniqueIndex:idx_test_runs_env_commit_kind_name;not null;default:0"`
-	Name           string  `gorm:"uniqueIndex:idx_test_runs_env_commit_kind_name;not null;default:''"`
-	Status         string  `gorm:"not null"` // derived from the child runs (or reported directly)
-	Summary        string  `gorm:"not null;default:''"`
-	Description    string  `gorm:"not null;default:''"` // human label from md-builder.yaml, re-stored on every trigger (descriptions may change between runs)
-	Message        string  `gorm:"not null;default:''"` // child runs: the case's note (summary line / upstream error)
-	DurationMillis float64 `gorm:"column:duration_ms;not null;default:0"`
-	Position       int     `gorm:"not null;default:0"` // order within the parent
-	Total          int     `gorm:"not null;default:0"`
-	Passed         int     `gorm:"not null;default:0"`
-	Failed         int     `gorm:"not null;default:0"`
-	Skipped        int     `gorm:"not null;default:0"`
-	TaskID         int64   `gorm:"not null;default:0"`
-	StartedAt      time.Time
-	FinishedAt     time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-}
-
-// CaseInput describes one case of a full-run report (POST /api/test-runs
-// with a cases array): the case becomes a child TestRun under the reported
-// run.
-type CaseInput struct {
-	Name           string
-	Description    string // the case's human label (preset description)
-	Status         string // passed | failed | skipped
-	Message        string
-	DurationMillis float64
-	TaskID         int64 // the case's own sub-task (0 = unknown)
-}
-
-// RunInput carries a test-run report as submitted by the reporter: case
-// results (regression reports — each becomes a child run), aggregate counts
-// (the unit path: parsed from the results file's root attributes, per-case
-// data stays in Artifacts), optional raw artifacts and a simplified summary.
-// When Cases are present the counts are derived from them (Skipped stays 0);
-// without cases the explicit counts and Status are used directly. Overrides
-// refines the no-cases path: a failed override turns the run failed even when
-// the counts alone would pass (e.g. the test binary crashed after reporting).
-type RunInput struct {
-	EnvironmentID int64
-	CommitID      int64
-	Kind          string
-	TaskID        int64
-	Description   string // human label from md-builder.yaml; re-stored on every report (may change between triggers)
-	Cases         []CaseInput
-	Total         int
-	Passed        int
-	Failed        int
-	Skipped       int
-	Status        string // used only when Cases is empty; defaults to passed
-	StatusFailed  bool   // no-cases path: force failed regardless of counts
-	Summary       string
-	Artifacts     []ArtifactInput
-	StartedAt     time.Time
-	FinishedAt    time.Time
-}
-
-// CaseRunInput carries ONE regression case outcome to UpsertCaseRun (the
-// per-case sub-task path): the child run is replaced by name under the
-// (environment, commit) regression run and the parent's aggregates recomputed.
-type CaseRunInput struct {
-	EnvironmentID  int64
-	CommitID       int64
-	TaskID         int64
-	Name           string
-	Description    string // the case's human label (preset description)
-	Status         string // passed | failed | skipped
-	Message        string
-	DurationMillis float64
-	StartedAt      time.Time
-	FinishedAt     time.Time
-	Artifacts      []ArtifactInput // attached to the child run
-}
 
 // ErrInvalidRunKind is returned when a run kind is not one of the supported
-// kinds (regression / unit / build).
-var ErrInvalidRunKind = errors.New("store: run kind must be regression, unit or build")
+// kinds (clone / build / unit / regression).
+var ErrInvalidRunKind = errors.New("store: run kind must be clone, build, unit or regression")
 
-// ErrInvalidCaseStatus is returned when a case status is not one of
+// ErrInvalidRunStatus is returned when a reported status is not one of
 // passed/failed/skipped.
-var ErrInvalidCaseStatus = errors.New("store: case status must be passed, failed or skipped")
+var ErrInvalidRunStatus = errors.New("store: run status must be passed, failed or skipped")
 
-// UpsertTestRun stores a run report. If a top-level run already exists for
-// the (environment, commit, kind) triple, its child runs and artifacts are
-// replaced in a transaction. With cases, each case becomes a child run and
-// the counts/status are derived from them (a run passes when every case
-// passes); without cases the explicit counts and status are stored (the
-// aggregate unit path — optionally forced failed through StatusFailed when
-// the command exited non-zero).
-func (s *Store) UpsertTestRun(in *RunInput) (*TestRun, error) {
-	if !RunKindValid(in.Kind) {
-		return nil, ErrInvalidRunKind
+// RunKindForTask maps a task kind to its run kind. The regression cases carry
+// the stage's kind, so one matrix column covers them all.
+func RunKindForTask(taskKind string) string {
+	switch taskKind {
+	case TaskKindClone:
+		return RunKindClone
+	case TaskKindBuild:
+		return RunKindBuild
+	case TaskKindUnit:
+		return RunKindUnit
+	case TaskKindRegressionCase:
+		return RunKindRegression
 	}
-	for i := range in.Cases {
-		if !CaseStatusValid(in.Cases[i].Status) {
-			return nil, ErrInvalidCaseStatus
-		}
-		if in.Cases[i].Name == "" {
-			return nil, errors.New("store: case name is required")
-		}
-	}
-	for i := range in.Artifacts {
-		if !ArtifactKindValid(in.Artifacts[i].Kind) {
-			return nil, fmt.Errorf("store: invalid artifact kind %q", in.Artifacts[i].Kind)
-		}
-	}
-
-	var run TestRun
-	err := s.DB.Transaction(func(tx *gorm.DB) error {
-		err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ? AND parent_id = 0 AND name = ''",
-			in.EnvironmentID, in.CommitID, in.Kind).First(&run).Error
-		if err != nil && err != ErrNotFound {
-			return err
-		}
-
-		if err == nil {
-			// Replace: drop the old child runs (and their artifacts) and the
-			// run-level artifacts, keep the row.
-			if err := deleteRunChildren(tx, run.ID); err != nil {
-				return err
-			}
-			if err := tx.Where("run_id = ?", run.ID).Delete(&TestArtifact{}).Error; err != nil {
-				return err
-			}
-		}
-		// else: not found — create a fresh row below.
-
-		run.EnvironmentID = in.EnvironmentID
-		run.CommitID = in.CommitID
-		run.Kind = in.Kind
-		run.TaskID = in.TaskID
-		run.StartedAt = in.StartedAt
-		run.FinishedAt = in.FinishedAt
-		run.Summary = in.Summary
-		// A non-empty description overwrites the stored one (descriptions may
-		// change between triggers); reports without one keep the dispatched
-		// placeholder's description.
-		if in.Description != "" {
-			run.Description = in.Description
-		}
-		if len(in.Cases) > 0 {
-			run.Total = len(in.Cases)
-			run.Passed = 0
-			for i := range in.Cases {
-				if in.Cases[i].Status == StatusPassed {
-					run.Passed++
-				}
-			}
-			run.Failed = run.Total - run.Passed
-			run.Skipped = 0
-			run.Status = StatusFailed
-			if run.Failed == 0 {
-				run.Status = StatusPassed
-			}
-		} else {
-			// No case-level results: the explicit counts and status are
-			// authoritative (the aggregate unit path reports counts parsed
-			// from the results file root, per-case data stays in artifacts).
-			run.Total = in.Total
-			run.Passed = in.Passed
-			run.Failed = in.Failed
-			run.Skipped = in.Skipped
-			run.Status = in.Status
-			if run.Status == "" {
-				run.Status = StatusPassed
-			}
-			if in.StatusFailed {
-				run.Status = StatusFailed
-			}
-			if run.Status != StatusPassed && run.Status != StatusFailed {
-				return ErrInvalidCaseStatus
-			}
-		}
-
-		if err := tx.Save(&run).Error; err != nil {
-			return err
-		}
-		for i := range in.Cases {
-			child := childFromCase(in, &in.Cases[i], run.ID, i)
-			if err := tx.Create(&child).Error; err != nil {
-				return err
-			}
-		}
-		return s.replaceRunArtifacts(tx, run.ID, in.Artifacts)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &run, nil
+	return taskKind
 }
 
-// childFromCase builds the child TestRun row for one reported case.
-func childFromCase(in *RunInput, c *CaseInput, parentID int64, position int) TestRun {
-	return TestRun{
-		EnvironmentID:  in.EnvironmentID,
-		CommitID:       in.CommitID,
-		Kind:           in.Kind,
-		ParentID:       parentID,
-		Name:           c.Name,
-		Description:    c.Description,
-		Status:         c.Status,
-		Message:        c.Message,
-		DurationMillis: c.DurationMillis,
-		Total:          1,
-		Passed:         boolInt(c.Status == StatusPassed),
-		Failed:         boolInt(c.Status == StatusFailed),
-		Skipped:        boolInt(c.Status == StatusSkipped),
-		TaskID:         c.TaskID,
-		Position:       position,
-		StartedAt:      in.StartedAt,
-		FinishedAt:     in.FinishedAt,
-	}
-}
-
-// GetTestRun loads a run by id.
-func (s *Store) GetTestRun(id int64) (*TestRun, error) {
-	var run TestRun
-	if err := s.DB.First(&run, id).Error; err != nil {
-		return nil, err
-	}
-	return &run, nil
-}
-
-// RunKindValid returns whether kind is a supported test kind.
+// RunKindValid reports whether kind is a supported run kind.
 func RunKindValid(kind string) bool {
-	return kind == RunKindRegression || kind == RunKindUnit || kind == RunKindBuild
+	switch kind {
+	case RunKindClone, RunKindBuild, RunKindUnit, RunKindRegression:
+		return true
+	}
+	return false
 }
 
-// CaseStatusValid returns whether status is a supported case status.
-func CaseStatusValid(status string) bool {
+// AttemptStatusValid reports whether status may end an attempt.
+func AttemptStatusValid(status string) bool {
 	return status == StatusPassed || status == StatusFailed || status == StatusSkipped
 }
 
-// ListChildRuns returns the child runs of a parent in submission order.
-func (s *Store) ListChildRuns(parentID int64) ([]TestRun, error) {
-	var runs []TestRun
-	if err := s.DB.Where("parent_id = ?", parentID).Order("position ASC, id ASC").Find(&runs).Error; err != nil {
-		return nil, err
-	}
-	return runs, nil
-}
-
-// UpsertCaseRun stores the outcome of ONE regression case sub-task as a
-// child run under the regression run of its (environment, commit): the child
-// is replaced by name and the parent's counts/status/summary are recomputed
-// across every child seen so far. Creates the parent when the first case
-// lands. The regression stages run as one sub-task per case, so the parent
-// aggregates incrementally.
-func (s *Store) UpsertCaseRun(in *CaseRunInput) (*TestRun, *TestRun, error) {
-	if in.Name == "" {
-		return nil, nil, errors.New("store: case name is required")
-	}
-	if !CaseStatusValid(in.Status) {
-		return nil, nil, ErrInvalidCaseStatus
-	}
-	for i := range in.Artifacts {
-		if !ArtifactKindValid(in.Artifacts[i].Kind) {
-			return nil, nil, fmt.Errorf("store: invalid artifact kind %q", in.Artifacts[i].Kind)
-		}
-	}
-	var parent, child TestRun
-	err := s.DB.Transaction(func(tx *gorm.DB) error {
-		// The parent run keyed by (env, commit, kind, 0, "") — create on
-		// first sight, keep the row afterwards.
-		err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ? AND parent_id = 0 AND name = ''",
-			in.EnvironmentID, in.CommitID, RunKindRegression).First(&parent).Error
-		if err != nil && err != ErrNotFound {
-			return err
-		}
-		if err != nil {
-			parent = TestRun{EnvironmentID: in.EnvironmentID, CommitID: in.CommitID, Kind: RunKindRegression}
-		}
-
-		// Replace the child with the same name (a re-run of the case) and
-		// its artifacts.
-		var previous TestRun
-		err = tx.Where("parent_id = ? AND name = ?", parent.ID, in.Name).First(&previous).Error
-		if err != nil && err != ErrNotFound {
-			return err
-		}
-		position := -1 // a replaced case keeps its original slot
-		prevDescription := ""
-		if err == nil {
-			position = previous.Position
-			prevDescription = previous.Description
-			if err := deleteArtifactsByRunIDs(tx, []int64{previous.ID}); err != nil {
-				return err
-			}
-			if err := tx.Delete(&previous).Error; err != nil {
-				return err
-			}
-		}
-
-		// The parent row must exist (with its ID) before the child links it.
-		if err := tx.Save(&parent).Error; err != nil {
-			return err
-		}
-
-		// A new case appends after the existing children.
-		if position < 0 {
-			var count int64
-			if err := tx.Model(&TestRun{}).Where("parent_id = ?", parent.ID).Count(&count).Error; err != nil {
-				return err
-			}
-			position = int(count)
-		}
-		// A non-empty description overwrites the stored one (descriptions
-		// may change between triggers); reports without one keep the
-		// dispatched placeholder's description.
-		description := in.Description
-		if description == "" {
-			description = prevDescription
-		}
-		child = TestRun{
-			EnvironmentID:  in.EnvironmentID,
-			CommitID:       in.CommitID,
-			Kind:           RunKindRegression,
-			ParentID:       parent.ID,
-			Name:           in.Name,
-			Description:    description,
-			Status:         in.Status,
-			Message:        in.Message,
-			DurationMillis: in.DurationMillis,
-			Total:          1,
-			Passed:         boolInt(in.Status == StatusPassed),
-			Failed:         boolInt(in.Status == StatusFailed),
-			Skipped:        boolInt(in.Status == StatusSkipped),
-			TaskID:         in.TaskID,
-			Position:       position,
-			StartedAt:      in.StartedAt,
-			FinishedAt:     in.FinishedAt,
-		}
-		if err := tx.Create(&child).Error; err != nil {
-			return err
-		}
-		if err := s.replaceRunArtifacts(tx, child.ID, in.Artifacts); err != nil {
-			return err
-		}
-
-		// Recompute the parent aggregate over every child run.
-		var children []TestRun
-		if err := tx.Where("parent_id = ?", parent.ID).Order("position ASC, id ASC").Find(&children).Error; err != nil {
-			return err
-		}
-		recomputeParent(&parent, children)
-		return tx.Save(&parent).Error
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return &parent, &child, nil
-}
-
-// recomputeParent derives the parent's counts/status/summary from its child
-// runs. A skipped child never fails the parent by itself; the all-skipped
-// placeholder (upstream failure before any case could run) is surfaced by
-// the summary's "skipped:" prefix, which the dashboard translates. Children
-// still pending/running are dispatch-time placeholders (UpsertPlaceholderRun
-// created them): they don't count toward passed/failed/skipped — the parent
-// stays running until every case lands a real outcome.
-func recomputeParent(parent *TestRun, children []TestRun) {
-	parent.Total = len(children)
-	parent.Passed, parent.Failed, parent.Skipped = 0, 0, 0
-	var failed, skipped []string
-	inFlight := 0
-	for i := range children {
-		switch {
-		case children[i].Status == StatusPassed:
-			parent.Passed++
-		case children[i].Status == StatusSkipped:
-			parent.Skipped++
-			skipped = append(skipped, children[i].Name)
-		case children[i].Status == StatusPending || children[i].Status == StatusRunning:
-			inFlight++
-		default:
-			parent.Failed++
-			failed = append(failed, children[i].Name)
-		}
-	}
-	// A run passes when nothing failed — except the all-skipped placeholder
-	// (every case was skipped because an upstream stage failed): that must
-	// not read as a green cell. The "skipped:" summary makes the dashboard
-	// translate it to ⤼, which requires the stored status to be failed.
-	allSkipped := parent.Total > 0 && parent.Passed == 0 && parent.Skipped == parent.Total
-	parent.Status = StatusPassed
-	if parent.Failed > 0 || allSkipped {
-		parent.Status = StatusFailed
-	}
-	if inFlight > 0 && parent.Failed == 0 {
-		// Some cases have not reported yet: the aggregate stays in flight
-		// (the dashboard shows the spinner, the detail page the per-case
-		// states) regardless of the cases that already passed.
-		parent.Status = StatusRunning
-		parent.Summary = fmt.Sprintf("%d/%d cases passed; %d in progress", parent.Passed, parent.Total, inFlight)
-		return
-	}
-	switch {
-	case len(failed) > 0:
-		if len(failed) > 3 {
-			failed = append(failed[:3], "...")
-		}
-		parent.Summary = fmt.Sprintf("%d/%d cases passed; failed: %s",
-			parent.Passed, parent.Total, strings.Join(failed, ", "))
-	case parent.Total > 0 && parent.Passed == 0 && parent.Skipped > 0:
-		// Every recorded case is a skip placeholder: mirror the runner's
-		// "skipped:" display translation.
-		parent.Summary = "skipped: " + children[0].Message
-	default:
-		parent.Summary = fmt.Sprintf("%d/%d cases passed", parent.Passed, parent.Total)
-	}
-}
-
-// AppendRunArtifactsByRun adds artifacts to one run by ID without touching
-// child runs. Used by the runner to attach fetched files to a unit run.
-func (s *Store) AppendRunArtifactsByRun(runID int64, artifacts []ArtifactInput) error {
-	if len(artifacts) == 0 {
-		return nil
-	}
-	rows, err := s.putArtifacts(runID, artifacts)
-	if err != nil {
-		return err
-	}
-	return s.DB.Transaction(func(tx *gorm.DB) error {
-		return tx.Create(&rows).Error
-	})
-}
-
-// ResetRegressionRun clears the child runs and artifacts of the regression
-// run for (environment, commit) — a re-dispatch rebuilds the case set, so
-// stale runs of presets no longer in the matrix must go. Keeps the parent
-// row itself (the unique index slot) with reset counts.
-func (s *Store) ResetRegressionRun(envID, commitID int64) error {
-	return s.DB.Transaction(func(tx *gorm.DB) error {
-		var run TestRun
-		if err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ? AND parent_id = 0 AND name = ''",
-			envID, commitID, RunKindRegression).First(&run).Error; err != nil {
-			if err == ErrNotFound {
-				return nil // nothing recorded yet
-			}
-			return err
-		}
-		if err := deleteRunChildren(tx, run.ID); err != nil {
-			return err
-		}
-		if err := deleteArtifactsByRunIDs(tx, []int64{run.ID}); err != nil {
-			return err
-		}
-		updates := map[string]any{
-			"total": 0, "passed": 0, "failed": 0, "skipped": 0,
-			"status": StatusFailed, "summary": "",
-		}
-		return tx.Model(&TestRun{}).Where("id = ?", run.ID).Updates(updates).Error
-	})
-}
-
-// FindRunsByCommits returns TOP-LEVEL runs of the given kind for the given
-// environment set, keyed by (environment, commit). Only commits in the given
-// list are considered, so the caller can align cells with dashboard columns.
-// Child runs (cases) are excluded — they surface through their parent's
-// detail, never as matrix cells.
-func (s *Store) FindRunsByCommits(kind string, envIDs, commitIDs []int64) (map[EnvCommit]TestRun, error) {
-	runs := map[EnvCommit]TestRun{}
-	if len(envIDs) == 0 || len(commitIDs) == 0 {
-		return runs, nil
-	}
-	var list []TestRun
-	if err := s.DB.Where("kind = ? AND parent_id = 0 AND environment_id IN ? AND commit_id IN ?",
-		kind, envIDs, commitIDs).Find(&list).Error; err != nil {
-		return nil, err
-	}
-	for _, r := range list {
-		runs[EnvCommit{Env: r.EnvironmentID, Commit: r.CommitID}] = r
-	}
-	return runs, nil
-}
-
-// MarkRunRunning flips the top-level run of (environment, commit, kind)
-// from pending to running: the scheduler claimed the stage sub-task and the
-// run detail page follows the stage live. A no-op when the run is not
-// pending (already running, terminal, or never created).
-func (s *Store) MarkRunRunning(envID, commitID int64, kind string) error {
-	return s.DB.Model(&TestRun{}).
-		Where("environment_id = ? AND commit_id = ? AND kind = ? AND parent_id = 0 AND name = '' AND status = ?",
-			envID, commitID, kind, StatusPending).
-		Updates(map[string]any{"status": StatusRunning}).Error
+// TestRun is one attempt of one real task: when it ran, how long it took and
+// how it ended. It is also the matrix cell — the dashboard looks up the task
+// node of a stage and shows its latest run.
+//
+// One run is one task's attempt, not one test case: an attempt may hold
+// several cases (a unit stage's gtest cases, a case's inner checks), so a run
+// reports counts beside its status — see the count fields below. The task
+// carries the same numbers as its latest attempt's outcome, because that is
+// what a parent's rollup adds up; a virtual node (the root, the regression
+// stage) runs nothing and has no run at all — its counts are its children's.
+//
+// The run row is created with the attempt (at dispatch, in status pending), so
+// a stage has a cell and a detail page from the moment it is queued and both
+// follow it live: ClaimReadyTask flips the run to running, FinishAttempt
+// closes it. (task_id, attempt) is the identity — a retry of a task is a new
+// attempt, a new run, and never overwrites the previous attempt's record.
+//
+// Kind/EnvironmentID/CommitID are denormalized from the task so the matrix and
+// the run lists filter without joining tasks.
+type TestRun struct {
+	ID      int64  `gorm:"primaryKey"`
+	TaskID  int64  `gorm:"uniqueIndex:idx_test_runs_task_attempt;not null"`
+	Attempt int    `gorm:"uniqueIndex:idx_test_runs_task_attempt;not null"`
+	Kind    string `gorm:"index;not null"`
+	// EnvironmentID and CommitID carry the task's, as a plain index: a
+	// dashboard column reads all runs of a commit without joining tasks.
+	EnvironmentID  int64   `gorm:"index;not null"`
+	CommitID       int64   `gorm:"index;not null"`
+	Status         string  `gorm:"index;not null;default:'pending'"`
+	Summary        string  `gorm:"not null;default:''"`
+	DurationMillis float64 `gorm:"column:duration_ms;not null;default:0"`
+	// The attempt's test counts. Kept on the run (and not only on the task)
+	// because one attempt can report more than one case: a unit stage runs
+	// several gtest cases and reports how many of them passed, a regression
+	// case may report its inner checks. FinishAttempt writes the same numbers
+	// onto the task in the same transaction, so the node's cache and its run
+	// never disagree; which of the two a reader uses is a matter of what it
+	// already has in hand (the matrix and the task page read the node, the run
+	// page reads the run).
+	Total      int `gorm:"not null;default:0"`
+	Passed     int `gorm:"not null;default:0"`
+	Failed     int `gorm:"not null;default:0"`
+	Skipped    int `gorm:"not null;default:0"`
+	StartedAt  time.Time
+	FinishedAt time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // EnvCommit keys a run by its environment and commit.
@@ -543,67 +111,229 @@ type EnvCommit struct {
 	Commit int64
 }
 
-// UpsertPlaceholderRun creates (or resets) the placeholder run of one stage
-// for (environment, commit, kind): status pending or running, linked to the
-// stage sub-task. Called at dispatch time so the matrix cell and run detail
-// page exist before the stage executes and follow it live. The real
-// outcome later replaces the placeholder through the normal report paths
-// (UpsertTestRun/UpsertCaseRun keep the row and overwrite every field).
-func (s *Store) UpsertPlaceholderRun(in *RunInput) (*TestRun, error) {
-	if !RunKindValid(in.Kind) {
-		return nil, ErrInvalidRunKind
+// GetTestRun loads one run by ID.
+func (s *Store) GetTestRun(id int64) (*TestRun, error) {
+	var r TestRun
+	if err := s.DB.First(&r, id).Error; err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTestRunNotFound
+		}
+		return nil, err
 	}
-	status := in.Status
-	if status != StatusPending && status != StatusRunning {
-		return nil, errors.New("store: placeholder run status must be pending or running")
+	return &r, nil
+}
+
+// ErrTestRunNotFound is returned when no run matches a query.
+var ErrTestRunNotFound = errors.New("store: test run not found")
+
+// GetTestRunWithTask loads a run together with the task it belongs to: the run
+// page shows the task's name, kind and description.
+func (s *Store) GetTestRunWithTask(id int64) (*TestRun, *Task, error) {
+	run, err := s.GetTestRun(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	task, err := s.GetTask(run.TaskID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return run, task, nil
+}
+
+// FindTaskRun returns the run of one attempt of one task.
+func (s *Store) FindTaskRun(taskID int64, attempt int) (*TestRun, error) {
+	var r TestRun
+	if err := s.DB.Where("task_id = ? AND attempt = ?", taskID, attempt).First(&r).Error; err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTestRunNotFound
+		}
+		return nil, err
+	}
+	return &r, nil
+}
+
+// ListTaskRuns returns a task's attempts, newest first.
+func (s *Store) ListTaskRuns(taskID int64) ([]TestRun, error) {
+	var runs []TestRun
+	if err := s.DB.Where("task_id = ?", taskID).Order("attempt DESC").Find(&runs).Error; err != nil {
+		return nil, err
+	}
+	return runs, nil
+}
+
+// LatestRunsByTaskIDs returns the newest attempt of each given task, keyed by
+// task id. Tasks without a run (virtual nodes, or a node whose attempt was
+// never opened) are absent.
+func (s *Store) LatestRunsByTaskIDs(taskIDs []int64) (map[int64]TestRun, error) {
+	out := map[int64]TestRun{}
+	if len(taskIDs) == 0 {
+		return out, nil
+	}
+	sub := s.DB.Model(&TestRun{}).Select("MAX(id)").Where("task_id IN ?", taskIDs).
+		Group("task_id")
+	var runs []TestRun
+	if err := s.DB.Where("id IN (?)", sub).Find(&runs).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range runs {
+		out[r.TaskID] = r
+	}
+	return out, nil
+}
+
+// AttemptResult is one attempt's outcome as its reporter observed it: the
+// runner when a stage finishes, or an external tester through
+// POST /api/test-runs. Counts belong to the attempt; FinishAttempt writes the
+// same values onto the task so the node cache and the run never disagree.
+//
+// Status may be left empty to derive it from the counts (failed when any case
+// failed, else passed) — a reporter that knows better (the test binary crashed
+// after reporting, the command's exit code failed) passes it explicitly.
+type AttemptResult struct {
+	Status  string
+	Summary string
+	Error   string
+	// Attempt is the attempt the reporter ran; 0 means "the task's current
+	// attempt" (what a report that only knows the task sends). The runner
+	// passes the attempt it claimed, so its outcome cannot land on a later
+	// attempt that a re-dispatch opened in the meantime.
+	Attempt        int
+	Total          int
+	Passed         int
+	Failed         int
+	Skipped        int
+	DurationMillis float64
+	StartedAt      time.Time
+	FinishedAt     time.Time
+	Artifacts      []ArtifactInput
+}
+
+// FinishAttempt records the outcome of a task's current attempt: it writes the
+// attempt's run, refreshes the task's cache from the same values, and rolls
+// the virtual nodes back up so the containers always agree with their
+// children. A node reported failed or skipped also leaves its dependents
+// skipped, in the same transaction: a dependency that did not pass can never
+// be waited on, so a graph whose node ends either way has no node left that
+// could still be claimed.
+//
+// A report for a task whose attempt already ended starts the next attempt
+// instead of overwriting the previous one: that is the retry path, and both
+// the old and the new attempt stay readable.
+//
+// A reporter that names the attempt it ran (AttemptResult.Attempt) writes only
+// that attempt's run when the task has moved on since — a re-dispatch may have
+// re-armed the node while the reporter was working, and its outcome belongs to
+// the attempt it actually ran, not to the fresh one queued behind it.
+func (s *Store) FinishAttempt(taskID int64, res AttemptResult) (*TestRun, error) {
+	if res.Status == "" {
+		res.Status = deriveStatus(res)
+	}
+	if !AttemptStatusValid(res.Status) {
+		return nil, ErrInvalidRunStatus
+	}
+	now := time.Now()
+	if res.FinishedAt.IsZero() {
+		res.FinishedAt = now
+	}
+	if res.StartedAt.IsZero() {
+		res.StartedAt = res.FinishedAt
+		if res.DurationMillis > 0 {
+			res.StartedAt = res.FinishedAt.Add(-time.Duration(res.DurationMillis) * time.Millisecond)
+		}
+	}
+	if res.DurationMillis == 0 {
+		res.DurationMillis = float64(res.FinishedAt.Sub(res.StartedAt).Milliseconds())
 	}
 	var run TestRun
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
-		err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ? AND parent_id = 0 AND name = ''",
-			in.EnvironmentID, in.CommitID, in.Kind).First(&run).Error
-		if err != nil && err != ErrNotFound {
-			return err
-		}
+		task, err := getTaskTx(tx, taskID)
 		if err != nil {
-			run = TestRun{EnvironmentID: in.EnvironmentID, CommitID: in.CommitID, Kind: in.Kind}
-		} else {
-			// A re-dispatch replaces the previous outcome with the fresh
-			// placeholder: drop the old child runs and artifacts.
-			if err := deleteRunChildren(tx, run.ID); err != nil {
-				return err
-			}
-			if err := tx.Where("run_id = ?", run.ID).Delete(&TestArtifact{}).Error; err != nil {
-				return err
-			}
-		}
-		run.TaskID = in.TaskID
-		run.Status = status
-		run.Summary = ""
-		run.Description = in.Description // every dispatch re-stores the current yaml description (it may have changed)
-		run.Message = ""
-		run.Total, run.Passed, run.Failed, run.Skipped = 0, 0, 0, 0
-		run.StartedAt = in.StartedAt
-		run.FinishedAt = time.Time{}
-		if err := tx.Save(&run).Error; err != nil {
 			return err
 		}
-		// Regression placeholders get their case children right away (one
-		// pending child per preset), so the detail page lists every case
-		// with live status from the start.
-		for i := range in.Cases {
-			child := childFromCase(in, &in.Cases[i], run.ID, i)
-			child.Status = StatusPending
-			child.Total = 0
-			child.Passed, child.Failed, child.Skipped = 0, 0, 0
-			child.Message = ""
-			child.DurationMillis = 0
-			child.StartedAt = time.Time{}
-			child.FinishedAt = time.Time{}
-			if err := tx.Create(&child).Error; err != nil {
+		if task.Virtual {
+			return ErrVirtualTask
+		}
+		stale := res.Attempt > 0 && res.Attempt != task.Attempts
+		if stale {
+			// The reporter ran an attempt the task has since left behind (a
+			// re-dispatch re-armed the node): its outcome is that attempt's,
+			// and the node's own state — pending on the new attempt — must
+			// not be overwritten with work nobody did for it.
+			if err := tx.Where("task_id = ? AND attempt = ?", task.ID, res.Attempt).
+				First(&run).Error; err != nil {
+				if errors.Is(err, ErrNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrTestRunNotFound
+				}
+				return err
+			}
+		} else {
+			run, err = currentAttemptTx(tx, task)
+			if err != nil {
 				return err
 			}
 		}
-		return nil
+		// The report replaces the attempt's artifacts (a re-report of the same
+		// attempt swaps them); the bytes are uploaded inside the transaction,
+		// so the database never references an object that was not stored.
+		rows, err := s.putArtifacts(run.ID, task.ID, res.Artifacts)
+		if err != nil {
+			return err
+		}
+		if err := deleteArtifactsByRunIDs(tx, []int64{run.ID}); err != nil {
+			return err
+		}
+		if len(rows) > 0 {
+			if err := tx.Create(&rows).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Model(&TestRun{}).Where("id = ?", run.ID).Updates(map[string]any{
+			"status":      res.Status,
+			"summary":     res.Summary,
+			"duration_ms": res.DurationMillis,
+			"total":       res.Total,
+			"passed":      res.Passed,
+			"failed":      res.Failed,
+			"skipped":     res.Skipped,
+			"started_at":  res.StartedAt,
+			"finished_at": res.FinishedAt,
+		}).Error; err != nil {
+			return err
+		}
+		run.Status, run.Summary = res.Status, res.Summary
+		run.DurationMillis = res.DurationMillis
+		run.Total, run.Passed, run.Failed, run.Skipped = res.Total, res.Passed, res.Failed, res.Skipped
+		run.StartedAt, run.FinishedAt = res.StartedAt, res.FinishedAt
+		if stale {
+			// The node's state belongs to the attempt that is current now, so
+			// nothing above it changes either: the rollup already reflects it.
+			return nil
+		}
+		if err := tx.Model(&Task{}).Where("id = ?", task.ID).Updates(map[string]any{
+			"status":      res.Status,
+			"summary":     res.Summary,
+			"error":       res.Error,
+			"total":       res.Total,
+			"passed":      res.Passed,
+			"failed":      res.Failed,
+			"skipped":     res.Skipped,
+			"started_at":  res.StartedAt,
+			"finished_at": res.FinishedAt,
+		}).Error; err != nil {
+			return err
+		}
+		if res.Status != StatusFailed && res.Status != StatusSkipped {
+			return rollupTx(tx, task.RootID)
+		}
+		// A node that did not pass gates everything behind it: its dependents
+		// can never be claimed (taskDepsPassed waits for passed), so they are
+		// skipped here — with their own attempts' runs — instead of staying
+		// pending for ever. The reason reads the way the runner used to write
+		// it, now for both outcomes.
+		if err := skipDependentsTx(tx, task.RootID, task.ID, FailureReason(task, res)); err != nil {
+			return err
+		}
+		return rollupTx(tx, task.RootID)
 	})
 	if err != nil {
 		return nil, err
@@ -611,69 +341,62 @@ func (s *Store) UpsertPlaceholderRun(in *RunInput) (*TestRun, error) {
 	return &run, nil
 }
 
-// DeleteTestRun removes one run, its child runs and their artifacts (requeue
-// cleanup: a stage dropped from a rebuilt graph must not leave its stale run
-// behind).
-func (s *Store) DeleteTestRun(envID, commitID int64, kind string) error {
-	return s.DB.Transaction(func(tx *gorm.DB) error {
-		var run TestRun
-		err := tx.Where("environment_id = ? AND commit_id = ? AND kind = ? AND parent_id = 0 AND name = ''",
-			envID, commitID, kind).First(&run).Error
+// currentAttemptTx returns the task's in-flight attempt, opening the next one
+// when the latest attempt has already ended (or none exists yet — a report for
+// a task that was never claimed).
+func currentAttemptTx(tx *gorm.DB, task *Task) (TestRun, error) {
+	var run TestRun
+	err := tx.Where("task_id = ? AND attempt = ?", task.ID, task.Attempts).First(&run).Error
+	switch {
+	case err == nil:
+		if !TaskStatusTerminal(run.Status) {
+			return run, nil
+		}
+		// The attempt already ended: a new report is a retry.
+		runs, err := beginAttemptsTx(tx, []*Task{task})
 		if err != nil {
-			if err == ErrNotFound {
-				return nil // nothing to clean
-			}
-			return err
+			return run, err
 		}
-		if err := deleteRunChildren(tx, run.ID); err != nil {
-			return err
+		return runs[0], nil
+	case errors.Is(err, ErrNotFound) || errors.Is(err, gorm.ErrRecordNotFound):
+		runs, err := beginAttemptsTx(tx, []*Task{task})
+		if err != nil {
+			return run, err
 		}
-		if err := deleteArtifactsByRunIDs(tx, []int64{run.ID}); err != nil {
-			return err
-		}
-		return tx.Delete(&TestRun{}, run.ID).Error
-	})
+		return runs[0], nil
+	}
+	return run, err
 }
 
-// DeleteRunsForEnvironment removes all runs (top-level and children, with
-// their artifacts) of an environment, in a transaction. Called when an
-// environment is deleted so no dangling dashboard rows remain.
-func (s *Store) DeleteRunsForEnvironment(envID int64) error {
-	return s.DB.Transaction(func(tx *gorm.DB) error {
-		var runIDs []int64
-		if err := tx.Model(&TestRun{}).Where("environment_id = ?", envID).
-			Pluck("id", &runIDs).Error; err != nil {
-			return err
-		}
-		if len(runIDs) > 0 {
-			if err := deleteArtifactsByRunIDs(tx, runIDs); err != nil {
-				return err
-			}
-		}
-		return tx.Where("environment_id = ?", envID).Delete(&TestRun{}).Error
-	})
+// deriveStatus derives a run's status from its counts: a failed case fails the
+// run; a run whose cases were all skipped is skipped.
+func deriveStatus(res AttemptResult) string {
+	switch {
+	case res.Failed > 0:
+		return StatusFailed
+	case res.Total > 0 && res.Skipped == res.Total:
+		return StatusSkipped
+	default:
+		return StatusPassed
+	}
 }
 
-// deleteRunChildren removes a run's child runs and their artifacts (the
-// caller handles the run's own artifacts).
-func deleteRunChildren(tx *gorm.DB, parentID int64) error {
-	var childIDs []int64
-	if err := tx.Model(&TestRun{}).Where("parent_id = ?", parentID).
-		Pluck("id", &childIDs).Error; err != nil {
+// AppendRunArtifactsByRun adds artifacts to one run by ID without touching the
+// run's result. Used by the runner to attach fetched files to a unit run after
+// the report landed.
+func (s *Store) AppendRunArtifactsByRun(runID int64, artifacts []ArtifactInput) error {
+	if len(artifacts) == 0 {
+		return nil
+	}
+	run, err := s.GetTestRun(runID)
+	if err != nil {
 		return err
 	}
-	if len(childIDs) > 0 {
-		if err := deleteArtifactsByRunIDs(tx, childIDs); err != nil {
-			return err
-		}
+	rows, err := s.putArtifacts(runID, run.TaskID, artifacts)
+	if err != nil {
+		return err
 	}
-	return tx.Where("parent_id = ?", parentID).Delete(&TestRun{}).Error
-}
-
-// boolInt maps a bool to 0/1 for the child-run count columns.
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		return tx.Create(&rows).Error
+	})
 }

@@ -32,7 +32,7 @@ func newDispatchTestServer(t *testing.T, yaml string) (*Server, *store.Store) {
 	return apiServer, s
 }
 
-const dispatchYAML = `version: 2
+const dispatchYAML = `version: 3
 defaults:
   build:
     command: "cmake . && cmake --build ."
@@ -131,20 +131,21 @@ func TestWebhookDispatchesTasks(t *testing.T) {
 		t.Fatalf("want 2 root tasks, got %d", len(roots))
 	}
 	for _, r := range roots {
-		if r.Status != store.TaskPending {
+		if r.Status != store.StatusPending {
 			t.Errorf("root should be pending: %+v", r)
 		}
-		subs, err := s.ListSubTasks(r.ID)
+		subs, err := s.ListActiveNodes(r.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// clone + build + (unit) (+ regression case for the cpu entry).
+		// clone + build + unit, plus the regression container and its single
+		// case for the cpu entry.
 		want := 3
 		if r.Tags == "cpu" {
-			want = 4
+			want = 5
 		}
 		if len(subs) != want {
-			t.Errorf("root %d (%s) subtask count: want %d, got %d", r.ID, r.Tags, want, len(subs))
+			t.Errorf("root %d (%s) node count: want %d, got %d", r.ID, r.Tags, want, len(subs))
 		}
 		if r.Tags != "cpu" && r.Tags != "cuda,gpu" {
 			t.Errorf("root tags wrong: %q", r.Tags)
@@ -161,12 +162,12 @@ func TestWebhookDispatchesTasks(t *testing.T) {
 		t.Fatalf("re-push should requeue, not duplicate: %d roots", len(roots))
 	}
 	for _, r := range roots {
-		if r.Attempts != 1 {
-			t.Errorf("re-push attempts: want 1, got %d", r.Attempts)
+		if r.Attempts != 2 {
+			t.Errorf("re-push attempts: want 2, got %d", r.Attempts)
 		}
-		subs, _ := s.ListSubTasks(r.ID)
+		subs, _ := s.ListActiveNodes(r.ID)
 		if len(subs) == 0 {
-			t.Errorf("re-push should rebuild sub-tasks of root %d", r.ID)
+			t.Errorf("re-push should rebuild the nodes of root %d", r.ID)
 		}
 	}
 
@@ -418,31 +419,20 @@ func TestTaskDetailAndLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	root := &store.Task{
-		Kind: store.TaskKindRoot, Name: "test detail01", CommitID: commit.ID,
-		EnvironmentID: env.ID, Tags: "cpu", Config: `{"entry":{"tags":["cpu"]},"testInputRef":"main"}`,
-	}
-	subs := []*store.Task{
-		{Kind: store.TaskKindClone, Name: "clone repositories", CommitID: commit.ID, EnvironmentID: env.ID},
-		{Kind: store.TaskKindBuild, Name: "build", CommitID: commit.ID, EnvironmentID: env.ID},
-		{Kind: store.TaskKindUnit, Name: "unit tests", CommitID: commit.ID, EnvironmentID: env.ID},
-	}
-	deps := [][]int64{
-		{},
-		{store.TaskSubPlaceholderBase + 0},
-		{store.TaskSubPlaceholderBase + 1},
-	}
-	stored, err := store.CreateTaskGraph(s, root, subs, deps)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A queued graph — clone → build → unit — with no results recorded yet.
+	root, byKey := dispatchTestGraph(t, s, env, commit, graphSpec{
+		build: &stageSpec{}, unit: &stageSpec{},
+	})
+	clone := nodeOf(t, byKey, store.TaskKindClone)
+	build := nodeOf(t, byKey, store.TaskKindBuild)
 
 	// Logs on the clone task.
-	if err := s.AppendTaskLog(stored[1].ID, 1, "cloning...\n"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.AppendTaskLog(stored[1].ID, 2, "uploading 12.3 MiB\n"); err != nil {
-		t.Fatal(err)
+	for seq, chunk := range []string{"cloning...\n", "uploading 12.3 MiB\n"} {
+		if err := s.AppendTaskLog(&store.TaskLog{
+			TaskID: clone.ID, Attempt: 1, Seq: seq + 1, Content: chunk,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	mux := http.NewServeMux()
@@ -479,7 +469,7 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	}
 
 	// Sub-task detail: no sub-tasks of its own.
-	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d", stored[1].ID))
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d", clone.ID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("sub detail: expected 200, got %d", rec.Code)
 	}
@@ -492,7 +482,7 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	}
 
 	// Logs: full read then incremental.
-	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log", stored[1].ID))
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log", clone.ID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("log read: expected 200, got %d", rec.Code)
 	}
@@ -506,7 +496,7 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	if len(logs.Chunks) != 2 || logs.LastSeq != 2 {
 		t.Fatalf("log read wrong: %+v", logs)
 	}
-	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=1", stored[1].ID))
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=1", clone.ID))
 	if err := json.Unmarshal(rec.Body.Bytes(), &logs); err != nil {
 		t.Fatal(err)
 	}
@@ -519,18 +509,148 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown task log: expected 404, got %d", rec.Code)
 	}
-	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=x", stored[1].ID))
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log?after=x", clone.ID))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad after: expected 400, got %d", rec.Code)
 	}
+
+	// Full-log download: the stored chunks as one text file the browser saves.
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", clone.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("log download: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Errorf("download Content-Type = %q", got)
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != fmt.Sprintf(`attachment; filename="task-%d.log"`, clone.ID) {
+		t.Errorf("download Content-Disposition = %q", got)
+	}
+	if got := rec.Body.String(); got != "cloning...\nuploading 12.3 MiB\n" {
+		t.Errorf("download body = %q", got)
+	}
+
+	// A log longer than one store read (ReadTaskLogs returns at most 1000
+	// chunks): the whole file comes down, not just the first batch.
+	long := make([]store.TaskLog, 0, 1500)
+	var want strings.Builder
+	for i := 1; i <= 1500; i++ {
+		line := fmt.Sprintf("line %d\n", i)
+		long = append(long, store.TaskLog{TaskID: build.ID, Attempt: 1, Seq: i, Content: line})
+		want.WriteString(line)
+	}
+	if err := s.DB.CreateInBatches(long, 500).Error; err != nil {
+		t.Fatal(err)
+	}
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", build.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("long log download: expected 200, got %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != want.String() {
+		t.Errorf("long log download: got %d bytes, want %d", len(got), want.Len())
+	}
+
+	// An unknown task has no file to download.
+	rec = authed(http.MethodGet, "/api/tasks/99999/log/download")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown task download: expected 404, got %d", rec.Code)
+	}
 }
 
-// TestDashboardBuildKind checks the third dashboard kind: build runs are
-// reported, listed on /api/dashboard/build and rejected for unknown kinds.
+// TestTaskDetailCaseRuns checks the graph's node → run links for a
+// regression stage: every case is a task of its own with its own run, so a
+// case node opens the run of its own attempt, while the virtual container
+// aggregates its children and links no run at all.
+func TestTaskDetailCaseRuns(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	seedUser(t, s, "caseuser", "case@example.com", "pw")
+	env := seedDispatchEnv(t, s, "cpu-cases", "cpu", true)
+	commit := &store.Commit{Repo: "group/code", SHA: "cases01", PushedAt: time.Now()}
+	if _, err := s.GetOrCreateCommit(commit); err != nil {
+		t.Fatal(err)
+	}
+
+	// Three cases; two report, one never does.
+	root, byKey := dispatchTestGraph(t, s, env, commit, graphSpec{
+		build: &stageSpec{},
+		cases: []caseSpec{
+			{name: "heat", res: passed()},
+			{name: "poisson", res: passed()},
+			{name: "laplace"},
+		},
+	})
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "caseuser", "pw")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/tasks/%d", root.ID), nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("task detail: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var detail taskDetailJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]subTaskJSON{}
+	for _, sj := range detail.SubTasks {
+		byName[sj.Name] = sj
+	}
+
+	// Each case node opens the run of its own attempt — the cases no longer
+	// share one stage-wide run.
+	heat := nodeOf(t, byKey, regressionCaseKey("heat"))
+	poisson := nodeOf(t, byKey, regressionCaseKey("poisson"))
+	if got := byName["regression: heat"].RunID; got != runOfTask(t, s, heat).ID {
+		t.Errorf("heat node runId: want its own run %d, got %d", runOfTask(t, s, heat).ID, got)
+	}
+	if got := byName["regression: poisson"].RunID; got != runOfTask(t, s, poisson).ID {
+		t.Errorf("poisson node runId: want its own run %d, got %d", runOfTask(t, s, poisson).ID, got)
+	}
+	if byName["regression: heat"].RunID == byName["regression: poisson"].RunID {
+		t.Error("the two case nodes should not share one run")
+	}
+	// A case that has not reported yet still links the pending run its
+	// dispatch opened — the page that follows it live.
+	laplace := nodeOf(t, byKey, regressionCaseKey("laplace"))
+	if got := byName["regression: laplace"]; got.RunID != runOfTask(t, s, laplace).ID || got.Status != store.StatusPending {
+		t.Errorf("laplace node should link its pending run: %+v", got)
+	}
+	// The other stages carry the run of their own current attempt too, and
+	// are not confused with the container.
+	if byName["build"].RunID != runOfTask(t, s, nodeOf(t, byKey, store.TaskKindBuild)).ID {
+		t.Errorf("build node should link its pending run: %+v", byName["build"])
+	}
+	if byName["clone repositories"].RunID == 0 {
+		t.Errorf("clone node should link its pending run: %+v", byName["clone repositories"])
+	}
+
+	// The container is virtual: no run of its own, and its counts are its
+	// children's aggregate — the case that never reported counts as queued.
+	container := byName["regression"]
+	if !container.Virtual || container.RunID != 0 {
+		t.Errorf("the regression container should be virtual and link no run: %+v", container)
+	}
+	if container.Total != 3 || container.Passed != 2 || container.Status != store.StatusPending {
+		t.Errorf("container rollup wrong: %+v", container)
+	}
+	if heat.ID == container.ID || poisson.ID == container.ID {
+		t.Error("the cases must be separate nodes, not the container")
+	}
+}
+
+// TestDashboardBuildKind checks the third dashboard kind: the build stage is
+// reported through its task, listed on /api/dashboard/build with the summary
+// a compiler error ends up in, and an unknown dashboard kind is 404.
 func TestDashboardBuildKind(t *testing.T) {
 	apiServer, s := newDispatchTestServer(t, dispatchYAML)
-	seedUser(t, s, "builduser", "bu@example.com", "pw")
-	env := seedDispatchEnv(t, s, "cpu-build", "cpu", true)
+	user := seedUser(t, s, "builduser", "bu@example.com", "pw")
+	env := seedOwnedDispatchEnv(t, s, user, "cpu-build", "cpu", true)
 	commit := &store.Commit{Repo: "group/code", SHA: "build99", PushedAt: time.Now()}
 	if _, err := s.GetOrCreateCommit(commit); err != nil {
 		t.Fatal(err)
@@ -551,16 +671,27 @@ func TestDashboardBuildKind(t *testing.T) {
 		return rec
 	}
 
+	// An unknown dashboard kind is 404 (the kind is no longer a parameter of
+	// the report endpoint: it comes from the task the report addresses).
+	rec := authed(http.MethodGet, "/api/dashboard/perf", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown dashboard kind: expected 404, got %d", rec.Code)
+	}
+
 	// Empty matrix first.
-	rec := authed(http.MethodGet, "/api/dashboard/build", "")
+	rec = authed(http.MethodGet, "/api/dashboard/build", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("build dashboard: expected 200, got %d", rec.Code)
 	}
 
-	// Report a passed build run (simplified path: no cases).
-	body := fmt.Sprintf(`{"environmentId":%d,"commitId":%d,"kind":"build","status":"passed","summary":"build ok"}`,
-		env.ID, commit.ID)
-	rec = authed(http.MethodPost, "/api/test-runs", body)
+	// A graph with a build (and a unit) stage; the build reports passed.
+	_, byKey := dispatchTestGraph(t, s, env, commit, graphSpec{
+		build: &stageSpec{}, unit: &stageSpec{},
+	})
+	build := nodeOf(t, byKey, store.TaskKindBuild)
+
+	rec = authed(http.MethodPost, "/api/test-runs",
+		fmt.Sprintf(`{"taskId":%d,"status":"passed","summary":"build ok"}`, build.ID))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("report build run: expected 201, got %d, body %s", rec.Code, rec.Body.String())
 	}
@@ -577,14 +708,15 @@ func TestDashboardBuildKind(t *testing.T) {
 	if len(dash.Rows) != 1 || dash.Rows[0].Cells[0] == nil {
 		t.Fatalf("build matrix wrong: %+v", dash.Rows)
 	}
-	if dash.Rows[0].Cells[0].RunID == 0 || dash.Rows[0].Cells[0].Status != store.StatusPassed {
+	if dash.Rows[0].Cells[0].RunID == 0 || dash.Rows[0].Cells[0].Status != store.StatusPassed ||
+		dash.Rows[0].Cells[0].TaskID != build.ID {
 		t.Fatalf("build cell wrong: %+v", dash.Rows[0].Cells[0])
 	}
 
-	// A failed build with a compiler error in the summary.
-	body = fmt.Sprintf(`{"environmentId":%d,"commitId":%d,"kind":"build","status":"failed","summary":"CMake Error: bad flag"}`,
-		env.ID, commit.ID)
-	rec = authed(http.MethodPost, "/api/test-runs", body)
+	// A failed build with a compiler error in the summary: the second report
+	// opens a new attempt of the same build task.
+	rec = authed(http.MethodPost, "/api/test-runs",
+		fmt.Sprintf(`{"taskId":%d,"status":"failed","summary":"CMake Error: bad flag"}`, build.ID))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("replace build run: expected 201, got %d", rec.Code)
 	}
@@ -593,28 +725,32 @@ func TestDashboardBuildKind(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
 		t.Fatal(err)
 	}
-	if dash.Rows[0].Cells[0].Status != store.StatusFailed {
+	if dash.Rows[0].Cells[0].Status != store.StatusFailed ||
+		dash.Rows[0].Cells[0].Summary != "CMake Error: bad flag" {
 		t.Fatalf("failed build cell wrong: %+v", dash.Rows[0].Cells[0])
 	}
 
-	// kind=build accepted on test-runs; an unknown kind is still rejected.
-	body = fmt.Sprintf(`{"environmentId":%d,"commitId":%d,"kind":"perf"}`, env.ID, commit.ID)
-	rec = authed(http.MethodPost, "/api/test-runs", body)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unknown kind: expected 400, got %d", rec.Code)
-	}
-
-	// The unit dashboard is unaffected by the build runs (no unit runs).
+	// The unit dashboard is unaffected by the build runs: the cell is the
+	// unit stage of the same graph, not a build run. The failed build skipped
+	// it in the same report — a stage behind a failure can never be claimed —
+	// and the cell says so instead of showing a queue that cannot drain.
 	rec = authed(http.MethodGet, "/api/dashboard/unit", "")
 	dash = dashboardJSON{}
 	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
 		t.Fatal(err)
 	}
-	if dash.Rows[0].Cells[0] != nil {
-		t.Fatalf("unit cell should be empty: %+v", dash.Rows[0].Cells[0])
+	unit := nodeOf(t, byKey, store.TaskKindUnit)
+	if c := dash.Rows[0].Cells[0]; c == nil || c.TaskID != unit.ID || c.Status != store.StatusSkipped {
+		t.Fatalf("unit cell should be the skipped unit stage: %+v", c)
+	} else if !strings.Contains(c.Summary, "build") {
+		t.Fatalf("the unit cell's summary should name the failed stage: %+v", c)
 	}
 }
 
+// TestDashboardOverlaysTaskState checks the regression matrix against a
+// dispatcher's own graph: a queued stage shows as a pending cell (its task
+// linked, no run), a graph that defines no regression stage leaves the cell
+// null ("—"), and a reported case moves the container's aggregate.
 func TestDashboardOverlaysTaskState(t *testing.T) {
 	apiServer, s := newDispatchTestServer(t, dispatchYAML)
 	seedUser(t, s, "overlayuser", "ov@example.com", "pw")
@@ -625,39 +761,16 @@ func TestDashboardOverlaysTaskState(t *testing.T) {
 	if _, err := s.GetOrCreateCommit(commit); err != nil {
 		t.Fatal(err)
 	}
-	// A pending task graph for (env, commit) with no run: clone → regression.
-	root := &store.Task{
-		Kind: store.TaskKindRoot, Name: "test cafe11", CommitID: commit.ID,
-		EnvironmentID: env.ID, Tags: "cpu", Config: "{}",
-	}
-	subs := []*store.Task{
-		{Kind: store.TaskKindClone, Name: "clone", CommitID: commit.ID, EnvironmentID: env.ID},
-		{Kind: store.TaskKindRegression, Name: "regression", CommitID: commit.ID, EnvironmentID: env.ID},
-	}
-	created, err := store.CreateTaskGraph(s, root, subs, [][]int64{
-		{}, {store.TaskSubPlaceholderBase + 0},
+	// A pending graph for (env, commit) with one regression case; and, for the
+	// second environment, a graph that defines no regression stage at all
+	// (e.g. a manual dispatch with only a build command) — the regression
+	// matrix must show "—" there, not a failed 0/0 invented from the root.
+	_, byKey := dispatchTestGraph(t, s, env, commit, graphSpec{
+		cases: []caseSpec{{name: "smoke"}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	regSub := created[2] // created = [root, clone, regression]
+	dispatchTestGraph(t, s, envStageless, commit, graphSpec{build: &stageSpec{}})
 
-	// A graph with no regression stage at all (e.g. a manual dispatch with
-	// only a build command): the regression matrix must show "—", not a
-	// failed 0/0 invented from the root state.
-	rootBuildOnly := &store.Task{
-		Kind: store.TaskKindRoot, Name: "test cafe11 build-only", CommitID: commit.ID,
-		EnvironmentID: envStageless.ID, Tags: "cpu", Config: "{}",
-	}
-	subsBuildOnly := []*store.Task{
-		{Kind: store.TaskKindClone, Name: "clone", CommitID: commit.ID, EnvironmentID: envStageless.ID},
-		{Kind: store.TaskKindBuild, Name: "build", CommitID: commit.ID, EnvironmentID: envStageless.ID},
-	}
-	if _, err := store.CreateTaskGraph(s, rootBuildOnly, subsBuildOnly, [][]int64{
-		{}, {store.TaskSubPlaceholderBase + 0},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	container := nodeOf(t, byKey, store.TaskKindRegressionStage)
 
 	mux := http.NewServeMux()
 	apiServer.Register(mux)
@@ -696,22 +809,22 @@ func TestDashboardOverlaysTaskState(t *testing.T) {
 	if cell == nil {
 		t.Fatal("expected a task overlay cell, got null")
 	}
-	if cell.Status != "pending" || cell.RunID != 0 || cell.TaskID != regSub.ID {
+	if cell.Status != store.StatusPending || cell.RunID != 0 || cell.TaskID != container.ID {
 		t.Fatalf("overlay cell wrong: %+v", cell)
 	}
-	// The build-only graph has no regression stage: no overlay, no invented
-	// failure — the cell stays null ("—").
 	if c := dash.Rows[0].Cells[envIdx(envStageless.ID)]; c != nil {
 		t.Fatalf("stage-less graph should show no cell, got %+v", c)
 	}
 
-	// A done root is not overlaid (the run takes over).
-	if err := s.FinishTask(root.ID, store.TaskDone, ""); err != nil {
+	// The case reports: the container's cell becomes its aggregate, so the
+	// matrix reflects a stage that never has a run of its own.
+	if _, err := s.FinishAttempt(nodeOf(t, byKey, regressionCaseKey("smoke")).ID, *passed()); err != nil {
 		t.Fatal(err)
 	}
 	dash = fetch()
-	if c := dash.Rows[0].Cells[envIdx(env.ID)]; c != nil {
-		t.Fatalf("done root should not overlay: %+v", c)
+	cell = dash.Rows[0].Cells[envIdx(env.ID)]
+	if cell == nil || cell.Status != store.StatusPassed || cell.Passed != 1 || cell.Total != 1 || cell.RunID != 0 {
+		t.Fatalf("aggregated cell wrong: %+v", cell)
 	}
 
 	// Environment columns now include tags.
@@ -803,7 +916,7 @@ func TestManualTrigger(t *testing.T) {
 		if root.Trigger != store.TaskTriggerManual {
 			t.Fatalf("root %d trigger: want manual(%d), got %d", root.ID, store.TaskTriggerManual, root.Trigger)
 		}
-		subs, err := s.ListSubTasks(root.ID)
+		subs, err := s.ListActiveNodes(root.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -821,7 +934,7 @@ func TestManualTrigger(t *testing.T) {
 				unitArtifacts = sc.Artifacts
 			}
 		}
-		if !kinds[store.TaskKindBuild] || !kinds[store.TaskKindUnit] || kinds[store.TaskKindRegression] {
+		if !kinds[store.TaskKindBuild] || !kinds[store.TaskKindUnit] || kinds[store.TaskKindRegressionStage] {
 			t.Fatalf("root %d sub-task kinds wrong: %v", root.ID, kinds)
 		}
 		if len(unitArtifacts) != 2 || unitArtifacts[0] != "build/test_detail.xml" || unitArtifacts[1] != "build/extra_results.json" {
@@ -1004,5 +1117,131 @@ func TestManualYAMLTrigger(t *testing.T) {
 	var envCount int64
 	if err := s.DB.Model(&store.TestEnvironment{}).Where("id = ?", envGPU.ID).Count(&envCount).Error; err != nil || envCount != 1 {
 		t.Fatalf("env count: %v %d", err, envCount)
+	}
+}
+
+// TestTriggerJobsCommitRowsAreVisible covers POST /api/jobs with a bare SHA:
+// the commit row it creates has to carry the repository path the dashboard
+// filters on. A caller-supplied URL stored as-is, or nothing at all when the
+// caller names no repository, puts the row outside the filtered matrix — the
+// jobs are dispatched and run, but no column ever shows them.
+func TestTriggerJobsCommitRowsAreVisible(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	seedDispatchEnv(t, s, "cpu-trigger", "cpu", true)
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	seedUser(t, s, "triggeruser", "trigger@example.com", "pw")
+	cookie := loginAndGetCookie(t, mux, "triggeruser", "pw")
+
+	for i, tc := range []struct{ name, repo string }{
+		{"site default", ""},
+		{"full url", "https://gitlab.com/group/code"},
+		{"bare path", "group/code"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sha := fmt.Sprintf("%040x", i+1)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/jobs",
+				strings.NewReader(fmt.Sprintf(`{"commitSha":%q,"commitRepo":%q}`, sha, tc.repo)))
+			req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("trigger: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+			}
+			var res struct {
+				JobsCreated int `json:"jobsCreated"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if res.JobsCreated != 1 {
+				t.Fatalf("jobsCreated = %d, want 1 (%s)", res.JobsCreated, rec.Body.String())
+			}
+			c := commitBySHA(t, s, sha)
+			if c.Repo != "group/code" {
+				t.Fatalf("commit repo = %q, want the configured repository's path group/code", c.Repo)
+			}
+			// And that is what the dashboard filter finds.
+			commits, err := s.ListCommits("group/code", 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, cm := range commits {
+				if cm.SHA == sha {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("the dispatched commit %s is not in the filtered matrix (filter group/code): %+v",
+					sha, commits)
+			}
+		})
+	}
+}
+
+// TestManualTriggerPartialDispatch covers POST /api/jobs/manual failing part
+// way down the environment list: the graphs built before the failure exist and
+// are queued, so the 422 has to report them. Answering with a bare error would
+// tell the caller nothing ran while its tests are on their way.
+func TestManualTriggerPartialDispatch(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	user := seedUser(t, s, "partialuser", "partial@example.com", "pw")
+	envOK := seedOwnedDispatchEnv(t, s, user, "cpu-partial", "cpu", true)
+	envOff := seedOwnedDispatchEnv(t, s, user, "cpu-partial-off", "cpu", true)
+	// The enabled column defaults to true on insert, so a disabled environment
+	// is created by flipping the column afterwards (as the tests above do).
+	if err := s.DB.Model(&store.TestEnvironment{}).Where("id = ?", envOff.ID).
+		UpdateColumn("enabled", false).Error; err != nil {
+		t.Fatal(err)
+	}
+	apiServer.Runner.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *runner.GitCredentials) (string, error) {
+		return "abc123abc123abc123abc123abc123abc123abc1", nil
+	}
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "partialuser", "pw")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/manual",
+		strings.NewReader(fmt.Sprintf(`{"buildCommand":"make","environmentIds":[%d,%d]}`, envOK.ID, envOff.ID)))
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 for the disabled environment, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Error string           `json:"error"`
+		Roots []manualTestRoot `json:"roots"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !strings.Contains(res.Error, "disabled") {
+		t.Fatalf("error = %q, want the disabled-environment message", res.Error)
+	}
+	if len(res.Roots) != 1 || res.Roots[0].EnvironmentID != envOK.ID {
+		t.Fatalf("roots = %+v, want the one graph built for environment %d", res.Roots, envOK.ID)
+	}
+	// The reported graph is real and running over the recorded commit.
+	roots, err := s.ListRootTasks(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 1 || roots[0].ID != res.Roots[0].TaskID {
+		t.Fatalf("stored roots = %+v, want the reported task %d", roots, res.Roots[0].TaskID)
+	}
+	if roots[0].Trigger != store.TaskTriggerManual || roots[0].EnvironmentID != envOK.ID {
+		t.Fatalf("root = %+v, want a manual graph on environment %d", roots[0], envOK.ID)
 	}
 }

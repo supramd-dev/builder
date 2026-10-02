@@ -13,12 +13,24 @@
 - **Build(构建)** —— 代码在每个环境上能否编译(点击查看构建日志)。
 - **Unit tests(单元)/ Regression tests(回归)** —— 逐用例矩阵。
 
-有已记录运行的单元格显示通过/失败计数;点击打开运行详情,包含逐用例
-回归用例的子运行列表(名称、状态、简短备注、耗时)和 worker 报告的
-一段式摘要。没有
-运行但存在活跃任务图的单元格显示 **queued** / **running…**(任务在报告
-前失败则为 ✗);完全不属于图的阶段显示"—"(它从未被请求执行)。每个
-commit 行还带 **graph** 链接:该 commit 任务管线
+每个单元格都是该 (commit, 环境)**任务图中的一个阶段节点**,而不是
+结果表里的一行。它的状态、通过/失败计数和时间戳都取自该节点最新一次
+尝试;点击打开这次尝试的运行详情:逐用例结果(名称、状态、错误值、
+简短备注)、runner 写下的一段式摘要、日志与工件。状态词表整体沿用
+任务词表 —— `pending`、`running`、`passed`、`failed`、`skipped` ——
+因此上游失败(或自身被上报为 `skipped`)的阶段读作 `skipped`(原因在
+摘要里,日志中还有一行 `skipped: <原因>`),尚未被 worker 领取的阶段
+读作 `pending`(界面显示
+为排队中)。单元格为 **null** 时,表示该 commit 在此环境上没有任务图,
+或该图根本不包含这个阶段;界面对两者都显示"—",因为在矩阵看来,从未
+被请求的阶段和从未被派发的 commit 是一回事。
+
+**回归这一列是图中的虚拟容器**:它什么都不执行,因此没有自己的尝试
+和运行 —— 单元格的 `runId` 为 0,计数是各用例的汇总,点击打开任务页,
+在那里每个用例都是独立节点,有自己的状态、日志、尝试与工件。正是这一点
+让用例的历史在一次重新派发后仍然保留,而不是被最后一个上报的用例改写。
+
+每个 commit 行还带 **graph** 链接:该 commit 任务管线
 (clone → build → 单元/回归)的依赖图,GitHub Actions 风格 —— 点击阶段
 节点跳转到运行详情或实时任务日志(见 [Runner 与任务](#/docs/runner-strategy))。
 
@@ -42,10 +54,13 @@ commit 行还带 **graph** 链接:该 commit 任务管线
     {
       "commit": {"sha": "abc123", "...": "..."},
       "taskIds": {"1": 42},
+      "triggers": {"1": 1},
       "stages": {
         "1": [
-          {"kind": "build", "runId": 7, "status": "passed"},
-          {"kind": "unit", "taskId": 42, "status": "running"}
+          {"kind": "build", "runId": 7, "taskId": 43, "status": "passed"},
+          {"kind": "unit", "taskId": 44, "status": "running"},
+          {"kind": "regression", "taskId": 45, "status": "pending",
+           "summary": "0/4 cases passed; 4 queued"}
         ]
       }
     }
@@ -53,78 +68,152 @@ commit 行还带 **graph** 链接:该 commit 任务管线
 }
 ```
 
-每个阶段要么携带已记录的 `runId`(打开运行详情),要么在运行尚未落库时
-携带任务图的实时 `taskId`(`status` 为 `pending`/`running`/`failed`/
-`done` 之一)。`taskIds` 将环境映射到根任务 ID,用于图链接;
-`commit.dispatchError` 在派发完全没有产出图时携带记录下来的原因。
+每个阶段总会携带它所展示节点的 `taskId` —— 这正是单元格可点击的原因
+—— 并在该节点有自己的尝试时携带其 `runId`;虚拟的回归容器没有运行,
+因此其 `runId` 为 0,`summary` 统计用例数。`taskIds` 将环境映射到根任务
+ID,用于图链接;`triggers` 映射到该 root 的触发方式(0 = webhook,
+1 = 手动,2 = 手动 yaml);`commit.dispatchError` 在派发完全没有产出图时
+携带记录下来的原因。
 
 ## 报告结果
 
-结果通过 `POST /api/test-runs` 报告:
+结果通过 `POST /api/test-runs` 报告,报告的对象是**该次尝试所属的任务**:
 
 ```json
 {
-  "environmentId": 1,
-  "commitId": 7,
-  "kind": "regression",
-  "summary": "max relative error 3e-7 within tolerance",
+  "taskId": 44,
+  "status": "failed",
+  "summary": "max relative error above tolerance on 2 of 12 cases",
+  "total": 12, "passed": 9, "failed": 2, "skipped": 1,
+  "durationMillis": 4200,
+  "startedAt": "2026-09-08T03:00:00Z",
+  "finishedAt": "2026-09-08T03:04:00Z"
+}
+```
+
+- `taskId` 是唯一必填字段。环境、提交和运行类别都从任务读出,因此报告
+  不可能落到别的测试上 —— 而且正因为任务就是调用方需要有权处置的东西,
+  接口才能分辨一次报告是否名正言顺。
+- 其余字段都可选。`status` 为空时从计数推导(有任何失败即 `failed`;
+  总数非零且全部 skipped 即 `skipped`;否则 `passed`);`startedAt` 为空
+  时由 `finishedAt` 和 `durationMillis` 推出。`status` 不在 `passed` /
+  `failed` / `skipped` 之内返回 `400`。
+- 报告必须来自**有权对该测试报告的人:任务所在环境的 owner,或管理员**。
+  其他账号一律 `403` —— 否则任何已登录用户只要猜到任务 ID 就能覆盖任何
+  测试的结果。任务不存在返回 `404`;**虚拟任务**返回 `400` —— root 和
+  回归容器不记录运行,因此报告只能指向真正执行过的子节点("virtual
+  tasks do not record runs; report against their children")。已经不存在
+  "外部上报"这种行了:每个运行都归属于一个任务。
+- 报告关闭的是存储器中**正在进行的**那次尝试。该尝试结束之后再报告不会
+  覆盖它,而是开启同一任务的**下一次尝试**,这就是重试路径:重跑的两条
+  记录都会保留,并且都还能查看。响应为 `201`,返回新运行,其 `attempt`
+  即本次开启的尝试序号。
+- 请求体里没有逐用例列表,也没有 artifact 字段。回归用例本身就是任务,
+  所以某个用例的结果就是这个节点的报告;它的文件由 runner 取回,因为
+  只有 runner 持有到那台机器的连接。
+- runner 根本不走 HTTP:它运行在服务进程内,通过存储层
+  (`FinishAttempt`)关闭自己的尝试,写入的结果值完全一致。本接口是给
+  服务之外的测试端用的(见 [Runner 与任务](#/docs/runner-strategy))。
+- 删除环境会同时删除它的任务、运行与工件。
+
+## 运行、任务、日志与工件
+
+`GET /api/test-runs/{id}` 是**某个任务某一次尝试**的详情视图:运行本身
+—— `id`、`taskId`、`attempt`、`kind`(阶段类别,`build` / `unit` /
+`regression`;用例的运行沿用阶段类别,这样所有用例才落在同一回归列里)、
+`status`、`summary`、各项计数、`durationMillis`、`environmentId`、
+`commitId`、`startedAt`、`finishedAt` —— 加上它所属任务的身份
+(`taskName`、`taskDescription`、`taskKey`、`taskKind`、`rootTaskId`
+—— 返回流水线页面的链接)、它的提交与环境上下文、同一任务的其他所有
+尝试 `attempts`(最新在前,形状与运行相同)以及本次尝试的 `artifacts`:
+
+```json
+{
+  "id": 12, "taskId": 44, "attempt": 2, "kind": "unit",
+  "status": "failed", "summary": "9/12 passed; failed: models",
+  "total": 12, "passed": 9, "failed": 2, "skipped": 1,
+  "durationMillis": 4200, "environmentId": 1, "commitId": 7,
   "startedAt": "2026-09-08T03:00:00Z",
   "finishedAt": "2026-09-08T03:04:00Z",
-  "cases": [
-    {"name": "water-tip4p-npt", "status": "failed",
-     "message": "drift above threshold", "durationMillis": 4200}
-  ]
-}
-```
-
-- `commitId` 可以换成 `"commitSha"` + `"commitRepo"`。
-- `startedAt` / `finishedAt` 可选(RFC 3339)。
-- 每个回归用例都会成为所报运行的一个**子测试运行**(child test run):
-  运行详情里的 `cases` 是子运行摘要列表,用例行的 `id` 即子运行的 id,
-  点击即打开该用例自己的运行详情页。用例状态为 `passed` / `failed` /
-  `skipped`(skipped 表示因上游阶段失败、子任务从未执行的用例)。
-- 提供 `cases` 时,运行状态与计数从用例推导。没有用例时,直接存储
-  显式的 `"status"`(`passed` | `failed`)、`"summary"` 和可选的聚合计数
-  (`"total"` / `"passed"` / `"failed"` / `"skipped"`)—— 这是简化报告
-  路径(构建运行和单元测试运行使用;单元测试的逐用例明细存在结果文件
-  artifact 里,不进数据库)。
-- 对同一(环境, 提交, 类别)重复报告会替换已存结果 —— API 是幂等的,
-  不稳定的报告端可以安全重试。
-- 删除环境会同时删除其测试运行。
-
-`GET /api/test-runs/{id}` 返回运行详情,含 `taskId`(产出该运行的阶段
-子任务,其日志即阶段的 stdout;外部上报为 0)、`rootTaskId`(所在图的
-root 任务 —— 返回流水线页面的链接;外部上报为 0)、`name`/`message`
-(仅子运行:预置名与备注)、`parentRunId`/`parentName`(仅子运行 ——
-面包屑返回父回归运行的链接)、`cases`(子运行摘要列表:`id` = 子运行
-id,以及 `name`、`status`、`message`、`durationMillis`)以及
-`artifacts` —— 存储文件的引用,例如 runner 取回的 googletest 结果文件
-(一次运行可以产出多个):
-
-```json
-{
-  "id": 12, "kind": "unit", "status": "failed", "taskId": 77,
-  "rootTaskId": 70,
-  "name": "", "message": "", "parentRunId": 0, "parentName": null,
-  "total": 12, "passed": 9, "failed": 2, "skipped": 1,
+  "taskName": "unit tests", "taskDescription": null,
+  "taskKey": "unit", "taskKind": "unit", "rootTaskId": 42,
+  "environmentName": "cpu-node-1", "commitSha": "abc123…",
+  "commitShortSha": "abc123", "commitMessage": "fix …",
+  "commitAuthor": "…", "commitRepo": "group/code",
+  "commitRepoUrl": "https://gitlab.example.com/group/code",
+  "attempts": [
+    {"id": 12, "attempt": 2, "status": "failed", "...": "..."},
+    {"id": 9,  "attempt": 1, "status": "passed", "...": "..."}
+  ],
   "artifacts": [
     {"id": 3, "kind": "results",
-     "name": "build/test_detail.xml", "size": 15832},
-    {"id": 4, "kind": "results",
-     "name": "build/extra.json", "size": 2101}
+     "name": "build/test_detail.xml", "size": 15832}
   ]
 }
 ```
 
-Artifact 归属产出它的运行:单元测试运行的结果文件挂在单元测试运行上;
-回归用例的 artifact 挂在该用例自己的子运行上(父运行只聚合计数)。
+任务身份与提交/环境字段在所引用的行已被删除时返回 `null` —— 运行比它
+所运行的环境活得久,因此旧的运行页面仍然打得开。读取权限与矩阵本身一致,
+是站点级的:任何已登录用户都可以打开任意任务、运行、日志或工件。受限的
+只有写操作 —— 向任务报告(环境 owner 或管理员)以及向环境派发。读取正是
+所有权模型不适用的地方,这样同事想问"这个用例为什么失败"时页面才用得上。
+Artifact 归属产出它的那次尝试:单元测试运行的结果文件挂在单元测试运行上,
+回归用例的文件挂在该用例自己的运行上 —— 回归容器不产出任何东西,只汇总
+子节点的计数。
 
-`GET /api/test-artifacts/{id}` 返回单个 artifact 的原始 `content` ——
-浏览器端的结果解析和后续回归的"分析"视图都从这里取数。
-`GET /api/test-artifacts/{id}/download` 以文件下载(Content-Disposition
-附件)形式返回同样的字节;`GET /api/test-runs/{id}/artifacts/zip` 把该
-运行的全部工件 —— 自身的加上所有子运行的(回运用例在
-`cases/<名称>/` 下)—— 打包成一个 zip。
+`GET /api/tasks/{id}` 是节点的测试侧视图。它携带任务身份(`id`、
+`rootId`、`parentId`、`kind`、`nodeKey`、`name`、`description`、
+`virtual`、`retired`)、状态(`status`、`summary`、`error`、各项计数、
+`attempts`、`startedAt`、`finishedAt`)、运行位置(`commitId`、
+`environmentId`、`tags`、`trigger`,以及解析后的 `commit` 与
+`environment`);对于**真实**任务还带 `runs` 里的每一次尝试(最新在前)。
+`GET /api/tasks/{id}/runs` 单独返回该列表(`{"runs": […]}`)—— 日志查看
+器的尝试切换器读的就是它 —— 对虚拟任务返回 `{"runs": []}`。
+
+**root** 返回的是图而不是尝试:
+
+- `subTasks` —— 当前图的节点:`id`、`parentId`(嵌套关系,即界面绘制的
+  那棵树)、`kind`、`nodeKey`(重新派发时用于匹配的稳定身份)、`name`、
+  `description`、`virtual`、`status`、`summary`、`error`、`dependsOn`
+  (调度 DAG,永远是列表,不会是 null)、各项计数、`attempts`、`runId`
+  (最新一次尝试的运行,即详情链接;容器没有)以及时间戳。
+- `retiredTasks` —— 早期派发定义过、后来的派发丢弃掉的节点。它们被保留
+  下来,不再调度,也不参与汇总:当某个用例从 `md-builder.yaml` 里消失,
+  它的历史不会从页面上消失;再次加回该用例也不会复活旧节点。
+
+日志按尝试存储为有序的块,并以增量方式读取:
+`GET /api/tasks/{id}/log?after=<seq>` 返回
+`{"attempt": 2, "chunks": [{"seq": 4, "content": "…"}], "lastSeq": 9}`
+—— 即 `after` 之后写入的块,这正是跟随运行中任务的查看器所要的。两个
+日志端点都接受 `?attempt=<n>`,默认当前尝试,因此重试之后早先那一次仍然
+可读。`after` 为负或 `attempt` 非正返回 `400`,而不是悄悄取默认值。
+单次读取最多返回 1000 个块:读取方从 `lastSeq` 继续,直到某一页不满为止
+—— 日志查看器靠它显示很长的尝试,下载端点也靠它逐段遍历。
+`GET /api/tasks/{id}/log/download` 把整次尝试作为一个 `text/plain` 文件
+附件流出 —— 文件名为 `task-<id>.log`,非当前尝试时带 `-attempt-<n>` 后缀
+—— 它按批次从存储的块拼出,因此很长的构建输出不必整体放进内存。
+
+`GET /api/test-artifacts/{id}` 返回单个 artifact 的原始 `content`,以及
+它的 `id`、`runId`、`kind` 和 `name` —— 浏览器端的结果解析和回归的
+"分析"视图都从这里取数。`GET /api/test-artifacts/{id}/download` 以文件
+下载(Content-Disposition 附件,文件名取自源路径的 basename)形式返回
+同样的字节。字节存放在对象存储里:对象已不存在时返回 `404`,后端本身
+出错时返回 `502` —— 因为数据库行还在,请求本身没有问题(见
+[对象存储](#/docs/object-storage))。
+
+有两个 zip 打包工件,而且都绝不会是空归档:
+
+- `GET /api/test-runs/{id}/artifacts/zip` —— 该**次尝试自己的**文件,
+  平铺,名为 `run-<id>-artifacts.zip`。
+- `GET /api/tasks/{id}/artifacts/zip` —— 整棵**子树**最新尝试的工件:
+  被指定任务的文件放在归档根目录,每个后代的文件放在以它命名的目录下,
+  名为 `task-<id>-artifacts.zip`。因此一个回归阶段会作为一个包含其全部
+  用例的包下载,每个用例位于按节点 key 生成、并把 `:` 换成 `-` 的目录里
+  (`regression-heat/file.json`),这样目录结构在重新派发后依然稳定。
+  两个文件若会落到同一路径,会加上 ` (2)` 后缀而不是互相覆盖;已退休的
+  节点不会包含在内:它们的文件属于更早的图形态。
+- 请求的包中完全没有文件时返回 `404`(`{"error":"no artifacts"}`)——
+  空 zip 看起来会像一次成功的下载。
 
 ## 脚本执行(交互式)
 
@@ -175,12 +264,21 @@ POST /api/jobs/manual
   等价于 `git ls-remote`);响应为
   `{"roots": [{"taskId": 42, "environmentId": 1}, …]}` —— 每个环境一个
   root 任务,顺序与请求一致。
+- 环境是逐个派发的:列表中途失败(环境被禁用、任务图无法构建)时返回
+  `422`,响应体仍带着此前已创建的 `roots` —— 这些任务已入队并在运行,
+  Run 页面会把它们连同错误一起列出,而不是报成"什么都没发生"。
 - 图会标记 `trigger: 1`(手动);每次派发都记录一条新的 commit 行,
   因此重跑同一 ref 会新增矩阵行,旧行标记为 superseded。
-- `environmentIds` 是显式指定环境 —— 这里不做标签匹配 —— 且接受任意
-  **已启用**的环境 id:资源池是全站的,该端点不检查调用方是否拥有这一行。
-  Run 页面的选择框更严格,只给出该账号有权使用的环境(自己的,管理员
-  则是全部)。
+- `environmentIds` 是显式指定环境 —— 这里不做标签匹配 —— 且每个 id 都
+  必须是调用方**有权管理**的环境:该环境的 owner,或管理员。阶段命令会
+  用环境所有者的私钥通过 SSH 执行,因此允许任何人指向任何人的机器,
+  就成了绕过 `/api/environments/{id}/exec`、`/script` 已有规则的缺口。
+  别人的 id 返回 `403`(并指出是哪个环境),不存在的返回 `422`。Run
+  页面的选择框给出的正是这个集合,所以这是接口补上了界面本就遵循的约束,
+  而不是新增了限制。
+- **webhook** 路径有意不加这层限制:一次推送会把 yaml 条目与站点上所有
+  已启用环境匹配,不管环境是谁注册的(见
+  [Runner 与任务](#/docs/runner-strategy))。
 
 ### YAML 矩阵派发
 
@@ -280,17 +378,20 @@ POST /api/setup
 | POST   | `/api/site-config/webhook-token`| 轮换 webhook 密钥并返回配置(仅管理员) |
 | GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
-| POST   | `/api/test-runs`                | 报告测试运行结果                              |
-| GET    | `/api/test-runs/{id}`           | 单次运行详情:用例、计数、artifact            |
+| POST   | `/api/test-runs`                | 关闭任务的当前尝试:按 `taskId` 报告结果(任务所在环境的 owner 或管理员) |
+| GET    | `/api/test-runs/{id}`           | 某个任务的某次尝试:计数、任务身份、全部尝试、artifact |
+| GET    | `/api/test-runs/{id}/artifacts/zip` | 该次尝试自己的工件打成 zip(没有工件时 `404`) |
 | GET    | `/api/test-artifacts/{id}`      | 单个存储 artifact 的原始内容                 |
 | GET    | `/api/test-artifacts/{id}/download` | 单个 artifact 以文件下载               |
-| GET    | `/api/test-runs/{id}/artifacts/zip` | 一个运行的全部工件(含子运行)打成 zip |
 | POST   | `/api/jobs`                     | 手动重新派发某提交的任务图(webhook 方式,读取 YAML) |
 | POST   | `/api/jobs/manual`              | 派发自定义测试(仓库、ref、阶段命令、环境;无需 YAML) |
 | POST   | `/api/jobs/manual-yaml`         | 派发某 ref 上的 md-builder.yaml 矩阵(按需执行的 webhook 流程) |
 | GET    | `/api/jobs`                     | 最近的任务图(`?limit=`;监控;旧 job 形状)    |
-| GET    | `/api/tasks/{id}`               | 单个任务;root 附带子任务列表与提交/环境上下文 |
-| GET    | `/api/tasks/{id}/log?after=<seq>` | 给定序号之后的任务日志块(增量,实时跟随)   |
+| GET    | `/api/tasks/{id}`               | 单个任务;root 附带节点列表(当前 + 已退休)与提交/环境上下文 |
+| GET    | `/api/tasks/{id}/runs`          | 该任务的各次尝试,最新在前(一次尝试一个运行) |
+| GET    | `/api/tasks/{id}/log?after=<seq>&attempt=<n>` | 给定序号之后的任务日志块(增量,实时跟随)   |
+| GET    | `/api/tasks/{id}/log/download?attempt=<n>` | 该次尝试的完整日志,以 `text/plain` 文件附件返回(`Content-Disposition`) |
+| GET    | `/api/tasks/{id}/artifacts/zip` | 子树的全部最新工件打成一个 zip,后代位于以自身命名的目录下(没有工件时 `404`) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook 接收器(无需会话:由 `X-Gitlab-Token` 请求头认证,见 [Webhooks](#/docs/webhooks)) |
 
 环境列表**不按 owner 过滤**:派发会把 yaml entry 与所有已启用环境逐一匹配,
@@ -300,10 +401,23 @@ POST /api/setup
 [测试环境](#/docs/environments)。
 
 环境的创建/更新请求体包含 `name`、`host`、`username`、`privateKey`、
-`tags`、`description`、`enabled` 和 `envScript`(在每个阶段之前被
-source 的环境设置脚本 —— 见[测试环境](#/docs/environments))。与私钥
-不同(更新时留空 = 保留原值),`envScript` 省略或留空即清除脚本。两个
-字段的回显行为也不同:私钥永不回显,环境脚本会原样返回(它不是机密)。
+`tags`、`description`、`enabled`、`envScript`(在每个阶段之前被 source
+的环境设置脚本)和 `allowedEnvVars`(在这台机器上允许被 md-builder.yaml
+的 `variables:` 值展开的主机环境变量名单 —— 见
+[测试环境](#/docs/environments))。与私钥不同(更新时留空 = 保留原值),
+`envScript` 省略或留空即清除脚本。两个字段的回显行为也不同:私钥永不
+回显,环境脚本会原样返回(它不是机密)。
+
+`allowedEnvVars` 是这里唯一既不是机密也不是布尔值的项:它以一段文本提交
+(名字之间用逗号、空格或换行分隔),并且空字符串是一个明确的决定 —— 一个
+都不允许,因此它是普通字符串而不是"可省略"的指针形状。不传则保留已存
+名单,因此保存表单时没动这个输入框就不会改写它;创建时没有"已存名单"可
+保留,不传即表示内置默认名单(响应中的 `allowedEnvVarsDefault` 会报告它,
+新环境会把默认名单存下来,而不是留空)。名单是**每个环境**自己的,不是
+站点级的:同一站点的两台主机可以公开不同的名字。名单只有名字没有取值,
+因此对所有人可见,而该行自身的权限决定谁能改 —— 其所有者或管理员。名字在
+保存时校验:不是 shell 标识符、或以 `MD_` 开头的名字会被拒绝,返回 `400`
+并指出是哪个。
 
 站点配置里的几个 token 在“是否可读”上不同。`accessToken` 和
 `secretToken` 是只写的:接口只报告 `accessTokenSet` / `secretTokenSet`,

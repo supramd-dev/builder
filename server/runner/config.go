@@ -16,8 +16,10 @@ import (
 	"md-builder/server/store"
 )
 
-// ConfigVersion is the only supported md-builder.yaml schema version.
-const ConfigVersion = 2
+// ConfigVersion is the only supported md-builder.yaml schema version. A config
+// naming any other version is refused; there is no compatibility path for older
+// schema versions.
+const ConfigVersion = 3
 
 // MaxTimeoutSeconds is the hard per-command timeout cap (4h).
 const MaxTimeoutSeconds = 4 * 3600
@@ -226,10 +228,15 @@ type EntryConfig struct {
 	Tags        []string          `yaml:"tags" json:"tags"`
 	Description string            `yaml:"description,omitempty" json:"description,omitempty"`
 	Env         map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	Build       BuildConfig       `yaml:"build,omitempty" json:"build,omitempty"`
-	Unit        *EnvConfig        `yaml:"unit,omitempty" json:"unit,omitempty"`
-	Regression  *RegressionUse    `yaml:"regression,omitempty" json:"regression,omitempty"`
-	Timeout     int               `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	// Variables is the entry's variable templates (see MergedEntry.Variables):
+	// unlike Env, whose values are literals, a variable's value may reference
+	// other variables, the built-in MD_* variables and the host environment
+	// variables the site allow-lists.
+	Variables  map[string]string `yaml:"variables,omitempty" json:"variables,omitempty"`
+	Build      BuildConfig       `yaml:"build,omitempty" json:"build,omitempty"`
+	Unit       *EnvConfig        `yaml:"unit,omitempty" json:"unit,omitempty"`
+	Regression *RegressionUse    `yaml:"regression,omitempty" json:"regression,omitempty"`
+	Timeout    int               `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
 // rawConfig mirrors md-builder.yaml before defaults merging.
@@ -258,8 +265,15 @@ type MergedEntry struct {
 	Tags        []string          `json:"tags"`
 	Description string            `json:"description,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
-	Build       BuildConfig       `json:"build"`
-	Unit        *EnvConfig        `json:"unit,omitempty"`
+	// Variables are exported by every stage script of the entry, like Env, but
+	// their values are expanded first: $MD_* built-ins, other variables of the
+	// entry, and the host environment variables the site allow-lists expand;
+	// anything else stays literal (with a warning in the task log). A variable
+	// is exported after the environment's setup script, so it can build on what
+	// that script exports.
+	Variables map[string]string `json:"variables,omitempty"`
+	Build     BuildConfig       `json:"build"`
+	Unit      *EnvConfig        `json:"unit,omitempty"`
 	// RegressionDescription is the label of the regression stage as a whole
 	// (the entry's regression.description); each case carries its own
 	// Description from the preset.
@@ -319,6 +333,9 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := validateVariables(&merged, i+1); err != nil {
+			return nil, err
+		}
 		if merged.Unit == nil && len(merged.Regression) == 0 {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d resolves to no stage (unit missing, regression selects no preset)", i+1)
 		}
@@ -330,7 +347,14 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 // expandRegression resolves the entry's use/disable against the presets into
 // the effective ordered case list. Empty use selects every preset (name
 // order for determinism); disable drops named cases from the selection.
-func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, defaults *EntryConfig) ([]RegressionCase, error) {
+//
+// A case's command timeout resolves like every other command's: the preset's
+// own timeout, else the matrix entry's timeout, else the defaults' one, else
+// the package default. The graph builder only falls back to the entry for a
+// case left at zero, so resolving without the entry here would silently mask
+// the entry's timeout (a case of an entry with `timeout: 60` would keep the
+// hour-long default).
+func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, defaults, entry *EntryConfig) ([]RegressionCase, error) {
 	if use == nil {
 		return nil, nil
 	}
@@ -366,7 +390,7 @@ func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, default
 			Artifacts:   p.Artifacts,
 		}
 		if c.Timeout == 0 {
-			c.Timeout = defaultTimeoutFor(defaults, nil)
+			c.Timeout = defaultTimeoutFor(defaults, entry)
 		}
 		if c.Timeout > MaxTimeoutSeconds {
 			c.Timeout = MaxTimeoutSeconds
@@ -382,6 +406,86 @@ func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, default
 		}
 	}
 	return cases, nil
+}
+
+// validateVariables checks one merged entry's variables: the names have to be
+// usable as shell identifiers (or the generated script would not parse) and
+// must not collide with the built-in MD_* variables or with an env variable of
+// the same entry, and the references between variables must not form a cycle.
+// entryNo is the 1-based matrix position, used in the error text like the
+// other parse errors.
+func validateVariables(m *MergedEntry, entryNo int) error {
+	if len(m.Variables) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(m.Variables))
+	for name := range m.Variables {
+		if !IsEnvName(name) {
+			return fmt.Errorf("md-builder.yaml: matrix entry %d: variables: %q is not a valid shell identifier", entryNo, name)
+		}
+		if strings.HasPrefix(name, ReservedVarPrefix) {
+			return fmt.Errorf("md-builder.yaml: matrix entry %d: variables: %q is reserved (the %s prefix belongs to md-builder's own variables)",
+				entryNo, name, ReservedVarPrefix)
+		}
+		if _, both := m.Env[name]; both {
+			return fmt.Errorf("md-builder.yaml: matrix entry %d: %q is defined in both env and variables (env values are literal, variables values expand) — keep it in one of them",
+				entryNo, name)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	// Variables are exported in dependency order, so a cycle has no answer:
+	// refuse it here instead of shipping a script whose values depend on the
+	// export order.
+	const (
+		unvisited = 0
+		onStack   = 1
+		finished  = 2
+	)
+	state := make(map[string]int, len(m.Variables))
+	var stack []string
+	var visit func(name string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case onStack:
+			return fmt.Errorf("md-builder.yaml: matrix entry %d: variables reference each other in a cycle: %s",
+				entryNo, strings.Join(append(append([]string{}, stack[indexOf(stack, name):]...), name), " -> "))
+		case finished:
+			return nil
+		}
+		state[name] = onStack
+		stack = append(stack, name)
+		for _, ref := range scanVarRefs(m.Variables[name]) {
+			if _, isVar := m.Variables[ref.name]; !isVar {
+				continue // a built-in or a host variable: not part of the graph
+			}
+			if err := visit(ref.name); err != nil {
+				return err
+			}
+		}
+		stack = stack[:len(stack)-1]
+		state[name] = finished
+		return nil
+	}
+	for _, name := range names {
+		if err := visit(name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// indexOf returns the position of name in stack (0 when absent, which cannot
+// happen for a cycle: the name is always on the stack when its own visit
+// reports one).
+func indexOf(stack []string, name string) int {
+	for i, s := range stack {
+		if s == name {
+			return i
+		}
+	}
+	return 0
 }
 
 // mergeDefaults applies defaults onto an entry: env maps are merged key-wise
@@ -405,7 +509,7 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 	}
 
 	var err error
-	m.Regression, err = expandRegression(presets, entry.Regression, defaults)
+	m.Regression, err = expandRegression(presets, entry.Regression, defaults, entry)
 	if err != nil {
 		return MergedEntry{}, err
 	}
@@ -424,6 +528,22 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 	}
 	if len(m.Env) == 0 {
 		m.Env = nil
+	}
+
+	// Variables merge the same way (the entry wins on conflicts), so a
+	// defaults-level variable (say a shared build root) can be reused by every
+	// entry while an entry overrides just the ones it needs.
+	m.Variables = map[string]string{}
+	if defaults != nil {
+		for k, v := range defaults.Variables {
+			m.Variables[k] = v
+		}
+	}
+	for k, v := range entry.Variables {
+		m.Variables[k] = v
+	}
+	if len(m.Variables) == 0 {
+		m.Variables = nil
 	}
 
 	m.Timeout = defaultTimeoutFor(defaults, entry)

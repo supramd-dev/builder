@@ -32,6 +32,12 @@ repo + sha; a re-recorded SHA restamps its row's event). Other event types
 | **tag push** | the tagged SHA (`after`) | event `tag_push`, ref = tag name (e.g. `v1.0`) |
 | **merge request** | the MR's `last_commit` on the source branch | event `merge_request`, ref = source branch |
 
+**Deletions are dropped.** A branch or tag deletion carries no commit to
+test: GitLab puts the null SHA in `after` (and in a merge request's
+`last_commit.id`), so the event is acknowledged with `status: ignored`
+rather than recorded — a row nothing can ever fill would otherwise sit on
+the matrix forever.
+
 Merge request events dispatch on the `open`, `reopen` and `merge` actions
 (a fresh source state or the merged result). Other actions (`update`,
 `close`, `approved`, …) are recorded but not dispatched — the tested SHA

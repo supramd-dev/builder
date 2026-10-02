@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"md-builder/server/auth"
 	"md-builder/server/store"
@@ -359,6 +360,33 @@ func TestGitLabRegistrationAvoidsUsernameCollision(t *testing.T) {
 	}
 	if u.Username != "alice-2" {
 		t.Fatalf("expected the colliding name to be suffixed, got %q", u.Username)
+	}
+}
+
+// TestGitLabRegistrationTruncatesLongUsername: the name carried over from
+// GitLab is capped for the local account, and the cap has to fall on a rune
+// boundary — auth.ValidateUsername counts runes, so a byte cut yields a string
+// it accepts but that is not valid UTF-8, which PostgreSQL refuses to store.
+func TestGitLabRegistrationTruncatesLongUsername(t *testing.T) {
+	f := newGitLabFixture(t, gitlabUser{
+		ID: 77, Username: strings.Repeat("汉", 40), Email: "long@example.com",
+	})
+
+	if status := loginStatus(t, f.callback(t, "state=state-value&code=test-code")); status != "pending" {
+		t.Fatalf("expected status pending, got %q", status)
+	}
+	u, err := f.store.GetUserByGitLabID(77)
+	if err != nil {
+		t.Fatalf("expected the account to be registered: %v", err)
+	}
+	if !utf8.ValidString(u.Username) {
+		t.Fatalf("stored username is not valid UTF-8: %q", u.Username)
+	}
+	if n := utf8.RuneCountInString(u.Username); n > maxDerivedUsername {
+		t.Fatalf("stored username has %d runes, want at most %d", n, maxDerivedUsername)
+	}
+	if msg := auth.ValidateUsername(u.Username); msg != "" {
+		t.Fatalf("stored username would not pass the validator: %s", msg)
 	}
 }
 

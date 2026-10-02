@@ -82,7 +82,7 @@ func TestDispatchRecordsErrorOnCommit(t *testing.T) {
 	// A later dispatch that works clears it again — otherwise the row would
 	// keep claiming a failure that has since been fixed.
 	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
-		return []byte("version: 2\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
+		return []byte("version: 3\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
 	}
 	if res := svc.DispatchForCommit(commit); res.Err != nil {
 		t.Fatalf("second dispatch: %v", res.Err)
@@ -100,7 +100,7 @@ func TestDispatchRecordsNoMatchingEntry(t *testing.T) {
 	commit := commitFor(t, s, "bbbb2222")
 
 	svc.FetchYAML = func(ctx context.Context, codeRepoURL, sha string, creds *GitCredentials) ([]byte, error) {
-		return []byte("version: 2\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
+		return []byte("version: 3\ndefaults:\n  build:\n    command: \"make\"\nmatrix:\n  - tags: [cpu]\n    unit:\n      command: \"ctest\"\n"), nil
 	}
 	res := svc.DispatchForCommit(commit)
 	if res.Err != nil {
@@ -277,5 +277,69 @@ func TestDispatchManualRecordsError(t *testing.T) {
 	}
 	if !strings.Contains(commits[0].DispatchError, "disabled") {
 		t.Fatalf("stored dispatch error = %q, want the disabled-environment message", commits[0].DispatchError)
+	}
+}
+
+// TestDispatchManualBoundsRefResolution: the ref lookup is a network round
+// trip to a repository the caller named, so it is bounded like the matrix
+// read. A host that accepts the connection and then goes quiet must fail the
+// dispatch — with the reason reaching the caller — instead of holding the
+// request handler's goroutine open for as long as it likes.
+func TestDispatchManualBoundsRefResolution(t *testing.T) {
+	s, svc := dispatchFixture(t, "cpu")
+	svc.FetchTimeout = 50 * time.Millisecond
+	svc.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) {
+		<-ctx.Done() // a lookup that never answers on its own
+		return "", ctx.Err()
+	}
+	enabled, err := s.ListEnabledEnvironments()
+	if err != nil || len(enabled) != 1 {
+		t.Fatalf("environments: %v %d", err, len(enabled))
+	}
+
+	begin := time.Now()
+	roots, err := svc.DispatchManual(ManualDispatch{
+		Repo:           "https://gitlab.example.com/group/code",
+		Ref:            "main",
+		BuildCommand:   "make",
+		EnvironmentIDs: []int64{enabled[0].ID},
+		Username:       "alice",
+	})
+	if err == nil {
+		t.Fatal("a lookup that never returns must fail the dispatch")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("dispatch error = %v, want the lookup's deadline", err)
+	}
+	if elapsed := time.Since(begin); elapsed > 30*time.Second {
+		t.Errorf("the dispatch waited %s, want the FetchTimeout bound", elapsed)
+	}
+	if len(roots) != 0 {
+		t.Errorf("roots created: %d, want none", len(roots))
+	}
+	// Nothing was recorded either: the lookup fails before the commit row
+	// the dispatch would annotate.
+	var commits int64
+	if err := s.DB.Model(&store.Commit{}).Count(&commits).Error; err != nil {
+		t.Fatalf("count commits: %v", err)
+	}
+	if commits != 0 {
+		t.Errorf("commits recorded: %d, want none", commits)
+	}
+}
+
+// TestDispatchForRefBoundsRefResolution is the same bound on the yaml-matrix
+// trigger, whose ctx comes from the request and carries no deadline of its
+// own.
+func TestDispatchForRefBoundsRefResolution(t *testing.T) {
+	_, svc := dispatchFixture(t, "cpu")
+	svc.FetchTimeout = 50 * time.Millisecond
+	svc.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	_, res := svc.DispatchForRef(context.Background(), "main")
+	if res.Err == nil || !errors.Is(res.Err, context.DeadlineExceeded) {
+		t.Errorf("dispatch error = %v, want the lookup's deadline", res.Err)
 	}
 }

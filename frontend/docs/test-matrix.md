@@ -13,7 +13,7 @@ source tree as
 ## Full example
 
 ```yaml
-version: 2
+version: 3
 
 # Optional defaults, merged into every matrix entry (maps merge key-wise,
 # scalars are overridden per entry).
@@ -21,6 +21,8 @@ defaults:
   timeout: 3600                 # per-command timeout seconds (hard cap 4h)
   env:
     OMP_NUM_THREADS: "4"
+  variables:                    # templates, expanded on the environment
+    BUILD_ROOT: "$MD_CODE_DIR/build"
   build:
     # A plain shell command — cmake/make/script, whatever the project uses.
     command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
@@ -47,8 +49,10 @@ matrix:
     env:
       CC: gcc
       CXX: g++
+    variables:                    # merged over defaults.variables
+      CMAKE_FLAGS: "-DENABLE_MPI=OFF"
     build:
-      command: "cmake -DENABLE_MPI=OFF . && cmake --build ."
+      command: 'cmake -B "$BUILD_ROOT" $CMAKE_FLAGS . && cmake --build "$BUILD_ROOT"'
       description: "Build the code with gcc and cmake"
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
@@ -73,14 +77,15 @@ matrix:
 
 | Field                        | Required | Description                                                        |
 |------------------------------|----------|--------------------------------------------------------------------|
-| version                      | yes      | Must be 2.                                                          |
-| defaults                     | no       | Entry-level defaults: timeout, env, build, unit, regression.        |
+| version                      | yes      | Must be 3.                                                          |
+| defaults                     | no       | Entry-level defaults: timeout, env, variables, build, unit, regression. |
 | presets                      | no       | Shared regression cases (see below).                               |
 | matrix                       | yes      | One or more entries; each entry needs tags and at least one stage.  |
 | matrix[].tags                | yes      | Tags selecting the environment (see [Test environments](#/docs/environments)). Must be unique per entry. |
 | matrix[].description         | no       | Human-readable label.                                               |
 | matrix[].timeout             | no       | Default stage timeout in seconds (default 3600, capped at 14400).   |
-| matrix[].env                 | no       | Extra environment variables exported for all stages.                |
+| matrix[].env                 | no       | Extra environment variables exported for all stages — literal values. |
+| matrix[].variables           | no       | Extra variables for this entry's stages, merged over defaults.variables — template values (see [Variables](#variables)). |
 | matrix[].build               | no       | Build stage (see below).                                            |
 | matrix[].unit                | no       | Unit test stage: at least command; optional description, workdir, timeout, artifacts. |
 | matrix[].regression          | no       | Regression selection: use and/or disable referencing presets; optional description of the stage as a whole. |
@@ -89,7 +94,7 @@ matrix:
 | unit.workdir                 | no       | Directory the command runs in (see Working directories).            |
 | unit.artifacts               | no       | Artifact file path (or list) the runner fetches back (see Artifact files). |
 | unit.timeout                 | no       | Stage timeout overriding defaults.                                  |
-| regression.description       | no       | Human-readable label of the regression stage as a whole (the parent run); each case carries its preset's own description. |
+| regression.description       | no       | Human-readable label of the regression stage as a whole (the container node); each case carries its preset's own description. |
 
 The build stage is one shell command — or a list of them, like the
 test stages (no built-in cmake support — write the
@@ -134,16 +139,18 @@ presets:
 | Field                | Required | Description                                                   |
 |----------------------|----------|---------------------------------------------------------------|
 | presets.<name>.command | yes    | Shell command, or a list of commands (see Command lists).    |
-| presets.<name>.description | no | Human-readable label of the case, shown under its name on the regression run's detail page and on the case's own page; stored with every triggered run. |
+| presets.<name>.description | no | Human-readable label of the case, shown on the case's own task page (and its runs); stored with every triggered run. |
 | presets.<name>.workdir | no    | Directory the command runs in (see Working directories).     |
 | presets.<name>.timeout | no     | Case timeout (falls back to defaults/matrix timeout).        |
 | presets.<name>.artifacts | no    | Artifact files to collect (see Artifact files).              |
 
-Each referenced preset becomes its **own sub-task** in the task graph
-(“regression: heat”), which runs after the build with its own timeout,
-its own log and its own child test run under the parent regression run.
-The cases run independently — one failing case does not stop the others —
-and the matrix cell aggregates all cases of the entry.
+Each referenced preset becomes its **own task** in the graph
+(“regression: heat”), nested under the stage's virtual container. It runs
+after the build with its own timeout, its own log, its own attempt history
+and its own run — which is what lets it be reported on, downloaded and
+re-run on its own. The cases run independently — one failing case does not
+stop the others — and the matrix cell is the container's rollup over all
+cases of the entry.
 
 A matrix entry selects presets with `regression.use` and
 `regression.disable`:
@@ -165,17 +172,25 @@ A case's verdict is its **command's exit status** — nothing else:
 - An SSH-level failure (host unreachable, session dropped) fails the
   case the same way, with the transport error as the case's note.
 - The preset's `artifacts` files **never flip the verdict** — they are
-  stored as artifacts of the case's own child run (per-case detail parsed
+  stored as artifacts of the case's own run (per-case detail parsed
   in the browser). This differs from the unit stage, where artifact files
   reporting failed cases also fail the run.
+- The case's own run counts as the **one** test the case is: `1/1 passed`
+  when the command exits 0, `0/1 failed` otherwise. That count is the
+  verdict, not a tally parsed out of the artifact files (the browser
+  parses those for the per-case detail).
 - An `MD-BUILDER-SUMMARY:` line only becomes the case's note; it cannot
   turn a non-zero exit into a pass.
 
-The entry's regression run (the matrix cell) aggregates its cases: any
-failed case → the cell shows ✗, every case passed → ✓. Cases run
-independently — one failing case does not stop the others. When the
-clone or build fails, every case is recorded as **skipped** (⤼) with the
-upstream error as its note.
+The matrix cell is the **container's** state, which is the rollup of the
+cases under it: any failed case fails the stage and the cell says which
+ones ("3/4 cases passed; failed: heat"), all of them passed and the stage
+passes, and while they are still being claimed it reads "2/4 cases passed;
+2 queued". Cases run independently — one failing case does not stop the
+others. When the clone or build ends without passing — it failed, or it
+was itself reported `skipped` — every case is marked **skipped** with the
+upstream error as its summary (and one log line of its own); if every case
+was skipped, the stage itself reads `skipped`, not `passed`.
 
 ## Command lists
 
@@ -225,6 +240,11 @@ unit:
   command: "$MD_CODE_DIR/build/unit_tests --gtest_output=xml:$MD_CODE_DIR/build/test_detail.xml"
 ```
 
+These references expand because the command itself runs inside the
+stage script, on the environment, where `MD_*` is exported. A value in
+`env`, by contrast, is a literal that is never expanded — see
+[Variables](#variables) for the expanding alternative.
+
 ### Secret token (MD_SECRET_TOKEN)
 
 Commands frequently need credentials — a private package mirror, an
@@ -252,6 +272,114 @@ form shows whether one is set, never the value. If a command echoes it
 `REDACTED` in the task log before storing it. When no token is
 configured the variable is simply unset.
 
+## Variables
+
+`defaults` and each matrix entry may declare **`variables`**: named
+values that the entry's stage commands use like any shell variable.
+They are the *expanding* counterpart of `env`, and the difference
+matters:
+
+- an **`env`** value is a literal. `BUILD_ROOT: "$MD_CODE_DIR/build"`
+  under `env` exports that text, single-quoted; nothing expands it, so a
+  command reading `$BUILD_ROOT` gets a path with a `$` inside it.
+- a **`variables`** value is a template, expanded by the stage script
+  **on the environment**, when the stage runs.
+
+Three kinds of reference are substituted there:
+
+1. the built-in `MD_*` variables (`$MD_CODE_DIR`, `$MD_COMMIT`, …);
+2. the entry's **other variables** — exported in dependency order, so
+   one may be written in terms of another;
+3. the **host** environment variables **that environment** allows
+   (*Runner Envs* → the row's **Edit** form — `HOME`, `USER`, `LOGNAME`,
+   `PATH`, `SHELL`, `TMPDIR` until its owner changes the list). Each host
+   publishes its own names, so the same yaml can expand on one machine and
+   stay literal on another. A name the entry's own `env` block exports
+   counts too while it is on that list: `env` is exported before the
+   variables.
+
+Everything else stays literal: a typo like `$MD_CODEDIR` reaches the
+command as the text `$MD_CODEDIR`, and the stage logs
+
+```
+warning: variables.<name>: $MD_CODEDIR is not a built-in variable, a variables entry or an allowed environment variable; kept literally
+```
+
+so a path never silently loses its `$`.
+
+```yaml
+defaults:
+  variables:
+    BUILD_ROOT: "$MD_CODE_DIR/build"
+
+matrix:
+  - tags: [cpu]
+    variables:
+      CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF"
+      UNIT_XML: "$BUILD_ROOT/tests/unit.xml"   # BUILD_ROOT expands first
+    build:
+      command: 'cmake -B "$BUILD_ROOT" $CMAKE_FLAGS . && cmake --build "$BUILD_ROOT" -j8'
+    unit:
+      command: "./build/unit_tests --gtest_output=xml:$UNIT_XML"
+```
+
+An entry inherits `defaults.variables` key-wise and wins on conflicts,
+exactly like `env`.
+
+### Values are data, never code
+
+A value is rendered as **one shell word**: expandable references become
+double-quoted `${NAME}`, everything around them is single-quoted. A
+value containing `$(…)`, backticks, quotes or a newline is therefore
+text: `INJECT: "$(touch /tmp/x)"` exports that string, and a command
+echoing `$INJECT` prints it instead of running it. The yaml cannot
+splice shell syntax into a stage script through `variables`.
+
+A literal `$` in a value is written `$$` (`PRICE: "5$$ per run"`); a
+`$` that is not followed by a name (`50$`, `${ }`) is left alone.
+
+### Order of the preamble exports
+
+Every stage script builds its environment in this order:
+
+1. the built-in `MD_*` variables;
+2. the entry's `env` (literals, single-quoted);
+3. the **environment setup script** (sourced — see below);
+4. the entry's `variables` (templates, expanded here);
+5. the `cd` into the working directory.
+
+Because variables are expanded after the environment setup script, a
+variable may build on what that script exports (module loads, host
+paths pushed by `module load`, …) — and a variable of the same name
+wins over the script's export. The `cd` comes last, so `workdir` may
+reference a variable too.
+
+### Allowing host variables
+
+Which host environment variables a repository's yaml may read is the
+**host owner's** decision, not the repository's: the list lives on the
+environment itself — *Runner Envs* → the row's **Edit** form,
+**Expandable host variables** — so two machines of the same site may
+expose different names (see
+[Test environments](#/docs/environments)). A new environment starts on a
+minimal default list (`HOME, USER, PATH, …`). A name that is not on the
+list stays literal, exactly like a typo; an owner may also clear the list
+to allow none at all.
+
+### Validation
+
+Variables are checked when the yaml is read, so a broken entry fails
+the dispatch with the offending name (a `dispatchError` on the commit
+row) instead of shipping a script whose values depend on the export
+order:
+
+- the name must be a shell identifier (`[A-Za-z_][A-Za-z0-9_]*`);
+- it may not start with `MD_` — reserved for the built-in variables,
+  which always expand;
+- it may not also appear in the entry's `env` — the name would have two
+  values with different semantics, so keep it in one of the two;
+- two variables may not reference each other in a cycle.
+
 ## Environment setup script
 
 Each **environment** (configured on the site, not in the yaml) may
@@ -263,8 +391,10 @@ exports, virtualenv activation, …):
 
 - **present**: every stage script runs `. md-builder-env-<hash>.sh`
   first; anything the script exports is visible to the build, unit and
-  regression commands (it runs last in the preamble, so it can even
-  override the built-in and yaml variables).
+  regression commands. It runs after the built-in `MD_*` and yaml `env`
+  exports and before the yaml `variables`, so it can override the
+  former, while a variable of the same name wins over it (see
+  [Order of the preamble exports](#order-of-the-preamble-exports)).
 - **absent**: the stage scripts log a warning and run without it.
 
 See [Test environments](#/docs/environments).
@@ -382,17 +512,28 @@ build runs — the detail page charts them wherever they appear.
 
 ### Downloading artifacts
 
-Every stored artifact of a run (build files, unit/regression results
-files) is downloadable from the run's detail page: each file individually,
-or the whole bundle as one zip (`GET /api/test-runs/{id}/artifacts/zip`).
-A regression run's zip includes every case's files, nested under
-`cases/<case name>/`. File contents live in the platform's database; an
-S3-compatible object store (e.g. Garage) is a planned storage backend —
-the download endpoints stay the same either way.
+Every stored artifact of a run (build files, unit/regression results and
+plot files) is downloadable from the run's detail page: each file
+individually, or the attempt's whole bundle as one zip
+(`GET /api/test-runs/{id}/artifacts/zip`). A zip of a run that produced
+nothing is a `404` rather than an empty archive.
+
+The zip that gathers a **whole test** is the task one:
+`GET /api/tasks/{id}/artifacts/zip` bundles the latest attempts of the
+task and every node under it — the task's own files at the archive root,
+each descendant's under a directory named after it (`regression-heat/…`,
+built from the node key with `:` replaced by `-`). Asking for the
+regression container therefore downloads every case's files in one
+archive, while asking for a single case downloads just that case. Retired
+nodes are excluded: their files belong to an earlier graph shape.
+
+File contents live in the configured S3-compatible object store (see
+[Object storage](#/docs/object-storage)); a read whose object is missing is
+a `404`, a backend failure a `502`.
 
 ## Validation rules
 
-- `version` must be 2; `matrix` must be non-empty.
+- `version` must be 3; `matrix` must be non-empty.
 - Each entry needs non-empty `tags` and at least one of `unit` /
   `regression` (or its presets expansion), with a `command`.
 - Duplicate tag sets across entries are rejected.
@@ -401,6 +542,9 @@ the download endpoints stay the same either way.
   `cmake_flags` / `threads`).
 - Every preset needs a `command`; names in `use` / `disable` must
   reference defined presets.
+- `variables` names must be shell identifiers, must not start with
+  `MD_`, must not repeat an `env` name of the same entry and must not
+  form a reference cycle (see [Variables](#variables)).
 
 Invalid YAML fails dispatch: the push is recorded and
 `dispatchError` surfaces in the webhook response (see
@@ -424,17 +568,19 @@ Each matched entry becomes a task graph (see
    script is written into the task dir.
 2. **build**: a generated script exports MD_COMMIT, MD_ENV_NAME,
    MD_ENV_TAGS, MD_TASK_DIR, MD_CODE_DIR plus the yaml env variables,
-   sources the env setup script (if any) and runs the build stage in
-   its working directory.
-3. If the build (or the clone) fails, the dependent test stages are
-   marked skipped and the dashboard shows ✗.
+   sources the env setup script (if any), exports the expanded yaml
+   variables and runs the build stage in its working directory.
+3. If the build (or the clone) ends without passing — it failed, or it
+   was itself reported `skipped` — the dependent test stages are marked
+   **skipped**, with the reason in their summary and one line in their
+   log, and the dashboard says so.
 4. **unit**: the stage command runs in its working directory under its
    timeout; the full output streams into the task log and the outcome
-   is stored as a test run.
-5. **regression: one sub-task per selected preset** — each case command
+   is stored as the attempt's test run.
+5. **regression: one task per selected preset** — each case command
    runs after the build (exporting MD_CASE), collects its own artifact
-   files and records its own child test run; the matrix cell shows the
-   aggregate across cases.
+   files and records its own run; the matrix cell shows the container's
+   rollup across cases.
 
 ## Custom summaries
 
@@ -447,4 +593,4 @@ MD-BUILDER-SUMMARY: all 8 tests passed, max rel err 3.2e-7
 The text after the prefix becomes the run summary shown on the dashboard.
 Without it, the summary is the exit code plus the last lines of the stage
 log (truncated to 500 characters). For a regression case the summary
-line becomes the child run's note.
+line becomes that case's run summary.

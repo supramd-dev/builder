@@ -41,11 +41,17 @@ func TestParseExampleYAML(t *testing.T) {
 	if e1.Unit.Timeout != 600 {
 		t.Errorf("unit timeout should be 600, got %d", e1.Unit.Timeout)
 	}
-	if e1.Build.Workdir != "" || !strings.Contains(e1.Build.Command.String(), "ENABLE_MPI=OFF") {
+	if e1.Build.Workdir != "" || !strings.Contains(e1.Build.Command.String(), "$CMAKE_FLAGS") {
 		t.Errorf("entry 1 build wrong: %+v", e1.Build)
 	}
 	if e1.Env["CC"] != "gcc" || e1.Env["OMP_NUM_THREADS"] != "4" {
 		t.Errorf("entry 1 env merge wrong: %v", e1.Env)
+	}
+	// Entry 1 adds one variable and inherits the default one; the build
+	// command uses both.
+	if e1.Variables["CMAKE_FLAGS"] != "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF" ||
+		e1.Variables["BUILD_ROOT"] != "$MD_CODE_DIR/build" {
+		t.Errorf("entry 1 variables merge wrong: %v", e1.Variables)
 	}
 
 	// Entry 2: build in a workdir, all three presets.
@@ -59,6 +65,10 @@ func TestParseExampleYAML(t *testing.T) {
 	if e2.Env["OMP_NUM_THREADS"] != "1" {
 		t.Errorf("entry env should override defaults env: %v", e2.Env)
 	}
+	// Entry 2 declares no variables of its own: it inherits the defaults.
+	if len(e2.Variables) != 1 || e2.Variables["BUILD_ROOT"] != "$MD_CODE_DIR/build" {
+		t.Errorf("entry 2 should inherit defaults.variables, got %v", e2.Variables)
+	}
 
 	// Entry 3: script build, all presets minus heat.
 	e3 := entries[2]
@@ -70,5 +80,8 @@ func TestParseExampleYAML(t *testing.T) {
 	}
 	if e3.Regression[0].Timeout != 600 {
 		t.Errorf("eos-table timeout should be its own 600, got %d", e3.Regression[0].Timeout)
+	}
+	if !strings.Contains(e3.Unit.Command.String(), "$BUILD_ROOT/unit_tests") {
+		t.Errorf("entry 3 unit should use the inherited variable: %+v", e3.Unit)
 	}
 }

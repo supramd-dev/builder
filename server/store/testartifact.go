@@ -2,16 +2,14 @@ package store
 
 import (
 	"time"
-
-	"gorm.io/gorm"
 )
 
 // Test artifacts: raw result/log/series files stored alongside a run, parsed
 // on the client side. The runner does not interpret them beyond aggregate
 // counts — the stored bytes are the source of truth for the per-case detail
 // views. A unit run stores its googletest results file as a run-level
-// artifact; a regression case's fetched files ride on the case's own (child)
-// run. The future per-case log/series artifacts attach the same way.
+// artifact; a regression case's fetched files ride on that case's own run.
+// The future per-case log/series artifacts attach the same way.
 
 // Artifact kinds.
 const (
@@ -27,8 +25,10 @@ func ArtifactKindValid(kind string) bool {
 		kind == ArtifactKindSeries || kind == ArtifactKindFile
 }
 
-// TestArtifact is one stored file of one run (top-level or child — a child
-// run's artifacts are fetched by that run's id).
+// TestArtifact is one stored file of one attempt's run. RunID is the exact
+// owner (an artifact belongs to the attempt that produced it); TaskID is
+// denormalized so a task's files can be listed — including a container's,
+// whose artifacts live on the runs of its descendants — without joining runs.
 //
 // The bytes live in object storage; the row holds the reference. ObjectKey is
 // the object's key in the configured bucket and Size its length, so listing
@@ -38,6 +38,7 @@ func ArtifactKindValid(kind string) bool {
 type TestArtifact struct {
 	ID        int64     `gorm:"primaryKey"`
 	RunID     int64     `gorm:"index:idx_test_artifacts_run_kind;not null"`
+	TaskID    int64     `gorm:"index;not null;default:0"`
 	Kind      string    `gorm:"index:idx_test_artifacts_run_kind;not null"`
 	Name      string    `gorm:"not null;default:''"` // source path / label
 	ObjectKey string    `gorm:"not null;default:''"` // object storage key
@@ -48,14 +49,14 @@ type TestArtifact struct {
 
 // ArtifactInput is an artifact as submitted with a run report (the runner's
 // fetched results file, or a future per-case log/series file). It attaches
-// to the run the report carries.
+// to the attempt the report carries.
 type ArtifactInput struct {
 	Kind    string // ArtifactKindResults / ArtifactKindLog / ArtifactKindSeries
 	Name    string
 	Content string
 }
 
-// ListRunArtifacts returns a run's artifacts in submission order.
+// ListRunArtifacts returns one run's artifacts in submission order.
 func (s *Store) ListRunArtifacts(runID int64) ([]TestArtifact, error) {
 	var list []TestArtifact
 	if err := s.DB.Where("run_id = ?", runID).Order("id ASC").Find(&list).Error; err != nil {
@@ -73,45 +74,80 @@ func (s *Store) GetArtifact(id int64) (*TestArtifact, error) {
 	return &a, nil
 }
 
-// ListRunArtifactsDeep returns a run's artifacts plus every child run's
-// (regression cases carry their own). The map keys are the owning run ids;
-// the parent's entry is present even when empty so callers can distinguish
-// "no artifacts anywhere" from "run not found".
-func (s *Store) ListRunArtifactsDeep(runID int64) (map[int64][]TestArtifact, error) {
-	runIDs := []int64{runID}
-	var children []TestRun
-	if err := s.DB.Where("parent_id = ?", runID).Order("id ASC").Find(&children).Error; err != nil {
+// TaskArtifactRef is one artifact together with the task that produced it, so
+// a container's download bundle can name its entries after the tree.
+type TaskArtifactRef struct {
+	TaskID   int64
+	TaskName string
+	TaskKey  string
+	Artifact TestArtifact
+}
+
+// ListSubtreeArtifacts returns the artifacts of the latest attempts of
+// taskID and every task under it, deepest order (children after their parent,
+// siblings by creation). Retired descendants are excluded: their files belong
+// to an earlier graph shape, not to the current bundle.
+func (s *Store) ListSubtreeArtifacts(taskID int64) ([]TaskArtifactRef, error) {
+	tasks, err := s.subtreeTasks(taskID)
+	if err != nil {
 		return nil, err
 	}
-	for _, c := range children {
-		runIDs = append(runIDs, c.ID)
+	ids := make([]int64, len(tasks))
+	byID := make(map[int64]*Task, len(tasks))
+	for i := range tasks {
+		ids[i] = tasks[i].ID
+		byID[tasks[i].ID] = &tasks[i]
 	}
-	var all []TestArtifact
-	if err := s.DB.Where("run_id IN ?", runIDs).Order("id ASC").Find(&all).Error; err != nil {
+	runs, err := s.LatestRunsByTaskIDs(ids)
+	if err != nil {
 		return nil, err
 	}
-	out := make(map[int64][]TestArtifact, len(runIDs))
-	for i := range all {
-		out[all[i].RunID] = append(out[all[i].RunID], all[i])
+	runIDs := make([]int64, 0, len(runs))
+	runTask := make(map[int64]int64, len(runs))
+	for taskID, r := range runs {
+		runIDs = append(runIDs, r.ID)
+		runTask[r.ID] = taskID
+	}
+	if len(runIDs) == 0 {
+		return nil, nil
+	}
+	var artifacts []TestArtifact
+	if err := s.DB.Where("run_id IN ?", runIDs).Order("id ASC").Find(&artifacts).Error; err != nil {
+		return nil, err
+	}
+	out := make([]TaskArtifactRef, 0, len(artifacts))
+	for i := range artifacts {
+		t := byID[runTask[artifacts[i].RunID]]
+		if t == nil {
+			continue
+		}
+		out = append(out, TaskArtifactRef{
+			TaskID: t.ID, TaskName: t.Name, TaskKey: t.NodeKey, Artifact: artifacts[i],
+		})
 	}
 	return out, nil
 }
 
-// replaceRunArtifacts swaps a run's artifacts for the submitted list (the
-// upsert-replace path: old artifacts die with the report they belonged to).
-// The submitted bytes are uploaded first, so the transaction can only fail
-// before the rows exist. Objects the replaced rows referenced are reclaimed
-// by the orphan sweep.
-func (s *Store) replaceRunArtifacts(tx *gorm.DB, runID int64, artifacts []ArtifactInput) error {
-	rows, err := s.putArtifacts(runID, artifacts)
+// subtreeTasks returns taskID and its non-retired descendants, breadth-first
+// (so a parent precedes its children), each group in creation order.
+func (s *Store) subtreeTasks(taskID int64) ([]Task, error) {
+	root, err := s.GetTask(taskID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := tx.Where("run_id = ?", runID).Delete(&TestArtifact{}).Error; err != nil {
-		return err
+	out := []Task{*root}
+	frontier := []int64{root.ID}
+	for len(frontier) > 0 {
+		var kids []Task
+		if err := s.DB.Where("parent_id IN ? AND retired = ?", frontier, false).
+			Order("id ASC").Find(&kids).Error; err != nil {
+			return nil, err
+		}
+		frontier = frontier[:0]
+		for i := range kids {
+			out = append(out, kids[i])
+			frontier = append(frontier, kids[i].ID)
+		}
 	}
-	if len(rows) == 0 {
-		return nil
-	}
-	return tx.Create(&rows).Error
+	return out, nil
 }

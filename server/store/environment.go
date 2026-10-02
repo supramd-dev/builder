@@ -28,8 +28,65 @@ type TestEnvironment struct {
 	// compiler exports, environment-specific paths. Empty = no script (the
 	// runner warns in the task log). Not secret — returned in full by the API.
 	EnvScript string `gorm:"type:text;not null;default:''"`
+
+	// AllowedEnvVars is THIS host's comma-separated whitelist of environment
+	// variable names a md-builder.yaml `variables:` value may expand on it
+	// (see AllowedEnvList). The yaml is repository-side, so which of a
+	// machine's environment variables it may read is the decision of whoever
+	// runs that machine — the setting is per environment, not per site: two
+	// hosts of the same site may expose different things.
+	//
+	// It is a pointer so "never configured" is distinguishable from "the
+	// owner allow-listed nothing": nil (a row written before the column
+	// existed) falls back to DefaultAllowedEnvVars, while a stored empty
+	// string means exactly that — no host variable is expandable. New
+	// environments are created with the default list stored, so the form
+	// shows what it starts from. Like the other settings it is a plain
+	// (non-secret) value: it names variables, never their contents.
+	//
+	// No `not null` and no default here, deliberately: those would erase the
+	// difference this pointer exists to keep, and on a populated table the
+	// default would silently turn "never configured" into "nothing allowed".
+	AllowedEnvVars *string `gorm:"type:text"`
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// DefaultAllowedEnvVars is the minimal safe whitelist an environment starts
+// with: the variables every login shell has, none of them secret. It applies
+// while AllowedEnvVars is unset, and the environment form offers it back
+// after the owner has narrowed the list.
+const DefaultAllowedEnvVars = "HOME, USER, LOGNAME, PATH, SHELL, TMPDIR"
+
+// AllowedEnvList returns the environment's effective whitelist as names: the
+// owner's list, or DefaultAllowedEnvVars while the column is unset.
+func (e *TestEnvironment) AllowedEnvList() []string {
+	raw := DefaultAllowedEnvVars
+	if e.AllowedEnvVars != nil {
+		raw = *e.AllowedEnvVars
+	}
+	return ParseAllowedEnvVars(raw)
+}
+
+// ParseAllowedEnvVars splits a whitelist string into names. Names may be
+// separated by commas, spaces or newlines; blanks are dropped and duplicates
+// collapsed (first occurrence wins), so the caller gets a clean list in the
+// order it was written. It is the one splitter for the setting — the API
+// validates what it returns, the runner expands what AllowedEnvList returns.
+func ParseAllowedEnvVars(raw string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, 8)
+	for _, name := range strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	}) {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
 }
 
 // EnvScriptName derives the on-host file name for the environment script:

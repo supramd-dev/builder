@@ -18,15 +18,106 @@ import (
 	"gorm.io/gorm"
 )
 
-// countKind counts the sub-tasks of one kind (the regression case count).
-func countKind(subs []store.Task, kind string) int {
+// --- stage helpers (shared by both dashboard views) ---
+
+// dashboardStageKinds are the matrix columns of one (commit, environment)
+// cell, in display order. clone has no column of its own (a clone failure
+// shows up as every later stage being skipped).
+var dashboardStageKinds = []string{store.RunKindBuild, store.RunKindUnit, store.RunKindRegression}
+
+// stageTaskKind maps a dashboard column (a run kind) to the kind of the task
+// node that carries it. The regression column is the virtual stage container:
+// its status and counts are the cases' aggregate, while each case is a node of
+// its own with its own attempt and log.
+func stageTaskKind(kind string) string {
+	switch kind {
+	case store.RunKindBuild:
+		return store.TaskKindBuild
+	case store.RunKindUnit:
+		return store.TaskKindUnit
+	case store.RunKindRegression:
+		return store.TaskKindRegressionStage
+	}
+	return ""
+}
+
+// countKind counts the nodes of one kind.
+func countKind(nodes []store.Task, kind string) int {
 	n := 0
-	for i := range subs {
-		if subs[i].Kind == kind {
+	for i := range nodes {
+		if nodes[i].Kind == kind {
 			n++
 		}
 	}
 	return n
+}
+
+// stageNode picks the node of a graph that stands for one stage column. Nil
+// when the graph does not define the stage: a dispatch of an entry without a
+// build command has no build node, one without presets no regression
+// container — the matrix shows "—" for a stage that was never requested
+// rather than inventing a failure.
+func stageNode(kind string, nodes []store.Task) *store.Task {
+	want := stageTaskKind(kind)
+	if want == "" {
+		return nil
+	}
+	for i := range nodes {
+		if nodes[i].Kind == want {
+			return &nodes[i]
+		}
+	}
+	return nil
+}
+
+// stageCell renders one matrix cell from a stage node: the node carries the
+// status, counts and timestamps of the stage's latest attempt (FinishAttempt
+// writes the node and its run from the same values), and the attempt's run
+// gives the cell its run link. The regression container has no run of its own,
+// so its cell links to the task detail instead.
+func stageCell(node *store.Task, run *store.TestRun) *runCellJSON {
+	cell := &runCellJSON{
+		TaskID:  node.ID,
+		Status:  node.Status,
+		Error:   node.Error,
+		Summary: node.Summary,
+		Total:   node.Total,
+		Passed:  node.Passed,
+		Failed:  node.Failed,
+		Skipped: node.Skipped,
+	}
+	if run != nil {
+		cell.RunID = run.ID
+	}
+	if node.StartedAt != nil {
+		cell.StartedAt = node.StartedAt.UTC().Format(time.RFC3339)
+	}
+	if node.FinishedAt != nil {
+		cell.FinishedAt = node.FinishedAt.UTC().Format(time.RFC3339)
+	}
+	return cell
+}
+
+// graphNodeIDs collects the ids of every active node of a set of graphs, so
+// one query can fetch their latest runs.
+func graphNodeIDs(graphs map[store.EnvCommit]store.RootTaskSummary) []int64 {
+	var ids []int64
+	for _, g := range graphs {
+		for i := range g.Subs {
+			ids = append(ids, g.Subs[i].ID)
+		}
+	}
+	return ids
+}
+
+// runOf resolves a task's latest run, or nil when it has none: a virtual node
+// records no run, and a node whose attempt was never opened has none either.
+func runOf(runs map[int64]store.TestRun, taskID int64) *store.TestRun {
+	run, ok := runs[taskID]
+	if !ok {
+		return nil
+	}
+	return &run
 }
 
 // defaultCommits is the number of recent commits (dashboard columns) returned
@@ -70,19 +161,21 @@ type commitJSON struct {
 	DispatchError string `json:"dispatchError,omitempty"`
 }
 
-// runCellJSON is one cell of the matrix: a run's summary, aligned with an
-// environment column. Null when neither a run nor a task graph exists for
-// that (commit, environment). When only a task graph exists (queued/running,
-// or failed before any report), the cell carries the root task's status with
-// runId 0 and taskId set (the frontend links to the task detail).
+// runCellJSON is one cell of the matrix: the state of the stage's task node,
+// aligned with an environment column. Null when the (commit, environment) has
+// no task graph, or when the graph does not define that stage. runId is 0 for
+// a node without a run of its own (the regression container); taskId is always
+// set, so the cell is clickable either way.
 type runCellJSON struct {
 	RunID      int64  `json:"runId"`
 	TaskID     int64  `json:"taskId,omitempty"`
 	Status     string `json:"status"`
 	Error      string `json:"error,omitempty"`
+	Summary    string `json:"summary,omitempty"`
 	Total      int    `json:"total"`
 	Passed     int    `json:"passed"`
 	Failed     int    `json:"failed"`
+	Skipped    int    `json:"skipped"`
 	Trigger    int    `json:"trigger,omitempty"` // the root graph's trigger (0 = webhook)
 	StartedAt  string `json:"startedAt"`
 	FinishedAt string `json:"finishedAt"`
@@ -167,15 +260,18 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 	for i, c := range commits {
 		commitIDs[i] = c.ID
 	}
-	runs, err := s.Store.FindRunsByCommits(kind, envIDs, commitIDs)
+	// The matrix is the task graph, not a run table: every (commit,
+	// environment) that was dispatched has a root task with one node per
+	// stage, and each node's state is the state of the cell.
+	graphs, err := s.Store.FindRootGraphsByCommits(envIDs, commitIDs)
 	if err != nil {
-		log.Printf("dashboard: find runs: %v", err)
+		log.Printf("dashboard: find root graphs: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	jobs, err := s.Store.FindRootTasksByCommits(envIDs, commitIDs)
+	runs, err := s.Store.LatestRunsByTaskIDs(graphNodeIDs(graphs))
 	if err != nil {
-		log.Printf("dashboard: find root tasks: %v", err)
+		log.Printf("dashboard: latest runs: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
@@ -213,19 +309,20 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 			Cells:  make([]*runCellJSON, len(envs)),
 		}
 		for j := range envs {
-			env := &envs[j]
-			key := store.EnvCommit{Env: env.ID, Commit: commit.ID}
-			if run, ok := runs[key]; ok {
-				row.Cells[j] = toRunCellJSON(&run, runStatusForDisplay(&run))
-				continue
+			graph, ok := graphs[store.EnvCommit{Env: envs[j].ID, Commit: commit.ID}]
+			if !ok {
+				continue // never dispatched on this environment: "—"
 			}
-			// No run yet: overlay the live task state when a graph exists.
-			// The cell shows THIS view's stage (kind), not the root: while a
-			// graph is mid-build its unit stage is still queued, even though
-			// the root reports running.
-			if summary, ok := jobs[key]; ok {
-				row.Cells[j] = taskCellJSON(kind, summary.Root, summary.Subs)
+			// The cell shows THIS view's stage, not the root: while a graph is
+			// mid-build its unit stage is still queued, even though the root
+			// already reports running.
+			node := stageNode(kind, graph.Subs)
+			if node == nil {
+				continue // the graph does not define this stage
 			}
+			cell := stageCell(node, runOf(runs, node.ID))
+			cell.Trigger = graph.Root.Trigger
+			row.Cells[j] = cell
 		}
 		out.Rows = append(out.Rows, row)
 	}
@@ -314,19 +411,15 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 	for i, c := range commits {
 		commitIDs[i] = c.ID
 	}
-	runsByKind := map[string]map[store.EnvCommit]store.TestRun{}
-	for _, kind := range []string{store.RunKindBuild, store.RunKindUnit, store.RunKindRegression} {
-		runs, err := s.Store.FindRunsByCommits(kind, envIDs, commitIDs)
-		if err != nil {
-			log.Printf("dashboard full: find %s runs: %v", kind, err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-			return
-		}
-		runsByKind[kind] = runs
-	}
 	graphs, err := s.Store.FindRootGraphsByCommits(envIDs, commitIDs)
 	if err != nil {
 		log.Printf("dashboard full: find root graphs: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	runs, err := s.Store.LatestRunsByTaskIDs(graphNodeIDs(graphs))
+	if err != nil {
+		log.Printf("dashboard full: latest runs: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
@@ -363,74 +456,39 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 		}
 		for j := range envs {
 			envID := envs[j].ID
-			key := store.EnvCommit{Env: envID, Commit: commit.ID}
 
-			// A graph exists (or existed) for this (commit, environment):
-			// expose the graph link and overlay live states for stages whose
-			// run has not landed.
-			graph, hasGraph := graphs[key]
-			if hasGraph {
-				row.TaskIDs[envID] = graph.Root.ID
-				row.Triggers[envID] = graph.Root.Trigger
+			// A graph exists for this (commit, environment): expose the graph
+			// link and the state of each of its stage nodes.
+			graph, hasGraph := graphs[store.EnvCommit{Env: envID, Commit: commit.ID}]
+			if !hasGraph {
+				continue
 			}
+			row.TaskIDs[envID] = graph.Root.ID
+			row.Triggers[envID] = graph.Root.Trigger
 
-			for _, kind := range []string{store.RunKindBuild, store.RunKindUnit, store.RunKindRegression} {
-				if run, ok := runsByKind[kind][key]; ok {
-					row.Stages[envID] = append(row.Stages[envID], fullStageJSON{
-						Kind:       kind,
-						RunID:      run.ID,
-						Status:     runStatusForDisplay(&run),
-						Summary:    run.Summary,
-						StartedAt:  run.StartedAt.UTC().Format(time.RFC3339),
-						FinishedAt: run.FinishedAt.UTC().Format(time.RFC3339),
-					})
-					continue
+			for _, kind := range dashboardStageKinds {
+				node := stageNode(kind, graph.Subs)
+				if node == nil {
+					continue // stage not part of this graph
 				}
-				// No run: show the live sub-task state when the graph is here.
-				if !hasGraph {
-					continue
+				// The regression column is the virtual container: its status
+				// and counts are the cases' aggregate, and it summarizes how
+				// many cases the stage has.
+				cell := stageCell(node, runOf(runs, node.ID))
+				st := fullStageJSON{
+					Kind:       kind,
+					RunID:      cell.RunID,
+					TaskID:     cell.TaskID,
+					Status:     cell.Status,
+					Error:      cell.Error,
+					Summary:    cell.Summary,
+					StartedAt:  cell.StartedAt,
+					FinishedAt: cell.FinishedAt,
 				}
-				taskKind := map[string]string{
-					store.RunKindBuild:      store.TaskKindBuild,
-					store.RunKindUnit:       store.TaskKindUnit,
-					store.RunKindRegression: store.TaskKindRegression,
-				}[kind]
-				for i := range graph.Subs {
-					if graph.Subs[i].Kind != taskKind {
-						continue
-					}
-					sub := &graph.Subs[i]
-					st := fullStageJSON{
-						Kind:   kind,
-						TaskID: sub.ID, // the stage sub-task: its detail page has the log
-						Status: liveSubStatus(sub),
-					}
-					if st.Status == "" {
-						continue // stage not part of this graph (no run, not queued)
-					}
-					if sub.Status == store.TaskFailed {
-						st.Error = sub.Error
-					}
-					// Multiple regression case sub-tasks: keep the most
-					// severe state (first failing, else first active) and
-					// summarize the case count.
-					if existing := row.Stages[envID]; kind == store.RunKindRegression && len(existing) > 0 {
-						prev := &existing[len(existing)-1]
-						if st.Status == store.StatusFailed || prev.Status != store.StatusFailed {
-							if st.Status == store.StatusFailed || prev.Status == "" {
-								prev.TaskID = st.TaskID
-								prev.Status = st.Status
-								prev.Error = st.Error
-							}
-						}
-						prev.Summary = fmt.Sprintf("%d cases", countKind(graph.Subs, taskKind))
-						continue
-					}
-					if kind == store.RunKindRegression {
-						st.Summary = fmt.Sprintf("%d cases", countKind(graph.Subs, taskKind))
-					}
-					row.Stages[envID] = append(row.Stages[envID], st)
+				if kind == store.RunKindRegression {
+					st.Summary = fmt.Sprintf("%d cases", countKind(graph.Subs, store.TaskKindRegressionCase))
 				}
+				row.Stages[envID] = append(row.Stages[envID], st)
 			}
 		}
 		out.Rows = append(out.Rows, row)
@@ -439,98 +497,58 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// runStatusForDisplay translates a stored run status for the dashboards: a
-// failed run whose summary starts with "skipped:" is the runner's
-// recordSkippedRuns artifact — the stage never ran because an upstream task
-// failed — so it surfaces as "skipped" instead of a hard failure.
-func runStatusForDisplay(run *store.TestRun) string {
-	if run.Status == store.StatusFailed && strings.HasPrefix(run.Summary, "skipped:") {
-		return "skipped"
-	}
-	return run.Status
-}
-
-// liveSubStatus renders a not-yet-reported stage's dashboard status from its
-// sub-task: queued/running while pending/running, failed/skipped verbatim
-// (skipped = an upstream stage failed before this one could run; skipped
-// stages that already got their recordSkippedRuns row surface through the
-// run path instead), and "" when the stage finished but no run was reported
-// — the cell then stays empty instead of showing a misleading failure.
-func liveSubStatus(sub *store.Task) string {
-	switch sub.Status {
-	case store.TaskPending:
-		return "pending"
-	case store.TaskRunning:
-		return "running"
-	case store.TaskFailed:
-		return store.StatusFailed
-	case store.TaskSkipped:
-		return "skipped"
-	default:
-		// done: a finished stage without a reported run — neither success
-		// nor failure is known, so the cell shows nothing for this stage.
-		return ""
-	}
-}
-
 // --- POST /api/test-runs (result reporting) ---
 
-// caseInput is one test case in a report — it becomes a child TestRun under
-// the reported run.
-type caseInput struct {
-	Name           string  `json:"name"`
-	Description    string  `json:"description"` // the case's human label (md-builder.yaml preset description)
-	Status         string  `json:"status"`      // "passed", "failed" or "skipped"
-	Message        string  `json:"message"`     // short note / failure reason
-	DurationMillis float64 `json:"durationMillis"`
-	TaskID         int64   `json:"taskId"` // the case's own sub-task, when known
-}
-
-// runInputJSON is the request body of POST /api/test-runs. When cases are
-// present the run status is derived from them; without cases the explicit
-// counts and status/summary are stored directly (the aggregate unit path).
+// runInputJSON is the request body of POST /api/test-runs: the outcome of one
+// task's current attempt. The task identifies the test — the environment,
+// commit and run kind are derived from it, and a task that is not one's own to
+// manage is refused — and its attempt is the one the store has in flight, so a
+// report for an attempt that already ended opens the next one (the retry path)
+// instead of overwriting the record.
+//
+// Status may be left empty to derive it from the counts (failed when any case
+// failed, else passed).
 type runInputJSON struct {
-	EnvironmentID int64       `json:"environmentId"`
-	CommitID      int64       `json:"commitId"`
-	CommitSHA     string      `json:"commitSha"` // alternative to commitId: repo+sha lookup
-	CommitRepo    string      `json:"commitRepo"`
-	Kind          string      `json:"kind"`        // "regression", "unit" or "build"
-	Description   string      `json:"description"` // human label from md-builder.yaml (optional)
-	Status        string      `json:"status"`      // used only when cases is empty
-	Summary       string      `json:"summary"`     // used only when cases is empty
-	Total         int         `json:"total"`       // aggregate counts, used only when cases is empty
-	Passed        int         `json:"passed"`
-	Failed        int         `json:"failed"`
-	Skipped       int         `json:"skipped"`
-	Cases         []caseInput `json:"cases"`
-	StartedAt     string      `json:"startedAt"`  // optional RFC3339
-	FinishedAt    string      `json:"finishedAt"` // optional RFC3339
+	TaskID         int64   `json:"taskId"` // required: the task (test) the attempt belongs to
+	Status         string  `json:"status"` // optional: passed | failed | skipped
+	Summary        string  `json:"summary"`
+	Total          int     `json:"total"`
+	Passed         int     `json:"passed"`
+	Failed         int     `json:"failed"`
+	Skipped        int     `json:"skipped"`
+	DurationMillis float64 `json:"durationMillis"`
+	StartedAt      string  `json:"startedAt"`  // optional RFC3339
+	FinishedAt     string  `json:"finishedAt"` // optional RFC3339
 }
 
-// runJSON is the wire representation of a stored run (summary form).
+// runJSON is the wire representation of a stored run: one attempt of one task.
 type runJSON struct {
-	ID            int64  `json:"id"`
-	Kind          string `json:"kind"`
-	Status        string `json:"status"`
-	Summary       string `json:"summary"`
-	Description   string `json:"description,omitempty"` // human label from md-builder.yaml, stored at dispatch/report time
-	Name          string `json:"name"`                  // child runs: the preset/case name; empty on top-level runs
-	Message       string `json:"message"`
-	Total         int    `json:"total"`
-	Passed        int    `json:"passed"`
-	Failed        int    `json:"failed"`
-	Skipped       int    `json:"skipped"`
-	TaskID        int64  `json:"taskId"` // stage sub-task that produced the run (0 = external report)
-	EnvironmentID int64  `json:"environmentId"`
-	CommitID      int64  `json:"commitId"`
-	StartedAt     string `json:"startedAt"`
-	FinishedAt    string `json:"finishedAt"`
+	ID             int64   `json:"id"`
+	TaskID         int64   `json:"taskId"`
+	Attempt        int     `json:"attempt"`
+	Kind           string  `json:"kind"`
+	Status         string  `json:"status"`
+	Summary        string  `json:"summary"`
+	Total          int     `json:"total"`
+	Passed         int     `json:"passed"`
+	Failed         int     `json:"failed"`
+	Skipped        int     `json:"skipped"`
+	DurationMillis float64 `json:"durationMillis"`
+	EnvironmentID  int64   `json:"environmentId"`
+	CommitID       int64   `json:"commitId"`
+	StartedAt      string  `json:"startedAt"`
+	FinishedAt     string  `json:"finishedAt"`
 }
 
-// handleTestRuns routes POST /api/test-runs — submit (or replace) the result
-// of one test kind for one environment at one commit.
+// handleTestRuns routes POST /api/test-runs — record the outcome of one task's
+// current attempt (the external-tester entry point; the runner reports through
+// store.FinishAttempt directly).
+//
+// The task is what the report is about, and the report must come from someone
+// entitled to that task: the owner (or an administrator) of the environment it
+// runs on. Anything else would let any authenticated account overwrite any
+// test's result.
 func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *store.User) {
-	_ = user
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
@@ -541,26 +559,29 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
-
-	// Resolve the commit: either the internal id or a repo+sha pair.
-	commitID := in.CommitID
-	if commitID == 0 && in.CommitSHA != "" {
-		c := &store.Commit{Repo: in.CommitRepo, SHA: in.CommitSHA}
-		if _, err := s.Store.GetOrCreateCommit(c); err != nil {
-			log.Printf("test-runs: create commit: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
-			return
-		}
-		commitID = c.ID
-	}
-	if commitID == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "commitId or commitSha is required"})
+	if in.TaskID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "taskId is required"})
 		return
 	}
 
-	// Environment existence is validated via a lookup; the dashboard is a
-	// site-wide view, but reports must reference a real environment.
-	if _, err := s.Store.GetEnvironment(in.EnvironmentID); err != nil {
+	task, err := s.Store.GetTask(in.TaskID)
+	if err != nil {
+		if errors.Is(err, store.ErrTaskNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return
+		}
+		log.Printf("test-runs: lookup task: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	if task.Virtual {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "virtual tasks do not record runs; report against their children",
+		})
+		return
+	}
+	env, err := s.Store.GetEnvironment(task.EnvironmentID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "environment not found"})
 			return
@@ -569,60 +590,46 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	if _, err := s.Store.GetCommitByID(commitID); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "commit not found"})
-			return
-		}
-		log.Printf("test-runs: lookup commit: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+	if !canManageEnvironment(user, env) {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "this environment belongs to another account",
+		})
 		return
 	}
 
-	input := &store.RunInput{
-		EnvironmentID: in.EnvironmentID,
-		CommitID:      commitID,
-		Kind:          in.Kind,
-		Description:   in.Description,
-		Status:        in.Status,
-		Summary:       in.Summary,
-		Total:         in.Total,
-		Passed:        in.Passed,
-		Failed:        in.Failed,
-		Skipped:       in.Skipped,
-	}
-	for i := range in.Cases {
-		input.Cases = append(input.Cases, store.CaseInput{
-			Name:           strings.TrimSpace(in.Cases[i].Name),
-			Description:    in.Cases[i].Description,
-			Status:         in.Cases[i].Status,
-			Message:        in.Cases[i].Message,
-			DurationMillis: in.Cases[i].DurationMillis,
-			TaskID:         in.Cases[i].TaskID,
-		})
+	res := store.AttemptResult{
+		Status:         in.Status,
+		Summary:        in.Summary,
+		Total:          in.Total,
+		Passed:         in.Passed,
+		Failed:         in.Failed,
+		Skipped:        in.Skipped,
+		DurationMillis: in.DurationMillis,
 	}
 	if t, err := parseOptionalTime(in.StartedAt); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "startedAt must be RFC3339"})
 		return
 	} else if !t.IsZero() {
-		input.StartedAt = t
+		res.StartedAt = t
 	}
 	if t, err := parseOptionalTime(in.FinishedAt); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "finishedAt must be RFC3339"})
 		return
 	} else if !t.IsZero() {
-		input.FinishedAt = t
+		res.FinishedAt = t
 	}
 
-	run, err := s.Store.UpsertTestRun(input)
+	run, err := s.Store.FinishAttempt(task.ID, res)
 	if err != nil {
 		switch {
-		case errors.Is(err, store.ErrInvalidRunKind):
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be regression, unit or build"})
-		case errors.Is(err, store.ErrInvalidCaseStatus):
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "case status must be passed or failed"})
+		case errors.Is(err, store.ErrInvalidRunStatus):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be passed, failed or skipped"})
+		case errors.Is(err, store.ErrVirtualTask):
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "virtual tasks do not record runs"})
+		case errors.Is(err, store.ErrTaskNotFound):
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
 		default:
-			log.Printf("test-runs: upsert: %v", err)
+			log.Printf("test-runs: finish attempt: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		}
 		return
@@ -631,8 +638,10 @@ func (s *Server) handleTestRuns(w http.ResponseWriter, r *http.Request, user *st
 }
 
 // handleTestRunItem routes GET /api/test-runs/{id} — the detail view of one
-// run, including its case results — and GET /api/test-runs/{id}/artifacts/zip,
-// a download bundle of the run's artifacts (children included).
+// attempt of one task, with the task's other attempts and this attempt's
+// artifacts — and GET /api/test-runs/{id}/artifacts/zip, a download bundle of
+// that attempt's artifacts. A run owns no other task's files: the subtree
+// bundle is the task one, GET /api/tasks/{id}/artifacts/zip.
 func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	rest := strings.TrimPrefix(r.URL.Path, "/api/test-runs/")
@@ -664,19 +673,13 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 
 	run, err := s.Store.GetTestRun(id)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, store.ErrTestRunNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "test run not found"})
 			return
 		}
 		log.Printf("test-run get: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
-	}
-	// Keep the detail view consistent with the dashboard: a failed run whose
-	// summary starts with "skipped:" is the runner's recordSkippedRuns
-	// artifact — the stage never ran, an upstream stage failed.
-	if run.Status == store.StatusFailed && strings.HasPrefix(run.Summary, "skipped:") {
-		run.Status = "skipped"
 	}
 	env, err := s.Store.GetEnvironment(run.EnvironmentID)
 	if err != nil {
@@ -698,9 +701,21 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 	}
-	cases, err := s.Store.ListChildRuns(run.ID)
+	// The task the attempt belongs to: the run page is a view of the test, its
+	// latest attempt, and every attempt before it.
+	task, err := s.Store.GetTask(run.TaskID)
 	if err != nil {
-		log.Printf("test-run cases: %v", err)
+		if errors.Is(err, store.ErrTaskNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+			task = nil // task deleted after the run; detail stays viewable
+		} else {
+			log.Printf("test-run task: %v", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+	}
+	attempts, err := s.Store.ListTaskRuns(run.TaskID)
+	if err != nil {
+		log.Printf("test-run attempts: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
@@ -713,22 +728,18 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 
 	detail := runDetailJSON{
 		runJSON:   toRunJSON(run),
-		Cases:     make([]caseJSON, 0, len(cases)),
+		Attempts:  make([]runJSON, 0, len(attempts)),
 		Artifacts: make([]artifactRefJSON, 0, len(artifacts)),
 	}
-	// A child run links back to its parent regression run (the breadcrumb).
-	if run.ParentID != 0 {
-		detail.ParentRunID = run.ParentID
-		if parent, err := s.Store.GetTestRun(run.ParentID); err == nil && parent.Name != "" {
-			detail.ParentName = &parent.Name
-		}
-	}
-	// Root task of the producing stage sub-task (for the breadcrumb link to
-	// the graph page); 0 when the run came from an external report or the
-	// task row was deleted.
-	if run.TaskID != 0 {
-		if task, err := s.Store.GetTask(run.TaskID); err == nil {
-			detail.RootTaskID = task.RootID
+	if task != nil {
+		name, key, kind := task.Name, task.NodeKey, task.Kind
+		detail.TaskName = &name
+		detail.TaskKey = &key
+		detail.TaskKind = &kind
+		detail.RootTaskID = task.RootID
+		if task.Description != "" {
+			desc := task.Description
+			detail.TaskDescription = &desc
 		}
 	}
 	if env != nil {
@@ -749,8 +760,8 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 		detail.CommitRepo = &repo
 		detail.CommitRepoURL = &repoURL
 	}
-	for i := range cases {
-		detail.Cases = append(detail.Cases, toCaseJSON(&cases[i]))
+	for i := range attempts {
+		detail.Attempts = append(detail.Attempts, toRunJSON(&attempts[i]))
 	}
 	for i := range artifacts {
 		detail.Artifacts = append(detail.Artifacts, artifactRefJSON{
@@ -763,17 +774,6 @@ func (s *Server) handleTestRunItem(w http.ResponseWriter, r *http.Request, user 
 	writeJSON(w, http.StatusOK, detail)
 }
 
-// caseJSON is one case in the run detail: a summary of the case's own
-// (child) TestRun — id doubles as the runId the UI links into the case page.
-type caseJSON struct {
-	ID             int64   `json:"id"`
-	Name           string  `json:"name"`
-	Description    string  `json:"description,omitempty"` // the case's human label (preset description)
-	Status         string  `json:"status"`
-	Message        string  `json:"message"`
-	DurationMillis float64 `json:"durationMillis"`
-}
-
 // artifactRefJSON references one stored artifact in the run detail (the
 // content itself comes from GET /api/test-artifacts/{id}).
 type artifactRefJSON struct {
@@ -783,15 +783,16 @@ type artifactRefJSON struct {
 	Size int    `json:"size"`
 }
 
-// runDetailJSON is GET /api/test-runs/{id}'s response: the run summary plus
-// environment/commit context, the case list and the artifact references.
-// Pointer fields are null when the referenced record was deleted. Child runs
-// carry ParentRunID/ParentName so their detail page can link back up.
+// runDetailJSON is GET /api/test-runs/{id}'s response: one attempt of one task,
+// the task's identity, its other attempts and the attempt's artifacts. Pointer
+// fields are null when the referenced record was deleted.
 type runDetailJSON struct {
 	runJSON
-	RootTaskID      int64             `json:"rootTaskId"` // root of the producing stage task (0 = external report); the graph-page link
-	ParentRunID     int64             `json:"parentRunId"`
-	ParentName      *string           `json:"parentName"` // set only for child runs (the preset name)
+	TaskName        *string           `json:"taskName"`        // the test's name ("unit tests", "regression: smoke-a")
+	TaskDescription *string           `json:"taskDescription"` // human label from md-builder.yaml, when set
+	TaskKey         *string           `json:"taskKey"`         // the node key (stable across dispatches)
+	TaskKind        *string           `json:"taskKind"`
+	RootTaskID      int64             `json:"rootTaskId"` // root of the graph; the graph-page link
 	EnvironmentName *string           `json:"environmentName"`
 	CommitSHA       *string           `json:"commitSha"`
 	CommitShortSHA  *string           `json:"commitShortSha"`
@@ -799,7 +800,7 @@ type runDetailJSON struct {
 	CommitAuthor    *string           `json:"commitAuthor"`
 	CommitRepo      *string           `json:"commitRepo"`    // repository location, e.g. "group/code"
 	CommitRepoURL   *string           `json:"commitRepoUrl"` // web URL of the repository, when derivable
-	Cases           []caseJSON        `json:"cases"`
+	Attempts        []runJSON         `json:"attempts"`      // every attempt of the task, newest first
 	Artifacts       []artifactRefJSON `json:"artifacts"`
 }
 
@@ -932,13 +933,20 @@ func artifactDownloadName(a *store.TestArtifact, id int64) string {
 	return base
 }
 
-// downloadRunArtifactsZip streams one zip of the run's artifacts: the run's
-// own at the archive root, regression child runs' under cases/<case name>/.
-// Runs with no artifacts anywhere get a 404 JSON error (an empty archive
-// would look like success).
+// zipEntry is one file of an artifact bundle: the path inside the archive and
+// the artifact to stream into it.
+type zipEntry struct {
+	name string
+	art  *store.TestArtifact
+}
+
+// downloadRunArtifactsZip streams one zip of a run's own artifacts. A run with
+// no artifacts gets a 404 JSON error (an empty archive would look like
+// success). For a whole test — every stage and case under a task — see
+// downloadTaskArtifactsZip.
 func (s *Server) downloadRunArtifactsZip(w http.ResponseWriter, r *http.Request, runID int64) {
 	if _, err := s.Store.GetTestRun(runID); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, store.ErrTestRunNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "test run not found"})
 			return
 		}
@@ -946,33 +954,70 @@ func (s *Server) downloadRunArtifactsZip(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	byRun, err := s.Store.ListRunArtifactsDeep(runID)
+	artifacts, err := s.Store.ListRunArtifacts(runID)
 	if err != nil {
 		log.Printf("run artifacts zip: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	children, err := s.Store.ListChildRuns(runID)
+	entries := make([]zipEntry, 0, len(artifacts))
+	for i := range artifacts {
+		a := &artifacts[i]
+		entries = append(entries, zipEntry{name: artifactDownloadName(a, a.ID), art: a})
+	}
+	s.writeArtifactsZip(w, r, fmt.Sprintf("run-%d-artifacts.zip", runID), "run artifacts zip", entries)
+}
+
+// downloadTaskArtifactsZip streams one zip of a task subtree's artifacts: the
+// task's own attempt at the archive root, every descendant's under a directory
+// named after it (so a regression stage downloads as one bundle of its cases).
+func (s *Server) downloadTaskArtifactsZip(w http.ResponseWriter, r *http.Request, taskID int64) {
+	task, err := s.Store.GetTask(taskID)
 	if err != nil {
-		log.Printf("run artifacts zip: %v", err)
+		if errors.Is(err, store.ErrTaskNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return
+		}
+		log.Printf("task artifacts zip: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-
-	total := 0
-	for _, list := range byRun {
-		total += len(list)
-	}
-	if total == 0 {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "run has no artifacts"})
+	refs, err := s.Store.ListSubtreeArtifacts(task.ID)
+	if err != nil {
+		log.Printf("task artifacts zip: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	entries := make([]zipEntry, 0, len(refs))
+	for i := range refs {
+		ref := refs[i]
+		name := artifactDownloadName(&ref.Artifact, ref.Artifact.ID)
+		if ref.TaskID != task.ID {
+			name = path.Join(zipDirName(ref.TaskKey, ref.TaskName), name)
+		}
+		entries = append(entries, zipEntry{name: name, art: &ref.Artifact})
+	}
+	s.writeArtifactsZip(w, r, fmt.Sprintf("task-%d-artifacts.zip", task.ID), "task artifacts zip", entries)
+}
 
-	// Archive layout: the run's own files at the root, each child run's under
-	// cases/<case name>/ (the names children carry are the preset names).
-	nameOf := make(map[int64]string, len(children))
-	for i := range children {
-		nameOf[children[i].ID] = children[i].Name
+// zipDirName names a descendant task's directory inside a bundle: its node key
+// when it has one (stable across dispatches), else its display name.
+func zipDirName(key, name string) string {
+	if strings.TrimSpace(key) != "" {
+		return sanitizeZipSegment(strings.ReplaceAll(key, ":", "-"))
+	}
+	return sanitizeZipSegment(name)
+}
+
+// writeArtifactsZip streams the entries as a zip download named filename. An
+// empty bundle is a 404, never an empty archive (which would look like
+// success). A failing read before the archive header is written is still
+// reportable as a status code; one that fails after streaming has begun is
+// dropped and the archive left unfinished, see below.
+func (s *Server) writeArtifactsZip(w http.ResponseWriter, r *http.Request, filename, what string, entries []zipEntry) {
+	if len(entries) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no artifacts"})
+		return
 	}
 
 	// started records whether the archive header has been written. Until it
@@ -986,32 +1031,33 @@ func (s *Server) downloadRunArtifactsZip(w http.ResponseWriter, r *http.Request,
 	dropped := false
 
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("run-%d-artifacts.zip", runID)))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	zw := zip.NewWriter(w)
 	used := map[string]int{}
-	add := func(name string, a *store.TestArtifact) {
+	for i := range entries {
 		if failErr != nil {
-			return
+			break
 		}
+		name, a := entries[i].name, entries[i].art
 		// Read the object before writing the entry header: a header with no
 		// bytes behind it would look like an empty file, not a failure.
-		// One artifact at a time, so a large run is never buffered whole.
+		// One artifact at a time, so a large bundle is never buffered whole.
 		rc, _, err := s.Store.OpenArtifact(r.Context(), a)
 		if err != nil {
 			if !started {
 				failErr, failArt = err, a
-				return
+				break
 			}
 			// The archive is already streaming: the only honest outcome is
 			// to drop the entry and leave the zip truncated (an incomplete
 			// archive is detectable; a zero-byte entry is not).
-			log.Printf("run artifacts zip: artifact %d: %v", a.ID, err)
+			log.Printf("%s: artifact %d: %v", what, a.ID, err)
 			dropped = true
-			return
+			continue
 		}
-		defer rc.Close()
-		// Two artifacts with the same basename (the path prefix was the only
-		// difference) must not overwrite each other: suffix " (2)", " (3)".
+		// Two artifacts with the same path (the same file name in two stage
+		// directories that sanitized alike) must not overwrite each other:
+		// suffix " (2)", " (3)".
 		key := strings.ToLower(name)
 		n := used[key]
 		used[key] = n + 1
@@ -1023,26 +1069,18 @@ func (s *Server) downloadRunArtifactsZip(w http.ResponseWriter, r *http.Request,
 		started = true // zw.Create writes the local header from here on
 		fw, err := zw.Create(name)
 		if err != nil {
-			log.Printf("run artifacts zip: artifact %d: entry: %v", a.ID, err)
-			return
+			log.Printf("%s: artifact %d: entry: %v", what, a.ID, err)
+			rc.Close()
+			continue
 		}
 		if _, err := io.Copy(fw, rc); err != nil {
-			log.Printf("run artifacts zip: artifact %d: stream: %v", a.ID, err)
+			log.Printf("%s: artifact %d: stream: %v", what, a.ID, err)
 		}
-	}
-	for i := range byRun[runID] {
-		add(artifactDownloadName(&byRun[runID][i], byRun[runID][i].ID), &byRun[runID][i])
-	}
-	for i := range children {
-		c := children[i]
-		for j := range byRun[c.ID] {
-			a := &byRun[c.ID][j]
-			add(path.Join("cases", sanitizeZipSegment(c.Name), artifactDownloadName(a, a.ID)), a)
-		}
+		rc.Close()
 	}
 	if failErr != nil {
 		// Nothing was written yet, so the caller still gets a proper status.
-		s.artifactReadError(w, "run artifacts zip", failArt, failErr)
+		s.artifactReadError(w, what, failArt, failErr)
 		return
 	}
 	if dropped {
@@ -1052,17 +1090,17 @@ func (s *Server) downloadRunArtifactsZip(w http.ResponseWriter, r *http.Request,
 		// zip quietly missing a file, the failure a partial backend outage
 		// would otherwise hide behind.
 		if err := zw.Flush(); err != nil {
-			log.Printf("run artifacts zip: flush: %v", err)
+			log.Printf("%s: flush: %v", what, err)
 		}
 		return
 	}
 	if err := zw.Close(); err != nil {
-		log.Printf("run artifacts zip: close: %v", err) // headers already sent; the client sees a truncated zip
+		log.Printf("%s: close: %v", what, err) // headers already sent; the client sees a truncated zip
 	}
 }
 
-// sanitizeZipSegment makes a child-run (case) name safe as one zip path
-// segment: separators and empty/dotted segments collapse to "case".
+// sanitizeZipSegment makes a task name safe as one zip path segment:
+// separators and empty/dotted segments collapse to "task".
 func sanitizeZipSegment(name string) string {
 	s := strings.Map(func(r rune) rune {
 		switch {
@@ -1075,7 +1113,7 @@ func sanitizeZipSegment(name string) string {
 		}
 	}, strings.TrimSpace(name))
 	if s == "" || s == "." || s == ".." || strings.Trim(s, ".- ") == "" {
-		return "case"
+		return "task"
 	}
 	return s
 }
@@ -1163,153 +1201,27 @@ func (s *Server) repoWebURL(repo string) string {
 	return ""
 }
 
-// toRunCellJSON renders a recorded run as a matrix cell. status is the
-// display status (runStatusForDisplay), which may differ from the stored one
-// for the skipped-artifact runs.
-func toRunCellJSON(run *store.TestRun, status string) *runCellJSON {
-	return &runCellJSON{
-		RunID:      run.ID,
-		Status:     status,
-		Total:      run.Total,
-		Passed:     run.Passed,
-		Failed:     run.Failed,
-		StartedAt:  run.StartedAt.UTC().Format(time.RFC3339),
-		FinishedAt: run.FinishedAt.UTC().Format(time.RFC3339),
-	}
-}
-
-// taskCellJSON renders a live task graph as a matrix cell (runId 0,
-// taskId set: clickable through to the stage's task detail). kind selects
-// the stage this dashboard view is about (build/unit/regression): the cell
-// mirrors that sub-task's own state — a running root with a queued unit
-// stage shows "pending" on the unit dashboard, a running build stage shows
-// "running". Regression expands to one sub-task per case; their states are
-// aggregated (failed > running > pending > skipped > done). When the graph
-// has no sub-task of that kind (the graph simply does not include the
-// stage — e.g. a manual dispatch with only a build command), the cell is
-// nil: the stage was never requested, so the matrix shows "—" rather than
-// inventing a failure. When the stage failed before any report, the
-// sub-task errors hint at what broke.
-func taskCellJSON(kind string, root *store.Task, subs []store.Task) *runCellJSON {
-	// The sub-tasks whose kind matches this view (build/unit/regression).
-	stageKind := map[string]string{
-		store.RunKindBuild:      store.TaskKindBuild,
-		store.RunKindUnit:       store.TaskKindUnit,
-		store.RunKindRegression: store.TaskKindRegression,
-	}[kind]
-	cell := &runCellJSON{RunID: 0, TaskID: root.ID, Trigger: root.Trigger}
-	var matched []store.Task
-	for i := range subs {
-		if subs[i].Kind == stageKind {
-			matched = append(matched, subs[i])
-		}
-	}
-	if len(matched) == 0 {
-		return nil // the graph has no such stage: nothing to show
-	}
-
-	// Aggregate the matched sub-tasks: any failure fails, any activity runs,
-	// all-queued stays pending, all-skipped surfaces as skipped.
-	rank := func(status string) int {
-		switch status {
-		case store.TaskFailed:
-			return 4
-		case store.TaskRunning:
-			return 3
-		case store.TaskPending:
-			return 2
-		case store.TaskSkipped:
-			return 1
-		default:
-			return 0 // done
-		}
-	}
-	best := 0
-	for i := range matched {
-		if r := rank(matched[i].Status); r > best {
-			best = r
-		}
-	}
-	if best == 0 {
-		best = 1 // every stage finished but no run landed yet
-	}
-	// The cell links to the first sub-task of this stage whose own state
-	// decides the aggregate (a failing case, the running one, ...), so the
-	// click lands on the most relevant log.
-	pick := &matched[0]
-	for i := range matched {
-		if rank(matched[i].Status) == best {
-			pick = &matched[i]
-			break
-		}
-	}
-	cell.TaskID = pick.ID
-	status := pick.Status
-	switch best {
-	case 4:
-		cell.Status = store.StatusFailed
-		cell.Error = pick.Error
-		if cell.Error == "" {
-			// Prefer the first failed sub-task's error (clone/build failures
-			// are more actionable than the root's derived status).
-			for i := range subs {
-				if subs[i].Status == store.TaskFailed || subs[i].Status == store.TaskSkipped {
-					if subs[i].Error != "" {
-						cell.Error = subs[i].Error
-					}
-					break
-				}
-			}
-		}
-	case 3:
-		cell.Status = "running"
-	case 2:
-		cell.Status = "pending"
-	default:
-		if status == store.TaskSkipped {
-			cell.Status = "skipped"
-		} else {
-			cell.Status = "pending" // finished, run not landed yet
-		}
-		cell.Error = pick.Error
-	}
-	if root.StartedAt != nil {
-		cell.StartedAt = root.StartedAt.UTC().Format(time.RFC3339)
-	}
-	if root.FinishedAt != nil {
-		cell.FinishedAt = root.FinishedAt.UTC().Format(time.RFC3339)
-	}
-	return cell
-}
-
 func toRunJSON(run *store.TestRun) runJSON {
-	return runJSON{
-		ID:            run.ID,
-		Kind:          run.Kind,
-		Status:        run.Status,
-		Summary:       run.Summary,
-		Description:   run.Description,
-		Name:          run.Name,
-		Message:       run.Message,
-		Total:         run.Total,
-		Passed:        run.Passed,
-		Failed:        run.Failed,
-		Skipped:       run.Skipped,
-		TaskID:        run.TaskID,
-		EnvironmentID: run.EnvironmentID,
-		CommitID:      run.CommitID,
-		StartedAt:     run.StartedAt.UTC().Format(time.RFC3339),
-		FinishedAt:    run.FinishedAt.UTC().Format(time.RFC3339),
+	out := runJSON{
+		ID:             run.ID,
+		TaskID:         run.TaskID,
+		Attempt:        run.Attempt,
+		Kind:           run.Kind,
+		Status:         run.Status,
+		Summary:        run.Summary,
+		Total:          run.Total,
+		Passed:         run.Passed,
+		Failed:         run.Failed,
+		Skipped:        run.Skipped,
+		DurationMillis: run.DurationMillis,
+		EnvironmentID:  run.EnvironmentID,
+		CommitID:       run.CommitID,
 	}
-}
-
-func toCaseJSON(c *store.TestRun) caseJSON {
-	return caseJSON{
-		ID:             c.ID,
-		Name:           c.Name,
-		Description:    c.Description,
-		Status:         c.Status,
-		Message:        c.Message,
-		DurationMillis: c.DurationMillis,
+	if !run.StartedAt.IsZero() {
+		out.StartedAt = run.StartedAt.UTC().Format(time.RFC3339)
 	}
+	if !run.FinishedAt.IsZero() {
+		out.FinishedAt = run.FinishedAt.UTC().Format(time.RFC3339)
+	}
+	return out
 }

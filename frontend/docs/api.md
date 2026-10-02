@@ -16,16 +16,33 @@ greyed out). Four views are available via the tabs at the top:
   for the build log).
 - **Unit tests** / **Regression tests** — the per-case matrices.
 
-Cells with a recorded run show pass/fail counts; clicking one opens the
-run detail with the per-case results (name, status, error value, short
-note) and the one-paragraph summary reported by the worker. Cells
-without a run but with a live task graph show **queued** / **running…**
-(or ✗ when the task failed before reporting); a stage that is not part
-of the graph at all shows "—" (it was never requested). Every commit row
-also carries a **graph** link: the dependency graph of that commit's
-task pipeline (clone → build → unit/regression), GitHub-Actions style —
-clicking a stage node jumps to its run detail or the live task log (see
-[Runner and tasks](#/docs/runner-strategy)).
+Every cell is one **stage node of that (commit, environment)'s task
+graph** — not a row of a results table. Its status, pass/fail counts and
+timestamps are those of the node's latest attempt, and clicking it opens
+that attempt's run detail: the per-case results (name, status, error
+value, short note), the one-paragraph summary the runner wrote, the log
+and the artifacts. The vocabulary is the task vocabulary throughout —
+`pending`, `running`, `passed`, `failed`, `skipped` — so a stage whose
+upstream failed (or was itself reported `skipped`) reads `skipped` (the
+reason is in its summary, and its log holds the single line
+`skipped: <reason>`), and a stage the workers
+have not claimed yet reads `pending` (shown as queued). A cell is
+**null** when the commit has no graph on that environment, or when the
+graph does not define that stage at all; the UI renders both as "—",
+because from the matrix's point of view a stage that was never requested
+and a commit that was never dispatched look the same.
+
+The **regression column is the graph's virtual container**: it runs
+nothing, so it has no attempt and no run of its own — its cell carries
+`runId` 0, its counts are the cases' aggregate, and clicking it opens the
+task page, where every case is a node of its own with its own status,
+log, attempt and artifacts. That is what makes a case's history survive a
+re-dispatch instead of being rewritten by whichever case reported last.
+
+Every commit row also carries a **graph** link: the dependency graph of
+that commit's task pipeline (clone → build → unit/regression),
+GitHub-Actions style — clicking a stage node jumps to its run detail or
+the live task log (see [Runner and tasks](#/docs/runner-strategy)).
 
 When a commit has **no graph at all** because the dispatch failed — an
 unreadable `md-builder.yaml`, an invalid one, no entry matching an
@@ -50,10 +67,13 @@ The full matrix response shape:
     {
       "commit": {"sha": "abc123", "...": "..."},
       "taskIds": {"1": 42},
+      "triggers": {"1": 1},
       "stages": {
         "1": [
-          {"kind": "build", "runId": 7, "status": "passed"},
-          {"kind": "unit", "taskId": 42, "status": "running"}
+          {"kind": "build", "runId": 7, "taskId": 43, "status": "passed"},
+          {"kind": "unit", "taskId": 44, "status": "running"},
+          {"kind": "regression", "taskId": 45, "status": "pending",
+           "summary": "0/4 cases passed; 4 queued"}
         ]
       }
     }
@@ -61,86 +81,184 @@ The full matrix response shape:
 }
 ```
 
-Each stage either carries the recorded `runId` (opens the run detail) or
-the live `taskId` of the task graph while the run has not landed
-(`status` one of `pending`/`running`/`failed`/`done`). `taskIds` maps the
-environment to the root task id for the graph link; `commit.dispatchError`
-carries the recorded reason when the dispatch produced no graph at all.
+Each stage always carries the `taskId` of the node it shows — that is
+what makes the cell clickable — and the `runId` of that node's latest
+attempt when it has one; the virtual regression container has none, so
+its `runId` is 0 and its `summary` counts the cases. `taskIds` maps the
+environment to the root task id for the graph link, `triggers` to that
+root's trigger (0 = webhook, 1 = manual, 2 = manual yaml), and
+`commit.dispatchError` carries the recorded reason when the dispatch
+produced no graph at all.
 
 ## Reporting results
 
-Results are reported with `POST /api/test-runs`:
+Results are reported with `POST /api/test-runs`, against the **task whose
+attempt the report closes**:
 
 ```json
 {
-  "environmentId": 1,
-  "commitId": 7,
-  "kind": "regression",
-  "summary": "max relative error 3e-7 within tolerance",
+  "taskId": 44,
+  "status": "failed",
+  "summary": "max relative error above tolerance on 2 of 12 cases",
+  "total": 12, "passed": 9, "failed": 2, "skipped": 1,
+  "durationMillis": 4200,
+  "startedAt": "2026-09-08T03:00:00Z",
+  "finishedAt": "2026-09-08T03:04:00Z"
+}
+```
+
+- `taskId` is the only required field. Environment, commit and run kind
+  are read from the task, so a report cannot land anywhere else — and,
+  because the task is what the caller has to be entitled to, the
+  endpoint can tell a legitimate report from somebody else's.
+- Everything else is optional. An empty `status` is derived from the
+  counts (`failed` when anything failed; `skipped` when the total is
+  non-zero and every one of them was skipped; `passed` otherwise) and an
+  empty `startedAt` is derived from `finishedAt` and `durationMillis`.
+  A `status` outside `passed` / `failed` / `skipped` is a `400`.
+- The report must come from somebody entitled to that test: the **owner
+  of the environment the task runs on, or an administrator**. Any other
+  account gets `403`, because otherwise any signed-in user could
+  overwrite any test's result by guessing a task id. An unknown task is
+  `404`, and a **virtual task** is `400` — the root and the regression
+  container record no runs, so a report has to name the child that
+  actually ran ("virtual tasks do not record runs; report against their
+  children"). There is no "external report" row any more: every run
+  belongs to a task.
+- The report closes the attempt the store has **in flight**. A second
+  report after that attempt ended does not overwrite it — it opens the
+  **next attempt** of the same task, which is the retry path: a re-run
+  keeps both records and both stay readable. The response is `201` with
+  the new run, whose `attempt` is the attempt that was opened.
+- There is no per-case list and no artifact field in the body. A
+  regression case is a task of its own, so a case's outcome is that
+  node's report; its files are fetched back by the runner, which is the
+  process that has the connection to the machine.
+- The runner does not go through HTTP at all: it runs in the server
+  process and closes its attempts through the store (`FinishAttempt`),
+  with the same result values. This endpoint is the entry point for
+  testers outside the server (see
+  [Runner and tasks](#/docs/runner-strategy)).
+- Deleting an environment deletes its tasks, runs and artifacts.
+
+## Runs, tasks, logs and artifacts
+
+`GET /api/test-runs/{id}` is the detail view of **one attempt of one
+task**: the run itself — `id`, `taskId`, `attempt`, `kind` (the stage
+kind, `build` / `unit` / `regression`; a case's run carries the stage's
+kind, which is what puts every case in the one regression column),
+`status`, `summary`, the
+counts, `durationMillis`, `environmentId`, `commitId`, `startedAt`,
+`finishedAt` — plus the identity of the task it belongs to (`taskName`,
+`taskDescription`, `taskKey`, `taskKind`, `rootTaskId` — the link back to
+the pipeline page), its commit and environment context, every other
+attempt of the same task in `attempts` (newest first, same shape as the
+run) and the attempt's `artifacts`:
+
+```json
+{
+  "id": 12, "taskId": 44, "attempt": 2, "kind": "unit",
+  "status": "failed", "summary": "9/12 passed; failed: models",
+  "total": 12, "passed": 9, "failed": 2, "skipped": 1,
+  "durationMillis": 4200, "environmentId": 1, "commitId": 7,
   "startedAt": "2026-09-08T03:00:00Z",
   "finishedAt": "2026-09-08T03:04:00Z",
-  "cases": [
-    {"name": "water-tip4p-npt", "status": "failed",
-     "message": "drift above threshold", "durationMillis": 4200}
-  ]
-}
-```
-
-- `commitId` may be replaced by `"commitSha"` + `"commitRepo"`.
-- `startedAt` / `finishedAt` are optional (RFC 3339).
-- Each regression case becomes a **child test run** of the reported run:
-  the case list in the run detail is a list of run summaries, and a case
-  row's `id` doubles as the child run id its detail page opens. Case
-  statuses are `passed` / `failed` / `skipped` (skipped marks a case whose
-  sub-task never ran because an upstream stage failed).
-- When `cases` are present the run status and counts are derived from
-  them. With no cases, an explicit `"status"` (`passed` | `failed`), a
-  `"summary"` and optional aggregate counts (`"total"` / `"passed"` /
-  `"failed"` / `"skipped"`) are stored directly — the simplified report
-  path (build runs and unit runs, whose per-case detail lives in the
-  results-file artifact, not in the database).
-- Reporting again for the same (environment, commit, kind) replaces the
-  stored result — the API is idempotent, so a flaky reporter can retry
-  safely.
-- Deleting an environment also deletes its test runs.
-
-`GET /api/test-runs/{id}` returns the run with `taskId` (the stage
-sub-task whose log holds the stage's stdout; 0 for external reports),
-`rootTaskId` (the graph's root task — the link back to the pipeline
-page; 0 for external reports), `name`/`message` (child runs only: the
-preset name and its note), `parentRunId`/`parentName` (child runs only —
-the parent regression run for the breadcrumb link back up), `cases` (a
-child-run summary list: `id` = child run id, plus `name`, `status`,
-`message`, `durationMillis`) and `artifacts` — references to stored
-files, e.g. the googletest results files the runner fetched back (a run
-can produce several):
-
-```json
-{
-  "id": 12, "kind": "unit", "status": "failed", "taskId": 77,
-  "rootTaskId": 70,
-  "name": "", "message": "", "parentRunId": 0, "parentName": null,
-  "total": 12, "passed": 9, "failed": 2, "skipped": 1,
+  "taskName": "unit tests", "taskDescription": null,
+  "taskKey": "unit", "taskKind": "unit", "rootTaskId": 42,
+  "environmentName": "cpu-node-1", "commitSha": "abc123…",
+  "commitShortSha": "abc123", "commitMessage": "fix …",
+  "commitAuthor": "…", "commitRepo": "group/code",
+  "commitRepoUrl": "https://gitlab.example.com/group/code",
+  "attempts": [
+    {"id": 12, "attempt": 2, "status": "failed", "...": "..."},
+    {"id": 9,  "attempt": 1, "status": "passed", "...": "..."}
+  ],
   "artifacts": [
     {"id": 3, "kind": "results",
-     "name": "build/test_detail.xml", "size": 15832},
-    {"id": 4, "kind": "results",
-     "name": "build/extra.json", "size": 2101}
+     "name": "build/test_detail.xml", "size": 15832}
   ]
 }
 ```
 
-Artifacts belong to the run they were produced by: a unit run's results
-files attach to the unit run; a regression case's artifacts attach to the
-case's own child run (the parent aggregates counts only).
+The task-identity and commit/environment fields are `null` when the row
+they name was deleted — a run outlives the environment it ran on, so an
+old run page stays readable. Reading is like the matrix itself, which is
+site-wide: any signed-in user may open any task, run, log or artifact.
+Only the writes are restricted — reporting to a task (the environment's
+owner or an administrator) and dispatching onto an environment. Reading
+is where the ownership model does not apply, so the pages stay useful
+for a colleague asking why a case failed. Artifacts belong to the attempt that
+produced them: a unit run's results files attach to the unit run, a
+regression case's files to that case's own run — the regression
+container, which produces nothing, only aggregates its children's
+counts.
 
-`GET /api/test-artifacts/{id}` returns one artifact's raw `content` —
-the browser-side results parsing and the upcoming regression "analyze"
-view fetch through it. `GET /api/test-artifacts/{id}/download` streams
-the same bytes as a file download (Content-Disposition attachment), and
-`GET /api/test-runs/{id}/artifacts/zip` bundles the run's artifacts —
-its own plus every child run's (regression cases under `cases/<name>/`)
-— as one zip.
+`GET /api/tasks/{id}` is the test-side view of a node. It carries the
+task's identity (`id`, `rootId`, `parentId`, `kind`, `nodeKey`, `name`,
+`description`, `virtual`, `retired`), its state (`status`, `summary`,
+`error`, counts, `attempts`, `startedAt`, `finishedAt`), where it ran
+(`commitId`, `environmentId`, `tags`, `trigger`, plus the resolved
+`commit` and `environment`) and, for a **real** task, every attempt in
+`runs` (newest first). `GET /api/tasks/{id}/runs` returns that list on
+its own as `{"runs": […]}` — it is what the log viewer's attempt
+switcher reads — and answers `{"runs": []}` for a virtual task.
+
+A **root** answers with the graph instead of attempts:
+
+- `subTasks` — the nodes of the current graph: `id`, `parentId` (the
+  nesting: the tree the UI draws), `kind`, `nodeKey` (the stable identity
+  a re-dispatch matches on), `name`, `description`, `virtual`, `status`,
+  `summary`, `error`, `dependsOn` (the scheduling DAG, always a list,
+  never null), the counts, `attempts`, `runId` (the latest attempt's run,
+  the detail link; absent for a container) and timestamps.
+- `retiredTasks` — the nodes an earlier dispatch defined and a later one
+  dropped. They are kept, never rescheduled and excluded from the rollup:
+  when a case disappears from `md-builder.yaml` its history does not
+  vanish from the page, and re-adding the case does not resurrect the old
+  node.
+
+Logs are stored per attempt as ordered chunks and read incrementally:
+`GET /api/tasks/{id}/log?after=<seq>` answers
+`{"attempt": 2, "chunks": [{"seq": 4, "content": "…"}], "lastSeq": 9}` —
+the chunks written after `after`, which is what a viewer following a
+running task asks for. Both log endpoints take `?attempt=<n>`, defaulting
+to the current attempt, so an earlier try stays readable after a retry. A
+negative `after` or a non-positive `attempt` is a `400`, not a silent
+default. One read returns at most 1000 chunks: a reader continues from
+`lastSeq` until a page comes back short, which is how the log viewer
+shows a long attempt and how the download walks it.
+`GET /api/tasks/{id}/log/download` streams the whole attempt as
+one `text/plain` file attachment — `task-<id>.log`, with an
+`-attempt-<n>` suffix for anything but the current attempt — built from
+the stored chunks batch by batch, so a long build's output never has to
+fit in memory.
+
+`GET /api/test-artifacts/{id}` returns one artifact's raw `content`
+alongside its `id`, `runId`, `kind` and `name` — the browser-side results
+parsing and the regression "analyze" view fetch through it.
+`GET /api/test-artifacts/{id}/download` streams the same bytes as a file
+download (Content-Disposition attachment, named from the source path's
+basename). The bytes live in object storage: a read whose object is gone
+is a `404`, and one where the backend itself failed is a `502` — the row
+is still there and the request was fine (see
+[Object storage](#/docs/object-storage)).
+
+Two zips bundle artifacts, and neither is ever an empty archive:
+
+- `GET /api/test-runs/{id}/artifacts/zip` — that **attempt's own** files,
+  flat, as `run-<id>-artifacts.zip`.
+- `GET /api/tasks/{id}/artifacts/zip` — the **whole subtree's** latest
+  attempts, the named task's files at the archive root and every
+  descendant's under a directory named after it, as
+  `task-<id>-artifacts.zip`. A regression stage therefore downloads as
+  one bundle of its cases, each under a directory built from its node key
+  with `:` replaced by `-` (`regression-heat/file.json`), so the layout
+  survives a re-dispatch. Two files that would land on the same path get
+  a ` (2)` suffix rather than overwriting each other, and retired nodes
+  are left out: their files belong to an earlier graph shape.
+- A request whose bundle has no files at all is a `404`
+  (`{"error":"no artifacts"}`) — an empty zip would look like a
+  successful download.
 
 ## Script execution (interactive)
 
@@ -197,15 +315,26 @@ or a list of paths — a run can produce several artifact files.
   the response is
   `{"roots": [{"taskId": 42, "environmentId": 1}, …]}` — one root task
   per environment, ordered like the request.
+- The environments are dispatched one after another, so a failure part
+  way down the list (a disabled environment, a graph that cannot be
+  built) is a `422` whose body still carries the `roots` created before
+  it: those tasks are queued and running, and the Run page lists them
+  next to the error instead of reporting that nothing happened.
 - Graphs are marked `trigger: 1` (manual); every dispatch records a
   fresh commit row, so re-running the same ref adds a new matrix row and
   supersedes the older ones.
 - `environmentIds` names the environments explicitly — there is no tag
-  matching here — and any **enabled** environment id is accepted: the
-  pool is site-wide and the endpoint does not check that the caller owns
-  the row. The Run page's picker is stricter and only offers the
-  environments the account may use (its own, or every one for an
-  administrator).
+  matching here — and every id must be one the caller **may manage**:
+  the environment's owner, or an administrator. A stage command runs over
+  SSH with the environment owner's private key, so letting anybody target
+  anybody's machine would be a way around the rule
+  `/api/environments/{id}/exec` and `/script` already apply. A foreign
+  id is `403` (naming the environment), an unknown one `422`. The Run
+  page's picker offers exactly this set, so the check is the endpoint
+  catching up with the UI rather than a new constraint on it.
+- The **webhook** path is deliberately not narrowed: a push matches yaml
+  entries against every enabled environment on the site, whoever
+  registered it (see [Runner and tasks](#/docs/runner-strategy)).
 
 ### YAML matrix dispatch
 
@@ -315,17 +444,20 @@ administrators are created there too, with `adduser -admin`.
 | POST   | `/api/site-config/webhook-token`| Rotate the webhook secret and return the configuration (administrators only) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
-| POST   | `/api/test-runs`                | Report a test run result                      |
-| GET    | `/api/test-runs/{id}`           | One run's detail: cases, counts, artifacts    |
+| POST   | `/api/test-runs`                | Close a task's current attempt: report a result against `taskId` (owner or administrator of the task's environment) |
+| GET    | `/api/test-runs/{id}`           | One attempt of one task: counts, the task's identity, every attempt, artifacts |
+| GET    | `/api/test-runs/{id}/artifacts/zip` | That attempt's own artifacts as a zip (`404` when there are none) |
 | GET    | `/api/test-artifacts/{id}`      | One stored artifact's raw content             |
 | GET    | `/api/test-artifacts/{id}/download` | One artifact as a file download          |
-| GET    | `/api/test-runs/{id}/artifacts/zip` | One run's artifacts (children included) as a zip |
 | POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit (webhook-style, reads the YAML) |
 | POST   | `/api/jobs/manual`              | Dispatch a user-configured test (repo, ref, stage commands, environments; no YAML) |
 | POST   | `/api/jobs/manual-yaml`         | Dispatch the md-builder.yaml matrix at a ref (webhook flow on demand) |
 | GET    | `/api/jobs`                     | Recent task graphs (`?limit=`, monitoring; legacy job shape) |
-| GET    | `/api/tasks/{id}`               | One task; a root carries its sub-task list and commit/environment context |
-| GET    | `/api/tasks/{id}/log?after=<seq>` | The task's log chunks after the given sequence (incremental, live-following) |
+| GET    | `/api/tasks/{id}`               | One task; a root carries its node list (current plus retired) and commit/environment context |
+| GET    | `/api/tasks/{id}/runs`          | The task's attempts, newest first (one run per attempt) |
+| GET    | `/api/tasks/{id}/log?after=<seq>&attempt=<n>` | The task's log chunks after the given sequence (incremental, live-following) |
+| GET    | `/api/tasks/{id}/log/download?attempt=<n>` | The attempt's full log as a `text/plain` file attachment (`Content-Disposition`) |
+| GET    | `/api/tasks/{id}/artifacts/zip` | The subtree's latest artifacts as one zip, descendants under a directory named after them (`404` when there are none) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session: authenticated by the `X-Gitlab-Token` header, see [Webhooks](#/docs/webhooks)) |
 
 The environment list is **not** owner-scoped: dispatch matches a yaml entry
@@ -337,12 +469,29 @@ own is `403`; an id that does not exist is `404`. See
 [Test environments](#/docs/environments).
 
 Environment create/update bodies carry `name`, `host`, `username`,
-`privateKey`, `tags`, `description`, `enabled` and `envScript` (the
-environment setup script sourced before every stage — see
+`privateKey`, `tags`, `description`, `enabled`, `envScript` (the
+environment setup script sourced before every stage) and `allowedEnvVars`
+(the host environment variable whitelist a md-builder.yaml `variables:`
+value may expand **on this machine** — see
 [Test environments](#/docs/environments)). Unlike the private key (empty
 on update = keep), an omitted/empty `envScript` clears the script.
 Both fields round-trip: the private key is never echoed back, the env
 script is (it is not a secret).
+
+`allowedEnvVars` is the one field here that is neither a secret nor a
+boolean: it is sent as one block of text (names separated by commas, spaces
+or newlines) and an empty string is a decision — allow nothing, which is why
+it is a plain string rather than a pointer-shaped "absent". Absent = keep
+the stored list, so saving the form without touching that box never rewrites
+it; on create, where there is nothing to keep, absent means the built-in
+default list (`allowedEnvVarsDefault` in the response reports it, and a new
+environment is created with it stored, not unset). The list is **per
+environment**, not per site: two hosts of the same site may expose different
+names. It holds names and no values, so it is reported to everybody, with
+the row's own permissions deciding who may change it — its owner or an
+administrator. Names are validated on save: one that is not a shell
+identifier, or one starting with `MD_`, is refused with a `400` naming the
+offender.
 
 The site-configuration tokens differ in what they reveal. `accessToken` and
 `secretToken` are write-only: the API reports `accessTokenSet` /

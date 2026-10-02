@@ -23,20 +23,39 @@ export default function EnvironmentForm({ existing, onSaved, onCancel }: Props) 
     privateKey: '',
     enabled: existing?.enabled ?? true,
   })
+  // The whitelist is edited as one block of text (commas, spaces or newlines
+  // separate names) because that is the shape the server stores it in. It is
+  // kept outside `form` because it is optional there: an untouched empty box
+  // on a new environment means "start me on the built-in default list", which
+  // the server applies when the field is absent.
+  const [allowedEnvVars, setAllowedEnvVars] = useState(
+    existing?.allowedEnvVars.join(', ') ?? '',
+  )
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
   const isEdit = !!existing
+  // The built-in list the server would fall back to, known here only from a
+  // row on this page — it is offered as a hint, never sent as a value.
+  const defaults = existing?.allowedEnvVarsDefault ?? []
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
     setSaving(true)
     try {
+      const payload: EnvironmentInput = { ...form }
       if (isEdit && existing) {
-        await updateEnvironment(existing.id, form)
+        // The box holds this environment's effective list, so sending it
+        // pins that list as the environment's own — including the built-in
+        // default, when that is what it was showing.
+        payload.allowedEnvVars = allowedEnvVars
+        await updateEnvironment(existing.id, payload)
+      } else if (allowedEnvVars.trim() === '') {
+        await createEnvironment(payload)
       } else {
-        await createEnvironment(form)
+        payload.allowedEnvVars = allowedEnvVars
+        await createEnvironment(payload)
       }
       onSaved()
     } catch (err) {
@@ -149,6 +168,28 @@ export default function EnvironmentForm({ existing, onSaved, onCancel }: Props) 
           Sourced before every build / unit / regression command on this
           environment. Leave empty to skip (a warning is logged). The script
           is written to the task dir on the remote host.
+        </span>
+      </div>
+
+      <div className="form-group">
+        <label htmlFor="env-allowed-vars">Expandable host variables</label>
+        <textarea
+          id="env-allowed-vars"
+          className="form-control"
+          rows={2}
+          value={allowedEnvVars}
+          onChange={(e) => setAllowedEnvVars(e.target.value)}
+          placeholder={defaults.length > 0 ? defaults.join(', ') : 'HOME, USER, PATH'}
+          style={{ fontFamily: 'monospace', fontSize: '0.875rem' }}
+        />
+        <span className="text-muted">
+          The host environment variables a <code>variables:</code> value in
+          md-builder.yaml may expand on this machine — names only, separated by
+          commas, spaces or newlines. Anything else is kept as written and
+          reported in the task log.{' '}
+          {isEdit
+            ? 'Saving pins this list to this environment.'
+            : 'Leave empty to start from the built-in default list.'}
         </span>
       </div>
 

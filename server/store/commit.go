@@ -159,6 +159,12 @@ func (s *Store) ListCommits(repo string, limit int) ([]Commit, error) {
 // used in the site config — an https URL, an SSH remote, or a bare
 // "host/group/project" string. It is used to match webhook payloads (which
 // carry path_with_namespace) against the configured code repository.
+//
+// A bare location with a single "/" is the path itself, not host/project:
+// GitLab paths are always namespace/project, so "group/code" is what the
+// payload carries and what the dashboard filters on, while a bare
+// "host/group/code" (or "host:group/code") hides the host in a first segment
+// the payload never mentions.
 func RepoPath(location string) string {
 	loc := strings.TrimSpace(location)
 	if loc == "" {
@@ -178,14 +184,16 @@ func RepoPath(location string) string {
 			path = loc[i+1:]
 		}
 	default:
-		// Bare "host/group/code" or "host:group/code": drop the host segment.
-		if i := strings.IndexAny(loc, "/:"); i >= 0 {
-			if loc[i] == ':' && !strings.Contains(loc[:i], "/") {
-				// host:group/code without user@.
-				path = loc[i+1:]
-			} else {
-				path = loc[i+1:]
-			}
+		// Bare "host/group/code", "host:group/code" or "group/code". Only a
+		// colon (explicit host:path) or a further "/" makes the first segment
+		// a host; on its own a single "/" leaves the whole value as the path.
+		switch i := strings.IndexAny(loc, "/:"); {
+		case i < 0:
+			// A single segment: no path to extract.
+		case loc[i] == ':' || strings.Contains(loc[i+1:], "/"):
+			path = loc[i+1:]
+		default:
+			path = loc
 		}
 	}
 	return strings.Trim(strings.TrimSuffix(strings.Trim(path, "/"), ".git"), "/")

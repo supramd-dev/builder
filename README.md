@@ -117,7 +117,7 @@ http://localhost:8080/#/docs). The Markdown sources live in
 bundle at build time.
 
 A fully commented example of the md-builder.yaml test matrix (schema
-version 2) lives at [md-builder.example.yaml](md-builder.example.yaml).
+version 3) lives at [md-builder.example.yaml](md-builder.example.yaml).
 
 ## First start
 

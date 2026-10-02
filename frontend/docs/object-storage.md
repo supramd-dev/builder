@@ -1,12 +1,16 @@
 # Object storage (MinIO)
 
-Every test output file the platform produces — the build's `test_detail.xml`,
-a unit test's log, a regression run's result series — is stored as an
-**object in MinIO**, and the database keeps only a reference to it (the
-object key and its size). Nothing large is kept in the database.
+Every test output file the platform produces — the build's
+`compile_commands.json`, a unit run's `test_detail.xml`, a regression
+case's plot data — is stored as an **object in MinIO**, and the database
+keeps only a reference to it (the object key and its size). Nothing large
+is kept in the database.
 
-Task logs are the exception: they are appended line by line while a stage
-runs and are followed live by the browser, so they stay in the database.
+Task logs are the exception: they are appended chunk by chunk *while* a
+stage runs and are followed live by the browser — a log that only became
+readable after the stage ended would be useless for watching a build — so
+they stay in the database. Everything else is written once, at the end of
+an attempt, and read back rarely.
 
 ## Configuring the server
 
@@ -104,8 +108,12 @@ truncated with a short hash of the full name appended, which keeps two long
 names sharing a prefix distinct. A second artifact with the same name in one
 run gets a `-2`, `-3`, … suffix.
 
-Because the key is derived from the run and the name, re-reporting a run
-**overwrites its artifacts in place** instead of piling up copies.
+A run is **one attempt of one task**, so this layout is what makes a retry
+harmless: the new attempt is a new run with its own keys, and the files of
+the attempt before it are untouched. Re-reporting the *same* attempt (the
+runner finishing a stage twice, a reporter retrying inside one attempt)
+replaces its artifact rows, and because the key is derived from the run and
+the name, the uploads land on the same keys instead of piling up copies.
 
 ## Downloading
 
@@ -116,22 +124,29 @@ The server proxies the bytes:
 | --- | --- |
 | `GET /api/test-artifacts/{id}` | the content as JSON (`{id, runId, kind, name, content}`) |
 | `GET /api/test-artifacts/{id}/download` | the raw file, as an attachment |
-| `GET /api/test-runs/{id}/artifacts/zip` | every artifact of the run, zipped |
+| `GET /api/test-runs/{id}/artifacts/zip` | every artifact of that attempt, zipped |
+| `GET /api/tasks/{id}/artifacts/zip` | the subtree's artifacts, zipped, descendants under a directory named after them |
 
-So MinIO only has to be reachable from the server host — it can sit on a
-private network with no ingress at all.
+An endpoint whose object has gone missing answers `404`; one where the
+backend itself failed answers `502` — the database row is still there, so
+the request was not the problem. So MinIO only has to be reachable from the
+server host — it can sit on a private network with no ingress at all.
 
 ## Reclaiming orphaned objects
 
-Deleting a run (or re-reporting it) removes its rows from the database.
-The objects behind them are removed by a background **sweep**, not by the
-delete itself: deletes run inside transactions, and removing an object
-before the transaction commits would lose data if it rolled back.
+Deleting a run, deleting an environment (with its tasks, runs and
+artifacts), or re-reporting the same attempt removes rows from the
+database. The objects behind them are removed by a background **sweep**, not
+by the delete itself: deletes run inside transactions, and removing an
+object before the transaction commits would lose data if it rolled back.
 
 The sweep lists `runs/` in the bucket and deletes every object that is
 older than one hour and referenced by no `test_artifacts` row. The grace
 period protects an object that was just uploaded while its row is still
-being inserted. It runs every `gcIntervalHours` (6 by default) and can be
+being inserted — and, since the bytes are uploaded inside the transaction
+that inserts the row (so the database never points at an object that was
+never stored), a rolled-back upload is exactly the case the sweep has to
+catch. It runs every `gcIntervalHours` (6 by default) and can be
 switched off with `gc: false`, which is what you want if the bucket is
 shared with other tools and cleaned up elsewhere.
 

@@ -1054,20 +1054,9 @@ a.dash-full-graph:hover {
   font-size: 0.9375rem;
 }
 
-/* Run detail: a regression case's description (preset label) under its
-   name in the case table. */
-.dash-case-description {
-  color: var(--muted);
-  font-size: 0.8125rem;
-  font-weight: 400;
-}
-
-/* Clickable case rows in the run detail table. */
-.dash-case-row {
-  cursor: pointer;
-}
-
-.dash-case-row:hover td {
+/* Run detail: the attempt history of the task behind the run — every earlier
+   run of the same test, reachable from the one on screen. */
+.dash-attempt-row:hover td {
   background: var(--bg-alt);
 }
 
@@ -1312,6 +1301,41 @@ code {
   font-size: 0.8rem;
 }
 
+/* A retired node — one a later dispatch dropped from md-builder.yaml. It
+   keeps its runs, logs and artifacts as history, so it stays in the list
+   but reads as past: dimmed, and never scheduled again. */
+.task-step-retired {
+  opacity: 0.6;
+}
+
+.task-steps-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0.75rem 0 0.25rem 0;
+}
+
+/* The children of a virtual node (the cases of a regression stage), listed
+   in the panel below the step list in place of a log — the container has no
+   log of its own. */
+.pipeline-cases {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0 0 0;
+  font-size: 0.875rem;
+}
+
+.pipeline-cases li {
+  margin: 0.1rem 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.pipeline-cases-name {
+  min-width: 10rem;
+}
+
 /* --- task dependency graph (GitHub-Actions-style) --- */
 
 .graph-scroll {
@@ -1403,11 +1427,11 @@ code {
   color: var(--muted);
 }
 
-.graph-node-done {
+.graph-node-passed {
   border-color: var(--success);
 }
 
-.graph-node-done .graph-node-status {
+.graph-node-passed .graph-node-status {
   color: var(--success);
 }
 
@@ -1430,6 +1454,19 @@ code {
 
 .graph-node-root {
   background: var(--bg-alt);
+}
+
+/* A virtual node: a container whose status is rolled up from the nodes below
+   it (the regression stage and its cases), not a task the scheduler claims —
+   a dashed border and the alternate background say so, the status colors stay
+   the same. (The root is the other container and keeps its own class above.) */
+.graph-node-derived {
+  background: var(--bg-alt);
+  border-style: dashed;
+}
+
+.graph-node-derived .graph-node-name {
+  font-style: italic;
 }
 
 .graph-node:hover {
@@ -1501,6 +1538,25 @@ code {
   font-size: 0.8125rem;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* The log box and the bar above it: the bar stays put while the <pre> below
+   scrolls, so the full-log download is reachable at any scroll position. */
+.task-log-box {
+  margin-top: 0.35rem;
+}
+
+.task-log-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.25rem;
+}
+
+.task-log-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.8rem;
 }
 
 /* --- message dialog (long case notes in a read-only Monaco viewer) --- */

@@ -12,13 +12,15 @@ md-builder 源码树中的
 ## 完整示例
 
 ```yaml
-version: 2
+version: 3
 
 # 可选的默认值,合并进每个矩阵条目(map 按键合并,标量按条目覆盖)。
 defaults:
   timeout: 3600                 # 单命令超时秒数(硬上限 4 小时)
   env:
     OMP_NUM_THREADS: "4"
+  variables:                    # 模板,在环境上展开
+    BUILD_ROOT: "$MD_CODE_DIR/build"
   build:
     # 一条普通 shell 命令 —— cmake/make/脚本,项目用什么就写什么。
     command: "cmake -DCMAKE_BUILD_TYPE=Release . && cmake --build . -j8"
@@ -44,8 +46,10 @@ matrix:
     env:
       CC: gcc
       CXX: g++
+    variables:                    # 按键合并到 defaults.variables 之上
+      CMAKE_FLAGS: "-DENABLE_MPI=OFF"
     build:
-      command: "cmake -DENABLE_MPI=OFF . && cmake --build ."
+      command: 'cmake -B "$BUILD_ROOT" $CMAKE_FLAGS . && cmake --build "$BUILD_ROOT"'
       description: "用 gcc 和 cmake 构建代码"
     unit:
       command: "ctest --test-dir build -L unit --output-on-failure"
@@ -70,14 +74,15 @@ matrix:
 
 | 字段                         | 必填     | 说明                                                               |
 |------------------------------|----------|--------------------------------------------------------------------|
-| version                      | 是       | 必须为 2。                                                          |
-| defaults                     | 否       | 条目级默认值:timeout、env、build、unit、regression。                |
+| version                      | 是       | 必须为 3。                                                          |
+| defaults                     | 否       | 条目级默认值:timeout、env、variables、build、unit、regression。     |
 | presets                      | 否       | 公共回归用例(见下)。                                               |
 | matrix                       | 是       | 一或多个条目;每个条目需要 tags 和至少一个阶段。                     |
 | matrix[].tags                | 是       | 选择环境的标签(见[测试环境](#/docs/environments))。每个条目内必须唯一。 |
 | matrix[].description         | 否       | 人类可读的标签。                                                    |
 | matrix[].timeout             | 否       | 默认阶段超时秒数(默认 3600,上限 14400)。                          |
-| matrix[].env                 | 否       | 为所有阶段导出的额外环境变量。                                      |
+| matrix[].env                 | 否       | 为所有阶段导出的额外环境变量 —— 字面量值。                          |
+| matrix[].variables           | 否       | 该条目各阶段的额外变量,合并到 defaults.variables 之上 —— 模板值(见[变量](#变量))。 |
 | matrix[].build               | 否       | 构建阶段(见下)。                                                   |
 | matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 description、workdir、timeout、artifacts。 |
 | matrix[].regression          | 否       | 回归测试选择:use / disable 引用预设;可选整个阶段的 description。  |
@@ -86,7 +91,7 @@ matrix:
 | unit.workdir                 | 否       | 命令的运行目录(见工作目录)。                                       |
 | unit.artifacts                | 否       | 工件文件路径(或路径列表),runner 会在阶段结束后取回(见工件文件)。 |
 | unit.timeout                 | 否       | 覆盖默认值的阶段超时。                                              |
-| regression.description       | 否       | 整个回归阶段(父运行)的人类可读标签;每个用例另带自己预设的 description。 |
+| regression.description       | 否       | 整个回归阶段(容器节点)的人类可读标签;每个用例另带自己预设的 description。 |
 
 构建阶段是一条 shell 命令 —— 或者像测试阶段一样是命令列表(没有内置的
 cmake 支持 —— cmake/make/ninja/脚本调用自己写):
@@ -127,15 +132,16 @@ presets:
 | 字段                     | 必填 | 说明                                                        |
 |--------------------------|------|--------------------------------------------------------------|
 | presets.<名称>.command   | 是   | 运行该用例的 shell 命令,或命令列表(见命令列表)。                |
-| presets.<名称>.description | 否 | 用例的人类可读标签:显示在回归运行详情页的用例名下方及用例自己的详情页;每次触发运行时都会存入数据库。 |
+| presets.<名称>.description | 否 | 用例的人类可读标签:显示在该用例自己的任务页(及其各次运行)上;每次触发运行时都会存入数据库。 |
 | presets.<名称>.workdir   | 否   | 命令的运行目录(见工作目录)。                                 |
 | presets.<名称>.timeout   | 否   | 用例超时(缺省回退到 defaults / 矩阵条目的 timeout)。          |
 | presets.<名称>.artifacts | 否   | 要收集的工件文件(见工件文件)。                                |
 
-每个被引用的预设都会成为任务图中**独立的子任务**(“regression: heat”),
-在构建之后运行,拥有自己的超时、自己的日志,以及父回归运行下自己的
-子测试运行。各用例相互独立 —— 某个用例失败不会中断其他用例 —— 矩阵格
-汇总该条目的所有用例。
+每个被引用的预设都会成为任务图中**独立的任务**(“regression: heat”),
+嵌在该阶段的虚拟容器之下,在构建之后运行,拥有自己的超时、自己的日志、
+自己的尝试历史和自己的一条运行 —— 正是这一点让它能单独上报、单独下载、
+单独重跑。各用例相互独立 —— 某个用例失败不会中断其他用例 —— 矩阵格
+展示的是容器对该条目所有用例的汇总。
 
 矩阵条目通过 `regression.use` 和 `regression.disable` 选择预设:
 
@@ -153,16 +159,22 @@ presets:
   远程 `timeout` 包装命令,超时退出码为 124)和 workdir `cd` 失败。
 - SSH 层面的失败(主机不可达、会话中断)同样判定为失败,传输错误会
   作为该用例的备注。
-- 预设的 `artifacts` 文件**不会改变判定结果** —— 它们只作为该用例子
-  运行的 artifact 存储(逐用例明细由浏览器解析)。这一点与 unit 阶段
-  不同:unit 的工件文件解析出失败用例时,运行也会判为失败。
+- 预设的 `artifacts` 文件**不会改变判定结果** —— 它们只作为该用例
+  自己那条运行的 artifact 存储(逐用例明细由浏览器解析)。这一点与
+  unit 阶段不同:unit 的工件文件解析出失败用例时,运行也会判为失败。
+- 用例自己那条运行只计作**一个**测试:命令退出码为 0 即 `1/1 passed`,
+  否则 `0/1 failed`。这个计数就是判定结果本身,而不是从工件文件里解析
+  出来的用例数(逐用例明细由浏览器解析那些文件得到)。
 - `MD-BUILDER-SUMMARY:` 行只会成为用例的备注,无法把非零退出码变成
   通过。
 
-条目的回归运行(矩阵格)对所有用例汇总:任一用例失败 → 格子显示 ✗,
-全部通过 → ✓。各用例相互独立 —— 某个用例失败不会中断其他用例。当
-clone 或 build 失败时,所有用例被记录为 **skipped**(⤼),备注为上游
-错误。
+矩阵格展示的是**容器**的状态,也就是其下各用例的汇总:任一用例失败则
+该阶段失败,格子里写明是哪些("3/4 cases passed; failed: heat");全部
+通过则阶段通过;还没被认领完时读作 "2/4 cases passed; 2 queued"。
+各用例相互独立 —— 某个用例失败不会中断其他用例。当 clone 或 build
+未能通过时 —— 它失败了,或它自己就被上报为 `skipped` —— 所有用例被
+标记为 **skipped**,摘要即上游错误(各自还有一行日志);如果所有用例
+都被跳过,该阶段本身也读作 `skipped`,而不是 `passed`。
 
 ## 命令列表
 
@@ -209,6 +221,10 @@ unit:
   command: "$MD_CODE_DIR/build/unit_tests --gtest_output=xml:$MD_CODE_DIR/build/test_detail.xml"
 ```
 
+这些引用之所以能展开,是因为命令本身运行在环境上的阶段脚本里,那里
+已经导出了 MD_*。相反,`env` 的值是**字面量**,永远不会被展开 ——
+需要展开请用[变量](#变量)。
+
 ### Secret token(MD_SECRET_TOKEN)
 
 命令经常需要凭证 —— 私有软件源、工件存储、付费软件的 license 服务器
@@ -233,6 +249,101 @@ presets:
 写入任务日志前把每一处出现都替换为 `REDACTED`。未配置时该变量为未设
 置状态。
 
+## 变量
+
+`defaults` 和每个矩阵条目都可以声明 **`variables`**:一组具名值,该条目
+的各阶段命令可以像普通 shell 变量一样使用。它们是 `env` 的*可展开*版本,
+区别很重要:
+
+- **`env`** 的值是字面量。`BUILD_ROOT: "$MD_CODE_DIR/build"` 写在 `env`
+  下,导出的就是这段文本(单引号包裹),没有任何东西会展开它:命令里读到
+  的 `$BUILD_ROOT` 是一个中间带 `$` 的路径。
+- **`variables`** 的值是模板,由阶段脚本在**环境上**、阶段运行时展开。
+
+展开时会替换三类引用:
+
+1. 内置的 `MD_*` 变量(`$MD_CODE_DIR`、`$MD_COMMIT` 等);
+2. 该条目的**其他变量** —— 按依赖顺序导出,因此一个变量可以写在另一个
+   变量之上;
+3. **该环境**允许的**主机**环境变量(*Runner Envs* → 该行的 **Edit**
+   表单 —— 在所有者修改之前是 `HOME`、`USER`、`LOGNAME`、`PATH`、
+   `SHELL`、`TMPDIR`)。每台主机公开自己的名字,因此同一份 yaml 可能
+   在一台机器上展开、在另一台机器上保持字面量。该条目自己的 `env`
+   导出的名字只要在名单上也算:变量在 `env` 之后导出。
+
+其余引用一律保持字面量:写成 `$MD_CODEDIR` 这类笔误,命令收到的就是
+`$MD_CODEDIR` 这段文本,同时阶段日志里会出现
+
+```
+warning: variables.<name>: $MD_CODEDIR is not a built-in variable, a variables entry or an allowed environment variable; kept literally
+```
+
+因此路径不会悄悄丢掉 `$`。
+
+```yaml
+defaults:
+  variables:
+    BUILD_ROOT: "$MD_CODE_DIR/build"
+
+matrix:
+  - tags: [cpu]
+    variables:
+      CMAKE_FLAGS: "-DCMAKE_BUILD_TYPE=Release -DENABLE_MPI=OFF"
+      UNIT_XML: "$BUILD_ROOT/tests/unit.xml"   # BUILD_ROOT 先展开
+    build:
+      command: 'cmake -B "$BUILD_ROOT" $CMAKE_FLAGS . && cmake --build "$BUILD_ROOT" -j8'
+    unit:
+      command: "./build/unit_tests --gtest_output=xml:$UNIT_XML"
+```
+
+条目按键继承 `defaults.variables`,冲突时条目优先,与 `env` 完全一致。
+
+### 值只是数据,不是代码
+
+一个值被渲染为**恰好一个 shell 词**:可展开的引用变成双引号包裹的
+`${NAME}`,其余部分单引号包裹。因此值里的 `$(…)`、反引号、引号或换行
+都只是文本:`INJECT: "$(touch /tmp/x)"` 导出的就是这段字符串,命令里
+`echo "$INJECT"` 会把它打印出来而不是执行它 —— yaml 无法借 `variables`
+把 shell 语法注入阶段脚本。
+
+值里想要一个字面 `$` 就写 `$$`(`PRICE: "5$$ per run"`);后面不构成
+变量名的 `$`(`50$`、`${ }`)原样保留。
+
+### 导言的导出顺序
+
+每个阶段脚本按以下顺序构建环境:
+
+1. 内置 `MD_*` 变量;
+2. 条目的 `env`(字面量,单引号包裹);
+3. **环境设置脚本**(source,见下);
+4. 条目的 `variables`(模板,在此展开);
+5. `cd` 进入工作目录。
+
+变量在环境设置脚本之后展开,因此变量可以建立在脚本导出的内容之上
+(module 加载、`module load` 推入的主机路径等)—— 同名时变量覆盖脚本的
+导出。`cd` 在最后,所以 `workdir` 也可以引用变量。
+
+### 允许哪些主机变量
+
+某个仓库的 yaml 可以读取主机的哪些环境变量,由**主机所有者**决定,而不是
+仓库决定:名单保存在环境本身上 —— *Runner Envs* → 该行的 **Edit** 表单,
+**Expandable host variables** —— 因此同一站点的两台机器可以公开不同的名字
+(见[测试环境](#/docs/environments))。新环境从一份最小默认名单开始
+(`HOME`、`USER`、`PATH` 等)。不在名单上的名字保持字面量,与写错名字完全
+相同;所有者也可以清空名单,表示一个都不允许。
+
+### 校验
+
+变量在读取 yaml 时就会校验,因此有问题的条目会让派发失败并指出出错的
+名字(commit 行上的 `dispatchError`),而不是生成一份取值依赖导出顺序的
+脚本:
+
+- 名字必须是 shell 标识符(`[A-Za-z_][A-Za-z0-9_]*`);
+- 不能以 `MD_` 开头 —— 该前缀保留给总是会展开的内置变量;
+- 不能与同一条目的 `env` 重名 —— 同一个名字会有两种语义不同的值,只能
+  留在其中一处;
+- 两个变量之间不能形成循环引用。
+
 ## 环境设置脚本
 
 每个**环境**(在站点上配置,而非 yaml 中)可以携带一个环境设置脚本 ——
@@ -241,8 +352,9 @@ presets:
 之前 source(module 加载、编译器导出、virtualenv 激活等):
 
 - **存在**:每个阶段脚本先执行 `. md-builder-env-<hash>.sh`;脚本导出的
-  一切对 build、unit 和回归命令可见(它在导言的最后运行,因此可以覆盖
-  内置变量和 yaml 变量)。
+  一切对 build、unit 和回归命令可见。它在内置 `MD_*` 和 yaml 的 `env`
+  之后、yaml 的 `variables` 之前运行:可以覆盖前两者,但同名的变量会
+  覆盖它(见[导言的导出顺序](#导言的导出顺序))。
 - **不存在**:阶段脚本记录一条警告后照常运行。
 
 见[测试环境](#/docs/environments)。
@@ -350,16 +462,26 @@ presets:
 
 ### 下载工件
 
-运行(构建文件、unit / 回归结果文件)的每个已存储工件都可以在运行
-详情页下载:单个文件逐一下载,或整包打成一个 zip
-(`GET /api/test-runs/{id}/artifacts/zip`)。回归运行的 zip 包含所有
-用例的文件,按 `cases/<用例名>/` 分目录存放。文件内容目前存于平台
-数据库;S3 兼容对象存储(如 Garage)是规划中的存储后端 —— 无论哪种
-后端,下载接口不变。
+运行(构建文件、unit / 回归结果文件、画图文件)的每个已存储工件都可以
+在运行详情页下载:单个文件逐一下载,或把该次尝试的整包打成一个 zip
+(`GET /api/test-runs/{id}/artifacts/zip`)。没有产出任何工件的运行下载
+zip 会得到 `404`,而不是一个空归档。
+
+要打包**整个测试**时用的是任务级 zip:
+`GET /api/tasks/{id}/artifacts/zip` 会把该任务及其下每个节点最新尝试的
+工件打在一起 —— 任务自己的文件在归档根目录,每个后代的文件放在以它
+命名的目录下(`regression-heat/…`,由节点 key 把 `:` 换成 `-` 得来)。
+因此向回归容器请求,就得到一个包含所有用例文件的归档;向单个用例请求,
+就只得到那个用例的文件。已退休的节点不包含在内:它们的文件属于更早的
+图形态。
+
+文件内容存放在所配置的 S3 兼容对象存储中(见
+[对象存储](#/docs/object-storage));对象已不存在时返回 `404`,后端故障
+返回 `502`。
 
 ## 校验规则
 
-- `version` 必须为 2;`matrix` 不能为空。
+- `version` 必须为 3;`matrix` 不能为空。
 - 每个条目需要非空的 `tags` 以及 `unit` / `regression`(或其预设展开)
   中的至少一个,且带有 `command`。
 - 条目之间不允许重复的标签组合。
@@ -368,6 +490,8 @@ presets:
   `threads`)。
 - 每个预设必须带 `command`;`use` / `disable` 中的名称必须引用已定义
   的预设。
+- `variables` 的名字必须是 shell 标识符,不能以 `MD_` 开头,不能与同一
+  条目的 `env` 重名,也不能形成循环引用(见[变量](#变量))。
 
 非法的 YAML 会使派发失败:推送仍被记录,`dispatchError` 出现在 webhook
 响应中(见 [Webhooks](#/docs/webhooks)),但不会创建任何任务。同一条
@@ -388,14 +512,16 @@ presets:
    设置脚本被写入任务目录。
 2. **build**:生成的脚本导出 MD_COMMIT、MD_ENV_NAME、MD_ENV_TAGS、
    MD_TASK_DIR、MD_CODE_DIR 以及 yaml 的 env 变量,source 环境设置
-   脚本(如果存在),然后在它的工作目录中运行构建阶段。
-3. 若构建(或克隆)失败,依赖它的测试阶段会被标记为 skipped,仪表板
-   显示 ✗。
+   脚本(如果存在),导出展开后的 yaml 变量,然后在它的工作目录中运行
+   构建阶段。
+3. 若构建(或克隆)未能通过 —— 它失败了,或它自己就被上报为
+   `skipped` —— 依赖它的测试阶段会被标记为 **skipped**,原因写在
+   摘要里、日志中有一行,仪表板如实呈现。
 4. **unit**:阶段命令在其工作目录中、受超时约束地运行;完整输出流入
-   任务日志,结果被存为一条测试运行。
-5. **regression:每个选中的预设一个子任务** —— 每个用例命令在构建之后
-   运行(导出 MD_CASE),收集自己的结果文件并记录自己的子测试运行;矩阵格
-   显示所有用例的汇总。
+   任务日志,结果被存为该次尝试的测试运行。
+5. **regression:每个选中的预设一个任务** —— 每个用例命令在构建之后
+   运行(导出 MD_CASE),收集自己的结果文件并记录自己那条运行;矩阵格
+   展示容器对所有用例的汇总。
 
 ## 自定义摘要
 
@@ -407,4 +533,4 @@ MD-BUILDER-SUMMARY: all 8 tests passed, max rel err 3.2e-7
 
 前缀之后的文本会成为仪表板上显示的运行摘要。没有这行时,摘要为退出码
 加阶段日志的最后几行(截断到 500 字符)。对回归用例而言,这行摘要成为
-该用例子运行的备注。
+该用例那条运行的摘要。

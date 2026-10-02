@@ -400,6 +400,11 @@ func (s *Server) finishGitLabLogin(w http.ResponseWriter, user *store.User) stri
 	return "ok"
 }
 
+// maxDerivedUsername caps the part of a GitLab username carried over into a
+// local one. The suffix below can add "-50", and auth.MaxUsernameLength is the
+// limit the validator enforces on edit, so this leaves room for both.
+const maxDerivedUsername = 32
+
 // uniqueUsername returns a username based on the GitLab one that no account
 // here has taken, appending a numeric suffix if needed. Two GitLab accounts
 // may share a username across a rename, and a GitLab username may collide
@@ -411,9 +416,12 @@ func (s *Server) uniqueUsername(base string) (string, error) {
 		base = "gitlab-user"
 	}
 	// The username column is unique and validated elsewhere; keep the
-	// candidate within the same shape so it could be edited later.
-	if len(base) > 32 {
-		base = base[:32]
+	// candidate within the same shape so it could be edited later. Cut on
+	// runes: auth.ValidateUsername counts runes, so a byte cut can split one
+	// and hand it a string it accepts but the database cannot store
+	// (PostgreSQL rejects invalid UTF-8 outright).
+	if r := []rune(base); len(r) > maxDerivedUsername {
+		base = string(r[:maxDerivedUsername])
 	}
 	for i := 0; i < 50; i++ {
 		candidate := base

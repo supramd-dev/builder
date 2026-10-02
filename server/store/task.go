@@ -3,29 +3,48 @@ package store
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
-// Task kinds. The root task represents the whole dispatched graph; the other
-// kinds are the sub-tasks it consists of. The list is open: future kinds
-// (e.g. performance tests) only need a kind constant plus an executor.
+// Task kinds. A task is one node of a dispatched graph, and it is the stable
+// identity of one "test": re-dispatching the same commit on the same
+// environment reuses the same rows and adds an attempt (a TestRun) to them.
+//
+// The virtual kinds never execute and never record a run — they are
+// containers whose status and counts are rolled up from their children:
+//
+//	root (virtual)
+//	 ├── clone
+//	 ├── build
+//	 ├── unit
+//	 └── regression (virtual)
+//	      ├── regression_case "a"
+//	      └── regression_case "b"
 const (
-	TaskKindRoot       = "root"
-	TaskKindClone      = "clone"
-	TaskKindBuild      = "build"
-	TaskKindUnit       = "unit"
-	TaskKindRegression = "regression"
+	TaskKindRoot            = "root"            // virtual: the whole test of one commit on one environment
+	TaskKindClone           = "clone"           //
+	TaskKindBuild           = "build"           // optional
+	TaskKindUnit            = "unit"            // optional
+	TaskKindRegressionStage = "regression"      // virtual: the container of the regression cases
+	TaskKindRegressionCase  = "regression_case" // one md-builder.yaml regression preset
 )
 
-// Task statuses.
+// Task and run statuses. Both use the same vocabulary: a real task's status
+// is a cache of its latest attempt's run (FinishAttempt writes both), and a
+// virtual task's is derived from its children (RollupTaskTree).
 const (
-	TaskPending = "pending"
-	TaskRunning = "running"
-	TaskDone    = "done"
-	TaskFailed  = "failed"
-	TaskSkipped = "skipped"
+	StatusPending = "pending"
+	StatusRunning = "running"
+	StatusPassed  = "passed"
+	StatusFailed  = "failed"
+	// StatusSkipped is a real status, not a summary convention: the node never
+	// ran because an upstream task failed. Its reason is free text in Summary.
+	StatusSkipped = "skipped"
 )
 
 // Task trigger sources: what dispatched the graph. Webhook (0) is the
@@ -38,31 +57,62 @@ const (
 	TaskTriggerManualYAML int = 2
 )
 
-// Task is one node of a dispatched task graph: either the root (the whole
-// test of one commit on one environment, replacing the former Job row) or a
-// sub-task (clone / build / unit / regression, ...). Sub-tasks of a graph
-// share RootID; the root task's RootID equals its own ID.
+// Task is one node of a dispatched task graph — and, since every dispatch of
+// a commit reuses the (commit, environment) root, the long-lived identity of
+// the test that node stands for.
 //
-// Dependencies are stored as a JSON array of task IDs (DependsOn) and never
-// change after creation: re-dispatching rebuilds the graph.
+// Two independent structures live on it: DependsOn is the scheduling DAG
+// (what must finish before this node may run; a JSON array of task ids) and
+// ParentID is the tree (what this node rolls up into, and where it nests on
+// the graph page). A parent-child edge does NOT imply ordering: a virtual
+// container is never a gate, so its children depend on build/clone directly.
+//
+// Retired marks a node the current md-builder.yaml no longer defines: it is
+// never scheduled again and takes no part in its parent's rollup, but its
+// runs, logs and artifacts are kept as history.
 type Task struct {
-	ID            int64  `gorm:"primaryKey"`
-	RootID        int64  `gorm:"index;not null"`
-	Kind          string `gorm:"index;not null"`
-	Name          string `gorm:"not null"`
-	CommitID      int64  `gorm:"index;not null"`
-	EnvironmentID int64  `gorm:"index;not null"`
+	ID int64 `gorm:"primaryKey"`
+	// RootID is the graph this node belongs to; the root's equals its own ID.
+	// At most one node per (RootID, NodeKey) — the identity a re-dispatch
+	// matches on. The index is partial because a root row is inserted before
+	// its own id is known (RootID 0), and roots are already unique by
+	// (commit_id, environment_id).
+	RootID   int64  `gorm:"index;not null;uniqueIndex:idx_tasks_node,where:kind <> 'root'"`
+	NodeKey  string `gorm:"not null;default:'';uniqueIndex:idx_tasks_node,where:kind <> 'root'"`
+	ParentID int64  `gorm:"index;not null;default:0"` // the tree: rollup + nesting (the root has 0)
+	Kind     string `gorm:"index;not null"`
+	Virtual  bool   `gorm:"not null;default:false"`
+	Retired  bool   `gorm:"index;not null;default:false"`
+	Name     string `gorm:"not null"`
+	// Description is the human label from md-builder.yaml (stage or preset
+	// description), re-stored on every dispatch: it may change between them.
+	Description string `gorm:"not null;default:''"`
+	// At most one root per (commit, environment): a partial unique index, so
+	// sub-tasks (which share the pair) stay unconstrained. The requeue path
+	// relies on the insert failing when a concurrent dispatch got there first.
+	CommitID      int64  `gorm:"index;not null;uniqueIndex:idx_tasks_root,where:kind = 'root'"`
+	EnvironmentID int64  `gorm:"index;not null;uniqueIndex:idx_tasks_root,where:kind = 'root'"`
 	Tags          string `gorm:"not null;default:''"`
 	Trigger       int    `gorm:"not null;default:0"` // 0 = webhook, 1 = manual, 2 = manual-yaml (TaskTrigger*)
-	Config        string `gorm:"type:text"`          // root: entry snapshot; sub-task: stage snapshot (JSON)
-	DependsOn     string `gorm:"type:text"`          // JSON array of task IDs, e.g. "[3,4]"
-	Status        string `gorm:"index;not null;default:'pending'"`
-	Error         string `gorm:"not null;default:''"`
-	Attempts      int    `gorm:"not null;default:0"`
-	StartedAt     *time.Time
-	FinishedAt    *time.Time
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// Config is the node's config snapshot: the root carries the entry
+	// snapshot (RootConfig), a stage node its stage config, a case node its
+	// CaseStageConfig. Virtual nodes store "{}".
+	Config    string `gorm:"type:text"`
+	DependsOn string `gorm:"type:text"` // JSON array of task IDs, e.g. "[3,4]"
+	Status    string `gorm:"index;not null;default:'pending'"`
+	Summary   string `gorm:"not null;default:''"`
+	Error     string `gorm:"not null;default:''"`
+	Total     int    `gorm:"not null;default:0"`
+	Passed    int    `gorm:"not null;default:0"`
+	Failed    int    `gorm:"not null;default:0"`
+	Skipped   int    `gorm:"not null;default:0"`
+	// Attempts counts the dispatches of this node — and, for a real node, its
+	// attempts (each dispatch begins one, and each attempt is one TestRun).
+	Attempts   int `gorm:"not null;default:0"`
+	StartedAt  *time.Time
+	FinishedAt *time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // DependsOnIDs decodes the stored dependency list. A root (or any task
@@ -92,6 +142,46 @@ func (t *Task) SetDependsOnIDs(ids []int64) {
 	t.DependsOn = string(b)
 }
 
+// TaskKindVirtual returns whether kind is a container that never executes:
+// the graph root and the regression stage. Virtual nodes have no runs, their
+// status and counts come from their children, and nothing may depend on them
+// (a container can never become ready, so such an edge would deadlock).
+func TaskKindVirtual(kind string) bool {
+	return kind == TaskKindRoot || kind == TaskKindRegressionStage
+}
+
+// TaskStatusTerminal returns whether status is a final state of a node.
+func TaskStatusTerminal(status string) bool {
+	return status == StatusPassed || status == StatusFailed || status == StatusSkipped
+}
+
+// ValidateTaskKind reports whether kind is a known task kind.
+func ValidateTaskKind(kind string) bool {
+	switch kind {
+	case TaskKindRoot, TaskKindClone, TaskKindBuild, TaskKindUnit,
+		TaskKindRegressionStage, TaskKindRegressionCase:
+		return true
+	}
+	return false
+}
+
+// StageLabel names the kind in user-facing messages ("the clone stage").
+func StageLabel(kind string) string {
+	switch kind {
+	case TaskKindClone:
+		return "clone"
+	case TaskKindBuild:
+		return "build"
+	case TaskKindUnit:
+		return "unit test"
+	case TaskKindRegressionStage:
+		return "regression"
+	case TaskKindRegressionCase:
+		return "regression case"
+	}
+	return kind
+}
+
 // CommitSHA is the commit SHA the graph tests. It is resolved from the
 // commits table (tasks store CommitID foreign keys only).
 func (s *Store) CommitSHA(commitID int64) string {
@@ -105,83 +195,240 @@ func (s *Store) CommitSHA(commitID int64) string {
 // ErrTaskNotFound is returned when no task matches a query.
 var ErrTaskNotFound = errors.New("store: task not found")
 
-// CreateTaskGraph inserts a root task and its sub-tasks in one transaction:
-// sub-task DependsOn entries are resolved to real IDs inside the transaction
-// (earlier sub-tasks by index via TaskSubPlaceholderBase+i, or already
-// stored task IDs). Returns the stored rows with IDs filled in.
+// ErrVirtualTask is returned by the attempt functions when they are handed a
+// container: virtual nodes have no attempts (and no runs).
+var ErrVirtualTask = errors.New("store: virtual tasks do not execute")
+
+// TaskSubPlaceholderBase is the placeholder base for UpsertTaskGraph deps:
+// deps entries of 1000+i reference nodes[i] (which must be an earlier entry).
+// Dependencies on a virtual node are rejected — see UpsertTaskGraph.
+const TaskSubPlaceholderBase int64 = 1000
+
+// TaskNode is one node of a graph about to be persisted: its row plus the
+// two links that need resolving inside the transaction. Deps entries at or
+// above TaskSubPlaceholderBase address the call's own nodes by index;
+// ParentKey names the parent's NodeKey ("" = the root).
+type TaskNode struct {
+	Task      *Task
+	Deps      []int64
+	ParentKey string
+}
+
+// UpsertTaskGraph persists one dispatch's graph: the root row (created when
+// the (commit, environment) pair is new) plus its nodes, matched by NodeKey.
 //
-// Sub-tasks must not depend on the root task: the root is a container whose
-// status is derived from its sub-tasks, so a root edge can never become
-// ready and would deadlock the scheduler. CreateTaskGraph rejects such a
-// graph (non-positive or root IDs in deps) with an error.
-func CreateTaskGraph(s *Store, root *Task, subtasks []*Task, deps [][]int64) ([]*Task, error) {
+// Matching by NodeKey is what makes a task outlive a dispatch. A node the new
+// graph defines is refreshed and re-armed (status pending, fresh config,
+// un-retired, Attempts++); a node it does not define is marked Retired and
+// keeps its runs, logs and artifacts as history. Nodes the graph no longer
+// defines are never deleted — that is the whole point of the NodeKey.
+//
+// Every real node gets the attempt's TestRun here, in status pending: the
+// matrix cell and the run page exist from dispatch time and follow the stage
+// live (the scheduler flips the run to running when it claims the node).
+//
+// Returns the stored nodes in the order given, with IDs filled in.
+func (s *Store) UpsertTaskGraph(root *Task, nodes []TaskNode) ([]*Task, error) {
 	if root.Kind != TaskKindRoot {
 		return nil, errors.New("store: task graph requires a root task")
 	}
-	if len(subtasks) != len(deps) {
-		return nil, errors.New("store: subtasks and deps length mismatch")
-	}
-	root.Status = TaskPending
+	root.Status = StatusPending
+	root.Virtual = true
 	root.RootID = 0 // set to the root's own ID after insert
 
+	stored := make([]*Task, len(nodes))
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		// The root: insert, or adopt the row a concurrent dispatch of the same
+		// (commit, environment) pair created. The partial unique index makes
+		// that insert a no-op instead of a failure, so two dispatches racing on
+		// one pair always end up sharing one root.
+		root.NodeKey = TaskKindRoot
+		root.Virtual = true
+		root.Attempts = 0
+		root.RootID = 0 // not known until the row exists
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(root).Error; err != nil {
+			return err
+		}
 		if root.ID == 0 {
-			if err := tx.Create(root).Error; err != nil {
+			existing, err := findRootTaskTx(tx, root.CommitID, root.EnvironmentID)
+			if err != nil {
+				return err
+			}
+			// A re-dispatch: keep the identity (id, creation time) and add an
+			// attempt to it.
+			root.ID = existing.ID
+			root.Attempts = existing.Attempts
+			root.CreatedAt = existing.CreatedAt
+		}
+		root.RootID = root.ID
+		root.Attempts++
+		if err := tx.Model(&Task{}).Where("id = ?", root.ID).Updates(map[string]any{
+			"root_id":     root.ID,
+			"node_key":    TaskKindRoot,
+			"parent_id":   0,
+			"virtual":     true,
+			"retired":     false,
+			"name":        root.Name,
+			"description": root.Description,
+			"tags":        root.Tags,
+			"trigger":     root.Trigger,
+			"config":      root.Config,
+			"depends_on":  "",
+			"status":      StatusPending,
+			"summary":     "",
+			"error":       "",
+			"total":       0,
+			"passed":      0,
+			"failed":      0,
+			"skipped":     0,
+			"attempts":    root.Attempts,
+			"started_at":  nil,
+			"finished_at": nil,
+		}).Error; err != nil {
+			return err
+		}
+		root.Status = StatusPending
+
+		// Pass 1: upsert every node so each has an ID, then resolve the links
+		// (a parent or a placeholder may address a node later in the list).
+		prior, err := listNodesTx(tx, root.ID)
+		if err != nil {
+			return err
+		}
+		byKey := make(map[string]*Task, len(prior))
+		for i := range prior {
+			byKey[prior[i].NodeKey] = &prior[i]
+		}
+		for i := range nodes {
+			in := nodes[i].Task
+			if in.NodeKey == "" {
+				return errors.New("store: task graph node without a node key")
+			}
+			stored[i] = in
+			if old := byKey[in.NodeKey]; old != nil {
+				// A node the graph already defines: keep its identity (and its
+				// attempt counter, which the new attempt extends) and refresh
+				// everything else from the graph.
+				in.ID = old.ID
+				in.Attempts = old.Attempts
+				in.CreatedAt = old.CreatedAt
+				// The dispatch supersedes the attempt in flight, if the
+				// scheduler had already claimed the node: nothing else would
+				// ever close that run, and a run left running for ever is a
+				// ghost attempt on the run page and in every list that reads
+				// runs. A report from the goroutine still executing it is
+				// accepted afterwards by its own attempt number
+				// (AttemptResult.Attempt) and replaces this verdict.
+				if err := supersedeAttemptsTx(tx, in.ID, in.Attempts); err != nil {
+					return err
+				}
+			} else {
+				in.ID = 0
+				in.Attempts = 0
+				in.CreatedAt = time.Time{}
+			}
+			in.RootID = root.ID
+			in.CommitID = root.CommitID
+			in.EnvironmentID = root.EnvironmentID
+			in.Virtual = TaskKindVirtual(in.Kind)
+			in.Retired = false
+			in.Status = StatusPending
+			in.Summary, in.Error = "", ""
+			in.Total, in.Passed, in.Failed, in.Skipped = 0, 0, 0, 0
+			in.StartedAt, in.FinishedAt = nil, nil
+			if in.Virtual {
+				in.Config = "{}"
+			}
+			if err := tx.Save(in).Error; err != nil {
 				return err
 			}
 		}
-		// RootID is self-referential; the row may already exist (requeue).
-		if root.RootID != root.ID {
-			if err := tx.Model(root).Update("root_id", root.ID).Error; err != nil {
-				return err
-			}
+
+		// Pass 2: resolve the tree and the scheduling edges.
+		ids := make(map[string]int64, len(nodes))
+		ids[TaskKindRoot] = root.ID
+		for i := range stored {
+			ids[stored[i].NodeKey] = stored[i].ID
 		}
-		for i, st := range subtasks {
-			st.RootID = root.ID
-			st.Status = TaskPending
-			// Resolve placeholders to real IDs.
-			resolved := make([]int64, 0, len(deps[i]))
-			for _, d := range deps[i] {
+		for i := range nodes {
+			n := stored[i]
+			parentID := root.ID
+			if nodes[i].ParentKey != "" {
+				id, ok := ids[nodes[i].ParentKey]
+				if !ok {
+					return fmt.Errorf("store: task %q names an unknown parent %q", n.NodeKey, nodes[i].ParentKey)
+				}
+				parentID = id
+			}
+			resolved := make([]int64, 0, len(nodes[i].Deps))
+			for _, d := range nodes[i].Deps {
 				switch {
 				case d >= TaskSubPlaceholderBase:
 					idx := int(d - TaskSubPlaceholderBase)
-					if idx >= i {
-						return errors.New("store: task dependency references a later sub-task")
+					if idx >= len(nodes) {
+						return errors.New("store: task dependency references an unknown node")
 					}
-					resolved = append(resolved, subtasks[idx].ID)
+					target := stored[idx]
+					if target.Virtual {
+						return fmt.Errorf("store: task %q depends on the virtual node %q (a container can never gate its children)", n.NodeKey, target.NodeKey)
+					}
+					resolved = append(resolved, target.ID)
 				case d > 0:
 					resolved = append(resolved, d)
 				default:
 					return errors.New("store: task dependency on the root task is not allowed (the root is derived from its sub-tasks and can never gate them)")
 				}
 			}
-			st.SetDependsOnIDs(resolved)
-			if err := tx.Create(st).Error; err != nil {
+			n.ParentID = parentID
+			n.SetDependsOnIDs(resolved)
+			if err := tx.Model(&Task{}).Where("id = ?", n.ID).Updates(map[string]any{
+				"parent_id":  parentID,
+				"depends_on": n.DependsOn,
+			}).Error; err != nil {
 				return err
 			}
 		}
-		return nil
+
+		// Retire what this graph no longer defines. Nothing is deleted: the
+		// node keeps its runs, logs and artifacts, and its status (it is
+		// terminal already, or an in-flight attempt is left to finish —
+		// retireGhostAttemptsTx closes the queued ones nothing will ever run).
+		keys := make([]string, 0, len(nodes))
+		for i := range nodes {
+			keys = append(keys, nodes[i].Task.NodeKey)
+		}
+		retire := tx.Model(&Task{}).Where("root_id = ? AND kind <> ?", root.ID, TaskKindRoot)
+		if len(keys) > 0 {
+			retire = retire.Where("node_key NOT IN ?", keys)
+		}
+		if err := retire.Update("retired", true).Error; err != nil {
+			return err
+		}
+		if err := retireGhostAttemptsTx(tx, root.ID, false); err != nil {
+			return err
+		}
+
+		// Every real node opens its attempt here (see BeginAttempt): the run
+		// exists before the stage starts so the cell and the run page are live
+		// from dispatch time on.
+		if _, err := beginAttemptsTx(tx, stored); err != nil {
+			return err
+		}
+		return rollupTx(tx, root.ID)
 	})
 	if err != nil {
 		return nil, err
 	}
-	root.RootID = root.ID
-	return append([]*Task{root}, subtasks...), nil
+	return append([]*Task{root}, stored...), nil
 }
 
-// TaskSubPlaceholderBase is the placeholder base for CreateTaskGraph deps:
-// deps entries of 1000+i reference subtasks[i] (which must be an earlier
-// entry). Dependencies on the root task are rejected — see CreateTaskGraph.
-const TaskSubPlaceholderBase int64 = 1000
-
-// FindRootTaskByCommitEnv returns the root task for a (commit, environment)
-// pair, or ErrTaskNotFound.
-func (s *Store) FindRootTaskByCommitEnv(commitID, envID int64) (*Task, error) {
+// findRootTaskTx loads a (commit, environment) root inside a transaction.
+func findRootTaskTx(tx *gorm.DB, commitID, envID int64) (*Task, error) {
 	var t Task
-	err := s.DB.Where("kind = ? AND commit_id = ? AND environment_id = ?",
+	err := tx.Where("kind = ? AND commit_id = ? AND environment_id = ?",
 		TaskKindRoot, commitID, envID).First(&t).Error
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrTaskNotFound
 		}
 		return nil, err
@@ -189,174 +436,506 @@ func (s *Store) FindRootTaskByCommitEnv(commitID, envID int64) (*Task, error) {
 	return &t, nil
 }
 
-// ListSubTasks returns the sub-tasks of a graph in creation (topological)
-// order.
-func (s *Store) ListSubTasks(rootID int64) ([]Task, error) {
+// BeginAttempt opens the next attempt of one real task: it bumps Attempts,
+// re-arms the task (pending, no counts, no summary — the run carries the
+// attempt's own outcome) and creates the attempt's run in status pending.
+// Called at dispatch, and by FinishAttempt when a report arrives for a task
+// whose attempt already ended.
+func (s *Store) BeginAttempt(taskID int64) (*TestRun, error) {
+	var run TestRun
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		task, err := getTaskTx(tx, taskID)
+		if err != nil {
+			return err
+		}
+		if task.Virtual {
+			return ErrVirtualTask
+		}
+		runs, err := beginAttemptsTx(tx, []*Task{task})
+		if err != nil {
+			return err
+		}
+		run = runs[0]
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
+// SupersededSummary is the summary a run carries when a new dispatch of its
+// task took over while it was still queued or running.
+const SupersededSummary = "superseded by a new dispatch of this task"
+
+// supersedeAttemptsTx closes the attempts a new dispatch takes over: it marks
+// every non-terminal run up to (and including) attempt as skipped, so no run
+// of a re-armed node is left non-terminal. A later report for one of them
+// still lands on it (FinishAttempt with the attempt number) and replaces the
+// verdict with what the goroutine really produced.
+func supersedeAttemptsTx(tx *gorm.DB, taskID int64, attempt int) error {
+	if attempt < 1 {
+		return nil
+	}
+	return tx.Model(&TestRun{}).
+		Where("task_id = ? AND attempt <= ? AND status IN ?", taskID, attempt,
+			[]string{StatusPending, StatusRunning}).
+		Updates(map[string]any{
+			"status":      StatusSkipped,
+			"summary":     SupersededSummary,
+			"finished_at": time.Now(),
+		}).Error
+}
+
+// RetiredSummary is the summary a task or run carries when the node it
+// belongs to is no longer part of the graph.
+const RetiredSummary = "dropped by a new dispatch of this graph"
+
+// retireGhostAttemptsTx closes the attempts of a graph's retired nodes that
+// could never be closed otherwise. A retired node is history: the scheduler
+// never scans it again (ClaimReadyTask filters it out) and the rollup never
+// counts it, so an attempt left pending or running would sit there for ever —
+// a ghost attempt on the run page and in every list that reads runs, which is
+// the state retiring must not leave behind. Nothing is deleted: the run keeps
+// its place in the history, with the reason it was closed.
+//
+// closeRunning also closes attempts a worker may still be executing. Only a
+// restart may do that (ResetStaleRunning), when no worker is left to report;
+// during a dispatch a running attempt is left alone, because its worker is
+// still there and reports the outcome into that same attempt.
+func retireGhostAttemptsTx(tx *gorm.DB, rootID int64, closeRunning bool) error {
+	statuses := []string{StatusPending}
+	if closeRunning {
+		statuses = append(statuses, StatusRunning)
+	}
+	var nodes []Task
+	if err := tx.Where("root_id = ? AND retired = ? AND status IN ?", rootID, true, statuses).
+		Find(&nodes).Error; err != nil {
+		return err
+	}
+	for i := range nodes {
+		now := time.Now()
+		if err := tx.Model(&Task{}).Where("id = ?", nodes[i].ID).Updates(map[string]any{
+			"status":      StatusSkipped,
+			"summary":     RetiredSummary,
+			"finished_at": now,
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&TestRun{}).
+			Where("task_id = ? AND attempt = ? AND status IN ?", nodes[i].ID, nodes[i].Attempts, statuses).
+			Updates(map[string]any{
+				"status":      StatusSkipped,
+				"summary":     RetiredSummary,
+				"finished_at": now,
+			}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// beginAttemptsTx opens one attempt per real node (see BeginAttempt) and
+// returns the created runs, aligned with nodes.
+func beginAttemptsTx(tx *gorm.DB, nodes []*Task) ([]TestRun, error) {
+	runs := make([]TestRun, len(nodes))
+	for i := range nodes {
+		n := nodes[i]
+		attempt, err := nextAttemptTx(tx, n)
+		if err != nil {
+			return nil, err
+		}
+		n.Attempts = attempt
+		if n.Virtual {
+			// A container's "attempt" is the dispatch itself: no run, and the
+			// status stays derived until the rollup at the end of the
+			// transaction.
+			if err := tx.Model(&Task{}).Where("id = ?", n.ID).
+				Update("attempts", n.Attempts).Error; err != nil {
+				return nil, err
+			}
+			continue
+		}
+		run := TestRun{
+			TaskID:        n.ID,
+			Attempt:       n.Attempts,
+			Kind:          RunKindForTask(n.Kind),
+			EnvironmentID: n.EnvironmentID,
+			CommitID:      n.CommitID,
+			Status:        StatusPending,
+		}
+		// Another report may have opened this very attempt between the read
+		// above and this insert. The loser adopts the row instead of failing:
+		// both reports describe the same attempt, and the unique index on
+		// (task_id, attempt) must not turn a retry into a database error.
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&run)
+		if res.Error != nil {
+			return nil, res.Error
+		}
+		if res.RowsAffected == 0 {
+			if err := tx.Where("task_id = ? AND attempt = ?", run.TaskID, run.Attempt).
+				First(&run).Error; err != nil {
+				return nil, err
+			}
+		}
+		if err := tx.Model(&Task{}).Where("id = ?", n.ID).Updates(map[string]any{
+			"attempts": n.Attempts,
+			"status":   StatusPending,
+			"summary":  "",
+			"error":    "",
+		}).Error; err != nil {
+			return nil, err
+		}
+		n.Status = StatusPending
+		n.Summary = ""
+		n.Error = ""
+		// The attempt's run replaces the task's cached counts.
+		if err := tx.Model(&Task{}).Where("id = ?", n.ID).
+			Updates(map[string]any{"total": 0, "passed": 0, "failed": 0, "skipped": 0}).Error; err != nil {
+			return nil, err
+		}
+		n.Total, n.Passed, n.Failed, n.Skipped = 0, 0, 0, 0
+		runs[i] = run
+	}
+	return runs, nil
+}
+
+// nextAttemptTx returns the attempt number to open for n: the number after the
+// highest run on record, never at or below the node's own counter. The counter
+// the caller holds may be stale (two reports for one task, a re-dispatch the
+// caller has not seen), and an attempt number that is already taken would hit
+// the unique index on (task_id, attempt).
+func nextAttemptTx(tx *gorm.DB, n *Task) (int, error) {
+	var highest int
+	if err := tx.Model(&TestRun{}).Where("task_id = ?", n.ID).
+		Select("COALESCE(MAX(attempt), 0)").Scan(&highest).Error; err != nil {
+		return 0, err
+	}
+	if n.Attempts > highest {
+		highest = n.Attempts
+	}
+	return highest + 1, nil
+}
+
+// getTaskTx loads one task inside a transaction.
+func getTaskTx(tx *gorm.DB, id int64) (*Task, error) {
+	var t Task
+	if err := tx.First(&t, id).Error; err != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTaskNotFound
+		}
+		return nil, err
+	}
+	return &t, nil
+}
+
+// listNodesTx returns every node of a graph except the root, retired ones
+// included (the caller filters).
+func listNodesTx(tx *gorm.DB, rootID int64) ([]Task, error) {
 	var tasks []Task
-	if err := s.DB.Where("root_id = ? AND kind <> ?", rootID, TaskKindRoot).
+	if err := tx.Where("root_id = ? AND id <> ?", rootID, rootID).Order("id ASC").
+		Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+// FindRootTaskByCommitEnv returns the root task for a (commit, environment)
+// pair, or ErrTaskNotFound.
+func (s *Store) FindRootTaskByCommitEnv(commitID, envID int64) (*Task, error) {
+	return findRootTaskTx(s.DB, commitID, envID)
+}
+
+// GetTask loads one task by ID.
+func (s *Store) GetTask(id int64) (*Task, error) {
+	return getTaskTx(s.DB, id)
+}
+
+// ListActiveNodes returns the graph's current nodes (the ones the latest
+// dispatch defined), in creation order, the root excluded.
+func (s *Store) ListActiveNodes(rootID int64) ([]Task, error) {
+	var tasks []Task
+	if err := s.DB.Where("root_id = ? AND id <> ? AND retired = ?", rootID, rootID, false).
 		Order("id ASC").Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	return tasks, nil
 }
 
-// GetTask loads one task by ID.
-func (s *Store) GetTask(id int64) (*Task, error) {
-	var t Task
-	if err := s.DB.First(&t, id).Error; err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return nil, ErrTaskNotFound
-		}
+// ListRetiredNodes returns the nodes a later dispatch dropped from the graph:
+// history only — never scheduled, not rolled up into their parent.
+func (s *Store) ListRetiredNodes(rootID int64) ([]Task, error) {
+	var tasks []Task
+	if err := s.DB.Where("root_id = ? AND id <> ? AND retired = ?", rootID, rootID, true).
+		Order("id ASC").Find(&tasks).Error; err != nil {
 		return nil, err
 	}
-	return &t, nil
+	return tasks, nil
 }
 
-// CreateTask inserts a single task row (used for the root before its
-// sub-tasks are created).
-func (s *Store) CreateTask(t *Task) error {
-	if t.Status == "" {
-		t.Status = TaskPending
+// ListChildren returns a node's direct children (the root's sub-tasks, a
+// regression stage's cases), retired ones included, in creation order.
+func (s *Store) ListChildren(parentID int64) ([]Task, error) {
+	var tasks []Task
+	if err := s.DB.Where("parent_id = ?", parentID).Order("id ASC").Find(&tasks).Error; err != nil {
+		return nil, err
 	}
-	return s.DB.Create(t).Error
+	return tasks, nil
 }
 
-// UpdateTaskConfig refreshes a root task's config snapshot and tags
-// (requeue path; the graph is rebuilt from the fresh snapshot).
-func (s *Store) UpdateTaskConfig(id int64, config, tags string) error {
-	return s.DB.Model(&Task{}).Where("id = ?", id).
-		Updates(map[string]any{"config": config, "tags": tags}).Error
-}
+// claimBatch is how many pending nodes the scheduler looks at in one round.
+// The scan walks the whole pending set in batches of this size: a single fixed
+// window would hide every ready node that sits behind enough queued ones —
+// across the whole site, since the query is not scoped to one graph — and a
+// node whose dependency never passes stays pending for ever, so the pending
+// set only ever grows.
+const claimBatch = 64
 
-// DeleteTaskGraph removes a root task, its sub-tasks and their logs. Used on
-// re-dispatch (the graph is rebuilt from the fresh config snapshot).
-func (s *Store) DeleteTaskGraph(rootID int64) error {
-	return s.DB.Transaction(func(tx *gorm.DB) error {
-		var ids []int64
-		if err := tx.Model(&Task{}).Where("root_id = ?", rootID).Pluck("id", &ids).Error; err != nil {
-			return err
-		}
-		if len(ids) > 0 {
-			if err := tx.Where("task_id IN ?", ids).Delete(&TaskLog{}).Error; err != nil {
-				return err
-			}
-		}
-		return tx.Where("root_id = ?", rootID).Delete(&Task{}).Error
-	})
-}
-
-// RedeployRootTask resets a root task for a fresh run: the old sub-tasks and
-// logs are deleted (the graph may have changed), attempts are bumped, state
-// cleared. Returns the reset root.
-func (s *Store) RedeployRootTask(root *Task) error {
-	err := s.DB.Transaction(func(tx *gorm.DB) error {
-		var ids []int64
-		if err := tx.Model(&Task{}).Where("root_id = ?", root.ID).Pluck("id", &ids).Error; err != nil {
-			return err
-		}
-		if len(ids) > 0 {
-			if err := tx.Where("task_id IN ?", ids).Delete(&TaskLog{}).Error; err != nil {
-				return err
-			}
-		}
-		if err := tx.Where("root_id = ? AND kind <> ?", root.ID, TaskKindRoot).
-			Delete(&Task{}).Error; err != nil {
-			return err
-		}
-		return tx.Model(&Task{}).Where("id = ?", root.ID).Updates(map[string]any{
-			"status":      TaskPending,
-			"error":       "",
-			"attempts":    root.Attempts + 1,
-			"started_at":  nil,
-			"finished_at": nil,
-		}).Error
-	})
-	if err != nil {
-		return err
-	}
-	root.Status = TaskPending
-	root.Error = ""
-	root.Attempts++
-	root.StartedAt = nil
-	root.FinishedAt = nil
-	return nil
-}
-
-// ClaimReadyTask atomically claims the oldest pending sub-task whose
-// dependencies are all done: readiness is checked in Go (DependsOn is JSON,
-// not portable SQL), the claim itself is an optimistic UPDATE guarded on
-// status='pending', so concurrent schedulers never double-claim. Returns nil
-// when no ready task exists.
+// ClaimReadyTask atomically claims the oldest pending real task whose
+// dependencies all passed: readiness is checked in Go (DependsOn is JSON, not
+// portable SQL), the claim itself is an optimistic UPDATE guarded on
+// status='pending', so concurrent schedulers never double-claim. The claimed
+// node's in-flight run flips to running in the same transaction. Returns nil
+// when no ready task exists anywhere in the queued set.
 func (s *Store) ClaimReadyTask() (*Task, error) {
-	var candidates []Task
-	if err := s.DB.Where("kind <> ? AND status = ?", TaskKindRoot, TaskPending).
-		Order("id ASC").Limit(64).Find(&candidates).Error; err != nil {
-		return nil, err
-	}
-	for i := range candidates {
-		t := &candidates[i]
-		ready, err := s.taskDepsDone(t)
+	for after := int64(0); ; {
+		var candidates []Task
+		if err := s.DB.Where("virtual = ? AND retired = ? AND status = ? AND id > ?",
+			false, false, StatusPending, after).
+			Order("id ASC").Limit(claimBatch).Find(&candidates).Error; err != nil {
+			return nil, err
+		}
+		if len(candidates) == 0 {
+			return nil, nil
+		}
+		// Keyset paging: the next round continues after the last candidate,
+		// so the walk ends and no row is examined twice.
+		after = candidates[len(candidates)-1].ID
+		ready, err := s.readyDeps(candidates)
 		if err != nil {
 			return nil, err
 		}
-		if !ready {
+		for i := range candidates {
+			t := &candidates[i]
+			if !ready[t.ID] {
+				continue
+			}
+			now := time.Now()
+			claimed := false
+			err = s.DB.Transaction(func(tx *gorm.DB) error {
+				// The attempt counter is part of the guard: a dispatch that
+				// landed after the scan re-arms the node (pending again) and
+				// supersedes the attempt this snapshot describes. Claiming it
+				// would hand the worker a node it cannot report for — the run it
+				// flips is already gone, and the report would land on the old
+				// attempt while the node stays running for ever, with nothing
+				// left able to claim it.
+				res := tx.Model(&Task{}).Where("id = ? AND status = ? AND attempts = ?",
+					t.ID, StatusPending, t.Attempts).
+					Updates(map[string]any{
+						"status":     StatusRunning,
+						"started_at": now,
+					})
+				if res.Error != nil {
+					return res.Error
+				}
+				if res.RowsAffected == 0 {
+					// Lost the race, or the node is not the one this snapshot
+					// describes: either way the next tick reads it fresh.
+					return nil
+				}
+				claimed = true
+				// The attempt's run follows its task: the run page and the matrix
+				// cell show the stage running from here on.
+				if err := tx.Model(&TestRun{}).
+					Where("task_id = ? AND attempt = ? AND status = ?", t.ID, t.Attempts, StatusPending).
+					Updates(map[string]any{"status": StatusRunning, "started_at": now, "finished_at": nil}).Error; err != nil {
+					return err
+				}
+				// Starting a node starts its containers too: every status
+				// change of a real node leaves the virtual ones rolled up, so
+				// a graph whose stage runs reads running rather than queued.
+				return rollupTx(tx, t.RootID)
+			})
+			if err != nil {
+				return nil, err
+			}
+			if !claimed {
+				continue
+			}
+			t.Status = StatusRunning
+			t.StartedAt = &now
+			return t, nil
+		}
+	}
+}
+
+// readyDeps answers, for a batch of candidates, whether every dependency of
+// each passed: a dependency that was skipped does not satisfy it (skipped
+// means an upstream failure stopped it, so running this node would test a
+// broken tree). One query covers the batch — the readiness check reads the
+// same handful of dependency rows over and over as the scan walks the queued
+// set, and its result is a property of those rows alone.
+func (s *Store) readyDeps(candidates []Task) (map[int64]bool, error) {
+	passed := map[int64]bool{}
+	var ids []int64
+	for i := range candidates {
+		for _, d := range candidates[i].DependsOnIDs() {
+			if _, seen := passed[d]; !seen {
+				passed[d] = false
+				ids = append(ids, d)
+			}
+		}
+	}
+	if len(ids) > 0 {
+		var rows []Task
+		if err := s.DB.Select("id", "status").Where("id IN ?", ids).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for i := range rows {
+			passed[rows[i].ID] = rows[i].Status == StatusPassed
+		}
+	}
+	out := make(map[int64]bool, len(candidates))
+	for i := range candidates {
+		ok := true
+		for _, d := range candidates[i].DependsOnIDs() {
+			if !passed[d] {
+				ok = false
+				break
+			}
+		}
+		out[candidates[i].ID] = ok
+	}
+	return out, nil
+}
+
+// SkipTask marks one node skipped for the given reason and closes its
+// in-flight attempt the same way (a skipped node never ran, so its run reads
+// skipped, not failed). The task must be pending — a running or terminal task
+// is left alone.
+//
+// A skipped node is not an outcome the nodes behind it can wait on: they are
+// skipped in the same transaction, exactly as they are after a failed report
+// (FinishAttempt), so nothing is left in the queue that can never be claimed.
+func (s *Store) SkipTask(taskID int64, reason string) error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		task, err := getTaskTx(tx, taskID)
+		if err != nil {
+			return err
+		}
+		if task.Status != StatusPending {
+			return nil
+		}
+		if err := skipTasksTx(tx, []*Task{task}, reason); err != nil {
+			return err
+		}
+		if err := skipDependentsTx(tx, task.RootID, task.ID, reason); err != nil {
+			return err
+		}
+		// The containers above it follow, exactly as they do after a report
+		// (FinishAttempt) or a cascade (SkipDependents): every status change of
+		// a real node leaves the virtual ones rolled up.
+		return rollupTx(tx, task.RootID)
+	})
+}
+
+// skipTasksTx marks nodes skipped and closes the attempt each is on. The
+// callers hold a snapshot of the graph (the cascade walks it before opening
+// its transaction), but nothing here trusts it: the status and the attempt
+// number are re-read inside the transaction, and the write itself is guarded
+// on the row still being pending, so a node the scheduler claimed — or a
+// re-dispatch that opened a new attempt — since the snapshot keeps its own
+// work and its own run. Skipping a running node would close the attempt that
+// is executing and leave the report of the goroutine that ran it landing on
+// an attempt it never touched.
+func skipTasksTx(tx *gorm.DB, tasks []*Task, reason string) error {
+	now := time.Now()
+	for i := range tasks {
+		t := tasks[i]
+		cur, err := getTaskTx(tx, t.ID)
+		if err != nil {
+			if errors.Is(err, ErrTaskNotFound) {
+				continue
+			}
+			return err
+		}
+		if cur.Status != StatusPending {
 			continue
 		}
-		now := time.Now()
-		res := s.DB.Model(&Task{}).Where("id = ? AND status = ?", t.ID, TaskPending).
-			Updates(map[string]any{
-				"status":     TaskRunning,
-				"started_at": now,
-			})
+		res := tx.Model(&Task{}).Where("id = ? AND status = ?", cur.ID, StatusPending).Updates(map[string]any{
+			"status":      StatusSkipped,
+			"summary":     reason,
+			"error":       "",
+			"finished_at": now,
+		})
 		if res.Error != nil {
-			return nil, res.Error
+			return res.Error
 		}
 		if res.RowsAffected == 0 {
-			continue // lost the race; try the next candidate
+			continue // claimed between the read and the update
 		}
-		t.Status = TaskRunning
-		t.StartedAt = &now
-		return t, nil
+		t.Status = StatusSkipped
+		t.Summary = reason
+		t.FinishedAt = &now
+		t.Attempts = cur.Attempts
+		if cur.Virtual {
+			continue
+		}
+		var run TestRun
+		if err := tx.Where("task_id = ? AND attempt = ?", cur.ID, cur.Attempts).First(&run).Error; err != nil {
+			if errors.Is(err, ErrNotFound) || errors.Is(err, gorm.ErrRecordNotFound) {
+				continue // no attempt was ever opened for this node
+			}
+			return err
+		}
+		if err := tx.Model(&TestRun{}).Where("id = ? AND status IN ?", run.ID,
+			[]string{StatusPending, StatusRunning}).
+			Updates(map[string]any{
+				"status":      StatusSkipped,
+				"summary":     reason,
+				"started_at":  now,
+				"finished_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		// The reason goes into the log as well: the stage never ran, and a log
+		// that is empty with no explanation reads as a broken task rather than
+		// as a stage an upstream failure stopped.
+		var seq int
+		if err := tx.Model(&TaskLog{}).Where("task_id = ? AND attempt = ?", cur.ID, cur.Attempts).
+			Select("COALESCE(MAX(seq), 0)").Scan(&seq).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&TaskLog{
+			TaskID: cur.ID, Attempt: cur.Attempts, Seq: seq + 1, RunID: run.ID,
+			Content: "skipped: " + reason + "\n",
+		}).Error; err != nil {
+			return err
+		}
 	}
-	return nil, nil
+	return nil
 }
 
-// taskDepsDone reports whether all dependencies of t are in status done.
-func (s *Store) taskDepsDone(t *Task) (bool, error) {
-	deps := t.DependsOnIDs()
-	if len(deps) == 0 {
-		return true, nil
-	}
-	var count int64
-	if err := s.DB.Model(&Task{}).Where("id IN ? AND status = ?", deps, TaskDone).
-		Count(&count).Error; err != nil {
-		return false, err
-	}
-	return count == int64(len(deps)), nil
-}
-
-// FinishTask sets the terminal state of a task and stamps FinishedAt.
-func (s *Store) FinishTask(id int64, status, errMsg string) error {
-	now := time.Now()
-	return s.DB.Model(&Task{}).Where("id = ?", id).
-		Updates(map[string]any{
-			"status":      status,
-			"error":       errMsg,
-			"finished_at": now,
-		}).Error
-}
-
-// SkipDependents marks every pending sub-task of rootID that (transitively)
-// depends on failedID as skipped, with the given reason. Sub-tasks already
-// running or terminal are left alone.
+// SkipDependents marks every pending node of rootID that (transitively)
+// depends on failedID as skipped, with the given reason. Nodes already
+// running or terminal are left alone, as are retired nodes (they are history)
+// and the virtual containers (the rollup derives those).
 func (s *Store) SkipDependents(rootID, failedID int64, reason string) error {
-	tasks, err := s.ListSubTasks(rootID)
-	if err != nil {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		return skipDependentsTx(tx, rootID, failedID, reason)
+	})
+}
+
+// skipDependentsTx is SkipDependents' body, callable inside a transaction the
+// caller already owns: a report that ends a node (FinishAttempt) skips what
+// stands behind it in the very transaction that records the outcome, so no
+// reader can see a failed node whose dependents are still queued.
+func skipDependentsTx(tx *gorm.DB, rootID, failedID int64, reason string) error {
+	var tasks []Task
+	if err := tx.Where("root_id = ? AND id <> ? AND virtual = ? AND retired = ?",
+		rootID, rootID, false, false).Order("id ASC").Find(&tasks).Error; err != nil {
 		return err
-	}
-	byID := make(map[int64]*Task, len(tasks))
-	for i := range tasks {
-		byID[tasks[i].ID] = &tasks[i]
 	}
 	// BFS from the failed task over reverse dependency edges.
 	blocked := map[int64]bool{failedID: true}
@@ -365,7 +944,7 @@ func (s *Store) SkipDependents(rootID, failedID int64, reason string) error {
 		changed = false
 		for i := range tasks {
 			t := &tasks[i]
-			if blocked[t.ID] || t.Status != TaskPending {
+			if blocked[t.ID] || t.Status != StatusPending {
 				continue
 			}
 			for _, d := range t.DependsOnIDs() {
@@ -377,62 +956,239 @@ func (s *Store) SkipDependents(rootID, failedID int64, reason string) error {
 			}
 		}
 	}
-	for id := range blocked {
-		if id == failedID {
-			continue
-		}
-		if err := s.FinishTask(id, TaskSkipped, reason); err != nil {
-			return err
-		}
-		if t := byID[id]; t != nil {
-			t.Status = TaskSkipped
+	var skipped []*Task
+	for i := range tasks {
+		// failedID itself is the origin of the walk, not one of its
+		// dependents: ending it is the caller's business.
+		if tasks[i].ID != failedID && blocked[tasks[i].ID] && tasks[i].Status == StatusPending {
+			skipped = append(skipped, &tasks[i])
 		}
 	}
-	return nil
+	if len(skipped) == 0 {
+		return nil
+	}
+	if err := skipTasksTx(tx, skipped, reason); err != nil {
+		return err
+	}
+	return rollupTx(tx, rootID)
 }
 
-// RefreshRootStatus re-evaluates the root task's status from its sub-tasks:
-// when every sub-task reached a terminal state, the root is done unless any
-// of them failed or was skipped (then failed). Returns the new root status
-// and whether it changed.
-func (s *Store) RefreshRootStatus(rootID int64) (string, bool, error) {
-	root, err := s.GetTask(rootID)
+// maxReasonLen caps the reason a skipped node carries, matching the runner's
+// cap on the summaries it writes (runner.maxSummaryLen): both end up in the
+// same summary column and the same log line.
+const maxReasonLen = 500
+
+// FailureReason is the reason a node's dependents carry once the node ended
+// without passing: which task stopped them and why.
+func FailureReason(task *Task, res AttemptResult) string {
+	reason := "upstream task " + task.Name
+	if res.Status == StatusSkipped {
+		reason += " was skipped"
+	} else {
+		reason += " failed"
+	}
+	if res.Error != "" {
+		reason += ": " + res.Error
+	}
+	if len(reason) > maxReasonLen {
+		reason = reason[:maxReasonLen]
+	}
+	return reason
+}
+
+// RollupTaskTree recomputes every virtual node of the tree from its
+// non-retired children, bottom-up (the root last). Real nodes are left
+// alone: their status and counts are their latest attempt's.
+func (s *Store) RollupTaskTree(rootID int64) error {
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		return rollupTx(tx, rootID)
+	})
+}
+
+// rollupTx is RollupTaskTree's body: it walks the tree depth-first and
+// rewrites each container from its children.
+func rollupTx(tx *gorm.DB, rootID int64) error {
+	nodes, err := listNodesTx(tx, rootID)
 	if err != nil {
-		return "", false, err
+		return err
 	}
-	var subs []Task
-	if err := s.DB.Where("root_id = ? AND id <> ?", rootID, rootID).Find(&subs).Error; err != nil {
-		return "", false, err
+	root, err := getTaskTx(tx, rootID)
+	if err != nil {
+		return err
 	}
-	terminal, anyBad := 0, false
-	for i := range subs {
-		switch subs[i].Status {
-		case TaskDone, TaskFailed, TaskSkipped:
-			terminal++
-			if subs[i].Status != TaskDone {
-				anyBad = true
+	children := map[int64][]*Task{}
+	for i := range nodes {
+		if nodes[i].Retired {
+			continue // history: not part of the current graph's state
+		}
+		children[nodes[i].ParentID] = append(children[nodes[i].ParentID], &nodes[i])
+	}
+	var walk func(node *Task) error
+	walk = func(node *Task) error {
+		kids := children[node.ID]
+		for _, kid := range kids {
+			if kid.Virtual {
+				if err := walk(kid); err != nil {
+					return err
+				}
 			}
 		}
+		if !node.Virtual {
+			return nil
+		}
+		r := rollupChildren(node.Kind, kids)
+		changed := node.Status != r.Status || node.Summary != r.Summary ||
+			node.Total != r.Total || node.Passed != r.Passed ||
+			node.Failed != r.Failed || node.Skipped != r.Skipped ||
+			!sameTime(node.StartedAt, r.StartedAt) || !sameTime(node.FinishedAt, r.FinishedAt)
+		node.Status, node.Summary = r.Status, r.Summary
+		node.Total, node.Passed, node.Failed, node.Skipped = r.Total, r.Passed, r.Failed, r.Skipped
+		node.StartedAt, node.FinishedAt = r.StartedAt, r.FinishedAt
+		if !changed {
+			return nil
+		}
+		return tx.Model(&Task{}).Where("id = ?", node.ID).Updates(map[string]any{
+			"status":      r.Status,
+			"summary":     r.Summary,
+			"total":       r.Total,
+			"passed":      r.Passed,
+			"failed":      r.Failed,
+			"skipped":     r.Skipped,
+			"started_at":  r.StartedAt,
+			"finished_at": r.FinishedAt,
+		}).Error
 	}
-	if len(subs) == 0 || terminal != len(subs) {
-		return root.Status, false, nil
+	return walk(root)
+}
+
+// virtualRollup is a container's derived state.
+type virtualRollup struct {
+	Status     string
+	Summary    string
+	Total      int
+	Passed     int
+	Failed     int
+	Skipped    int
+	StartedAt  *time.Time
+	FinishedAt *time.Time
+}
+
+// rollupChildren derives a container's state from its children. The rules:
+// any failed child fails the container; otherwise a child already running
+// makes it running; otherwise a queued child keeps it pending; otherwise a
+// skipped child (an upstream failure stopped it) makes the container skipped;
+// everything else passed.
+//
+// A real child counts as one unit; a container child (the root's regression
+// stage) contributes its own children's tally instead of itself, so a
+// container counts the leaves under it and never a wrapper. Timestamps
+// aggregate, so a container answers "how did this stage do?" without a join.
+func rollupChildren(kind string, kids []*Task) virtualRollup {
+	noun := "stages"
+	if kind == TaskKindRegressionStage {
+		noun = "cases"
 	}
-	newStatus := TaskDone
-	if anyBad {
-		newStatus = TaskFailed
+	out := virtualRollup{Status: StatusPending}
+	if len(kids) == 0 {
+		// A container with nothing under it has nothing to report; leave it
+		// pending rather than inventing a pass.
+		out.Summary = "no " + noun
+		return out
 	}
-	if root.Status == newStatus {
-		return newStatus, false, nil
+	var failedNames []string
+	runningKids, pendingKids, skippedKids := 0, 0, 0
+	for _, kid := range kids {
+		if kid.Virtual {
+			out.Total += kid.Total
+			out.Passed += kid.Passed
+			out.Failed += kid.Failed
+			out.Skipped += kid.Skipped
+		} else {
+			out.Total++
+			switch kid.Status {
+			case StatusPassed:
+				out.Passed++
+			case StatusFailed:
+				out.Failed++
+			case StatusSkipped:
+				out.Skipped++
+			}
+		}
+		switch kid.Status {
+		case StatusRunning:
+			runningKids++
+		case StatusPending:
+			pendingKids++
+		case StatusFailed:
+			failedNames = append(failedNames, kid.Name)
+		case StatusSkipped:
+			skippedKids++
+		}
+		out.StartedAt = earlierTime(out.StartedAt, kid.StartedAt)
+		out.FinishedAt = laterTime(out.FinishedAt, kid.FinishedAt)
 	}
-	now := time.Now()
-	updates := map[string]any{"status": newStatus, "finished_at": now}
-	if newStatus == TaskFailed && root.StartedAt == nil {
-		updates["started_at"] = now
+	switch {
+	case out.Failed > 0:
+		out.Status = StatusFailed
+		shown := failedNames
+		if len(shown) > 3 {
+			shown = append(shown[:3], "…")
+		}
+		out.Summary = fmt.Sprintf("%d/%d %s passed; failed: %s",
+			out.Passed, out.Total, noun, strings.Join(shown, ", "))
+	case runningKids > 0:
+		out.Status = StatusRunning
+		out.Summary = fmt.Sprintf("%d/%d %s passed; %d in progress",
+			out.Passed, out.Total, noun, runningKids)
+	case pendingKids > 0:
+		// Nothing has been claimed yet: a container is queued, not running,
+		// until one of its children actually starts (the dashboard cell for a
+		// freshly dispatched commit says "pending").
+		out.Status = StatusPending
+		out.Summary = fmt.Sprintf("%d/%d %s passed; %d queued",
+			out.Passed, out.Total, noun, pendingKids)
+	case skippedKids > 0:
+		out.Status = StatusSkipped
+		out.Summary = fmt.Sprintf("%d/%d %s skipped (upstream failure)",
+			out.Skipped, out.Total, noun)
+	default:
+		out.Status = StatusPassed
+		out.Summary = fmt.Sprintf("%d/%d %s passed", out.Passed, out.Total, noun)
 	}
-	if err := s.DB.Model(&Task{}).Where("id = ?", rootID).Updates(updates).Error; err != nil {
-		return "", false, err
+	return out
+}
+
+// earlierTime/laterTime fold a child's timestamps into a container's window.
+// A nil child bound does not constrain it.
+func earlierTime(cur, v *time.Time) *time.Time {
+	if v == nil {
+		return cur
 	}
-	return newStatus, true, nil
+	if cur == nil || v.Before(*cur) {
+		return v
+	}
+	return cur
+}
+
+func laterTime(cur, v *time.Time) *time.Time {
+	if v == nil {
+		return cur
+	}
+	if cur == nil || v.After(*cur) {
+		return v
+	}
+	return cur
+}
+
+func sameTime(a, b *time.Time) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return a.Equal(*b)
+	}
 }
 
 // ListRootTasks returns the most recent root tasks, newest first, capped at
@@ -449,17 +1205,16 @@ func (s *Store) ListRootTasks(limit int) ([]Task, error) {
 	return tasks, nil
 }
 
-// RootTaskSummary is a root task plus its sub-tasks, as returned by
-// FindRootTasksByCommits.
+// RootTaskSummary is a root task plus its current nodes, as returned by
+// FindRootGraphsByCommits.
 type RootTaskSummary struct {
 	Root *Task
 	Subs []Task
 }
 
-// FindRootGraphsByCommits returns ALL root tasks (done included) for the
-// given environments and commits, with their sub-tasks, keyed by
-// (environment, commit). The full dashboard uses it to show every graph's
-// stages regardless of whether its runs were already reported.
+// FindRootGraphsByCommits returns the root tasks for the given environments
+// and commits, with their ACTIVE nodes (retired ones belong to history, not
+// to the current graph), keyed by (environment, commit).
 func (s *Store) FindRootGraphsByCommits(envIDs, commitIDs []int64) (map[EnvCommit]RootTaskSummary, error) {
 	out := map[EnvCommit]RootTaskSummary{}
 	if len(envIDs) == 0 || len(commitIDs) == 0 {
@@ -474,84 +1229,124 @@ func (s *Store) FindRootGraphsByCommits(envIDs, commitIDs []int64) (map[EnvCommi
 		return out, nil
 	}
 	ids := make([]int64, len(roots))
+	byRoot := map[int64]EnvCommit{}
 	for i := range roots {
 		ids[i] = roots[i].ID
 		key := EnvCommit{Env: roots[i].EnvironmentID, Commit: roots[i].CommitID}
+		byRoot[roots[i].ID] = key
 		out[key] = RootTaskSummary{Root: &roots[i]}
 	}
 	var subs []Task
-	if err := s.DB.Where("root_id IN ? AND kind <> ?", ids, TaskKindRoot).Order("id ASC").Find(&subs).Error; err != nil {
+	if err := s.DB.Where("root_id IN ? AND id <> root_id AND retired = ?", ids, false).
+		Order("id ASC").Find(&subs).Error; err != nil {
 		return nil, err
 	}
 	for i := range subs {
-		for j := range roots {
-			if subs[i].RootID == roots[j].ID {
-				key := EnvCommit{Env: roots[j].EnvironmentID, Commit: roots[j].CommitID}
-				if s, ok := out[key]; ok {
-					s.Subs = append(s.Subs, subs[i])
-					out[key] = s
-				}
-			}
+		key, ok := byRoot[subs[i].RootID]
+		if !ok {
+			continue
 		}
+		s := out[key]
+		s.Subs = append(s.Subs, subs[i])
+		out[key] = s
 	}
 	return out, nil
 }
 
-// FindRootTasksByCommits returns root tasks for the given environments and
-// commits, keyed by (environment, commit), so the dashboard can overlay
-// live state on cells that have no test run yet. Only "live" roots are
-// returned: pending/running, or failed without any reported run (a done root
-// means the runs were reported; the run cell takes over).
-func (s *Store) FindRootTasksByCommits(envIDs, commitIDs []int64) (map[EnvCommit]RootTaskSummary, error) {
-	all, err := s.FindRootGraphsByCommits(envIDs, commitIDs)
-	if err != nil {
-		return nil, err
-	}
-	for key, summary := range all {
-		if summary.Root.Status == TaskDone {
-			delete(all, key) // the reported run takes over the cell
-		}
-	}
-	return all, nil
-}
-
-// ResetStaleRunning marks any tasks left in "running" after a crash back to
-// "pending" (sub-tasks are re-executed; the root is re-derived), so they are
-// retried on the next scheduler cycle. Called at startup. Returns the number
-// of reset rows.
+// ResetStaleRunning marks any node left in "running" after a crash back to
+// "pending" and its in-flight run with it, so the attempt is retried (as the
+// same attempt) on the next scheduler cycle. Called at startup. Returns the
+// number of reset rows.
 func (s *Store) ResetStaleRunning() (int64, error) {
-	res := s.DB.Model(&Task{}).Where("status = ?", TaskRunning).
-		Updates(map[string]any{
-			"status":     TaskPending,
-			"started_at": nil,
-			"error":      "reset after restart",
-		})
-	return res.RowsAffected, res.Error
+	var n int64
+	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		// The graphs that are reset: their containers were rolled up from the
+		// running nodes and have to follow them back to queued.
+		var roots []int64
+		if err := tx.Model(&Task{}).Where("status = ? AND kind <> ?", StatusRunning, TaskKindRoot).
+			Distinct().Pluck("root_id", &roots).Error; err != nil {
+			return err
+		}
+		res := tx.Model(&Task{}).Where("status = ?", StatusRunning).
+			Updates(map[string]any{
+				"status":     StatusPending,
+				"started_at": nil,
+				"error":      "reset after restart",
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		n = res.RowsAffected
+		// The runs follow their tasks: a run whose attempt was interrupted
+		// goes back to pending and is picked up by the next claim. (Its log
+		// continues from the last stored sequence, so nothing is lost.)
+		if err := tx.Model(&TestRun{}).Where("status = ?", StatusRunning).
+			Updates(map[string]any{"status": StatusPending, "started_at": nil, "finished_at": nil}).Error; err != nil {
+			return err
+		}
+		for _, rootID := range roots {
+			if rootID == 0 {
+				continue
+			}
+			// A node retired while it was running has no worker left behind
+			// after the restart, and nothing will ever claim a retired node:
+			// its attempt is closed rather than handed back as queued.
+			if err := retireGhostAttemptsTx(tx, rootID, true); err != nil {
+				return err
+			}
+			if err := rollupTx(tx, rootID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return n, err
 }
 
-// DeleteTasksForEnvironment removes all tasks (and logs) of an environment,
-// in a transaction. Called when an environment is deleted.
+// DeleteTasksForEnvironment removes all tasks of an environment with their
+// runs, artifacts and logs, in a transaction. Called when an environment is
+// deleted.
 func (s *Store) DeleteTasksForEnvironment(envID int64) error {
 	return s.DB.Transaction(func(tx *gorm.DB) error {
-		var ids []int64
-		if err := tx.Model(&Task{}).Where("environment_id = ?", envID).Pluck("id", &ids).Error; err != nil {
+		var taskIDs []int64
+		if err := tx.Model(&Task{}).Where("environment_id = ?", envID).
+			Pluck("id", &taskIDs).Error; err != nil {
 			return err
 		}
-		if len(ids) == 0 {
-			return nil
-		}
-		if err := tx.Where("task_id IN ?", ids).Delete(&TaskLog{}).Error; err != nil {
+		var runIDs []int64
+		if err := tx.Model(&TestRun{}).Where("environment_id = ?", envID).
+			Pluck("id", &runIDs).Error; err != nil {
 			return err
 		}
-		return tx.Where("id IN ?", ids).Delete(&Task{}).Error
+		for _, chunk := range chunkIDs(runIDs, 500) {
+			if err := tx.Where("run_id IN ?", chunk).Delete(&TestArtifact{}).Error; err != nil {
+				return err
+			}
+		}
+		if err := tx.Where("environment_id = ?", envID).Delete(&TestRun{}).Error; err != nil {
+			return err
+		}
+		if len(taskIDs) > 0 {
+			for _, chunk := range chunkIDs(taskIDs, 500) {
+				if err := tx.Where("task_id IN ?", chunk).Delete(&TaskLog{}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return tx.Where("environment_id = ?", envID).Delete(&Task{}).Error
 	})
 }
 
-// ValidateTaskKind reports whether kind is a known task kind.
-func ValidateTaskKind(kind string) bool {
-	switch kind {
-	case TaskKindRoot, TaskKindClone, TaskKindBuild, TaskKindUnit, TaskKindRegression:
-		return true
+// chunkIDs splits ids into batches (SQLite and PostgreSQL both cap how many
+// bind parameters one statement may carry).
+func chunkIDs(ids []int64, size int) [][]int64 {
+	var out [][]int64
+	for len(ids) > size {
+		out = append(out, ids[:size])
+		ids = ids[size:]
 	}
-	return false
+	if len(ids) > 0 {
+		out = append(out, ids)
+	}
+	return out
 }

@@ -121,7 +121,7 @@ func TestMultiCommandScriptBash(t *testing.T) {
 // The list form flows through the whole chain: yaml → merged entry →
 // graph snapshot → generated script.
 func TestCommandListThroughGraph(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "cmake ."
@@ -163,7 +163,7 @@ matrix:
 				!strings.Contains(script, "timeout 3600 bash -c 'ctest -L unit'") {
 				t.Errorf("unit script wrong:\n%s", script)
 			}
-		case "regression":
+		case "regression_case": // the case node, not the virtual container
 			var cc CaseStageConfig
 			if err := json.Unmarshal([]byte(sub.Config), &cc); err != nil {
 				t.Fatal(err)

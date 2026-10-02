@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"net/url"
 	"strings"
 )
@@ -73,6 +74,18 @@ func HTTPURL(repoURL string) string {
 		}
 	}
 	return loc
+}
+
+// resolveRefBounded resolves a ref with the bound the matrix read uses
+// (Service.FetchTimeout). The lookup is a network round trip to a repository
+// the caller named, and a host that accepts the connection and then goes
+// quiet would otherwise hold the dispatching goroutine — a request handler's,
+// for both manual triggers — open for as long as it likes. The caller's own
+// cancellation (a client that went away) still ends it sooner.
+func (s *Service) resolveRefBounded(ctx context.Context, repoURL, ref string, creds *GitCredentials) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.fetchTimeout())
+	defer cancel()
+	return s.resolveRef(ctx, repoURL, ref, creds)
 }
 
 // CredsForRepo returns the credentials to use for repoURL: the site's access

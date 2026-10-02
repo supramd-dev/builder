@@ -18,12 +18,17 @@ how repeated triggers are recorded.
   tags, creating one graph per entry. Graphs are keyed by
   (commit, environment): pushing the same commit again — or re-running
   the dispatch via `POST /api/jobs` after changing environment tags or
-  the YAML — requeues the existing graph: sub-tasks and logs are rebuilt
-  from the fresh snapshot, and test runs of stages the new graph no
-  longer contains are dropped. The YAML read itself is one request for
-  one file through the code host, with the full clone as a fallback, and
-  is capped by a timeout — so a dispatch never scales with the repository,
-  and a silent repository server cannot hold it open (see
+  the YAML — **requeues** the existing graph rather than replacing it.
+  Nodes are matched by their node key (the stage kind, or
+  `regression:<case>`), so a re-dispatch opens a fresh attempt on the
+  nodes that are still defined with the fresh config snapshot, leaves the
+  history of the earlier attempts where it is, and **retires** — never
+  deletes — the nodes the new YAML no longer defines: a dropped case keeps
+  its runs, logs and artifacts, stops being scheduled and drops out of
+  the aggregate. The YAML read itself is one request for one file through
+  the code host, with the full clone as a fallback, and is capped by a
+  timeout — so a dispatch never scales with the repository, and a silent
+  repository server cannot hold it open (see
   [Webhooks](#/docs/webhooks)).
 - **Manual yaml dispatch** (the **Run command** page's *Manual test*
   tab, first section — one ref input and one button — or
@@ -47,8 +52,9 @@ how repeated triggers are recorded.
   you may use — your own, plus every one for an administrator — can be
   selected (all are preselected); one graph is created per environment.
   Unlike the yaml flow this is not a tag match: the environment is named by
-  the caller, and the endpoint itself accepts any enabled environment id.
-  Unlike webhook pushes, every manual dispatch records a **fresh commit
+  the caller, and the endpoint refuses an environment the caller may not
+  manage (`403`), because the stage commands run there with its owner's
+  private key. Unlike webhook pushes, every manual dispatch records a **fresh commit
   row**: re-running the same ref gives each attempt its own matrix row
   (the commit message carries the dispatch time), and older rows of the
   same (repo, sha) are marked **superseded** — still listed on the
@@ -69,40 +75,64 @@ pickers of the **Run command** page do not cover the same set:
 |---|---|
 | Webhook push, **manual yaml dispatch** | every **enabled** environment of the site, one per yaml entry, matched by tags — a run may land on a machine another account registered |
 | **Exec / script** tab (**Run command**) | the environments you may use: your own, plus every one for an administrator — the command logs in with the environment's private key |
-| *Manual test* tab, **manual dispatch** | the same set (the picker); the environment is chosen explicitly, not matched |
+| *Manual test* tab, **manual dispatch** | the same set (the picker, and the endpoint refuses a foreign id); the environment is chosen explicitly, not matched |
 
 The Runner Envs list and the dashboard matrix always show the whole pool,
 labelled with each environment's owner.
 
-A graph is a root task plus a small DAG of sub-tasks:
+A graph is a root task plus a small tree of sub-tasks:
 
 ```
-root (test <sha> on <environment>)
- └─ clone repositories          # server clones, uploads a tar over SSH
-     └─ build                   # the build command, in its workdir
-         ├─ unit tests          # per-stage command, own timeout
-         ├─ regression: heat    # one sub-task per selected preset
-         └─ regression: poisson
+root (test <sha> on <environment>)   # virtual: the whole pipeline
+ ├─ clone repositories               # server clones, uploads a tar over SSH
+ ├─ build                            # the build command, in its workdir
+ ├─ unit tests                       # per-stage command, own timeout
+ └─ regression       (virtual)       # the stage container: aggregates its cases
+     ├─ regression: heat             # one sub-task per selected preset
+     └─ regression: poisson
 ```
 
 - Every node is a row in the same `tasks` table; the `kind` column
-  distinguishes root / clone / build / unit / regression (the list is open —
-  future kinds, e.g. performance tests, only add a constant and an
-  executor). Dependencies are stored as JSON task IDs.
+  distinguishes root / clone / build / unit / regression (the container) /
+  regression_case (the list is open — future kinds, e.g. performance
+  tests, only add a constant and an executor).
+- Two relations are stored, and they mean different things. `parent_id` is
+  the **tree**: where a node nests, which is what the graph page draws and
+  what the rollup walks. `depends_on` is the **scheduling DAG**: a JSON
+  array of task ids that must be finished before the node is ready. A
+  container is never a dependency (its state is derived, so an edge to it
+  could never become ready) and neither is the root: `UpsertTaskGraph`
+  rejects both. In practice a case depends on build (or on clone when the
+  entry has no build stage), and everything else depends on the node
+  before it.
 - The regression stage is expanded at graph build time: each preset the
   entry selects (`regression.use`, minus `disable`; see
-  [the test matrix](#/docs/test-matrix)) becomes its own sub-task named
-  `regression: <preset>`, depending on build, with its own command,
-  workdir, timeout and artifact files. All cases of an entry share **one**
-  parent regression run per (environment, commit); each case is recorded
-  as a **child test run** under it (status, message, duration) and the
-  case's artifact files attach to that child run.
+  [the test matrix](#/docs/test-matrix)) becomes a **real task of its own**
+  named `regression: <preset>`, nested under the virtual container,
+  depending on build, with its own command, workdir, timeout and artifact
+  files. Cases are tasks rather than rows of a parent's result, which is
+  what lets them run in parallel, keep a log and an attempt history of
+  their own, and survive a re-dispatch.
+- The virtual nodes — the root and the regression container — run nothing
+  and record nothing: their status, counts, summary and timestamps are
+  always **rolled up** from their children, so they cannot drift from what
+  the stages did. A container counts real children as one unit each and a
+  virtual child by its own children's tally, so the regression stage's
+  numbers are the cases' and the root's are the whole pipeline's.
 - Each node stores a **snapshot** of its config, so later YAML edits or
   manual re-dispatches do not affect already-running graphs.
-- When a sub-task fails, everything that (transitively) depends on it is
-  marked **skipped**; the dashboard still shows a ✗ cell for the skipped
-  test stages. Stages that are not part of the graph at all (an empty
-  manual stage command) show "—" instead — they were never requested.
+- When a sub-task ends without passing — it failed, or it was itself
+  reported `skipped` — everything that (transitively) depends on it is
+  marked **skipped**, with the reason in its summary and a matching line
+  in its log (`skipped: upstream task build failed`). A dependency must
+  pass before the node behind it is ready, so a node that will never pass
+  leaves nothing to wait for: the skip happens in the same transaction
+  that records the outcome, and no queue is left that cannot drain.
+  `skipped` is a real status of the same vocabulary as `passed` and
+  `failed`, not a display convention: the node never ran, and the
+  dashboard says so. Stages that are not part of the graph at all (an
+  empty manual stage command, or a case a later dispatch dropped) are not
+  "skipped" — they are simply not there, and their cells show "—".
 
 ## Execution pool
 
@@ -135,11 +165,15 @@ root (test <sha> on <environment>)
   conclusion, otherwise the exit code plus the log tail is stored. The
   outcome is recorded as a test run (see
   [Dashboard and reporting](#/docs/dashboard)).
-- **regression: <preset>**: one sub-task per case — the preset's command
-  runs in the preset's working directory with `MD_CASE` exported; the
-  case's artifact files are collected onto the case's child run. Each case
-  records its child run under the shared parent regression run; the parent
-  aggregates.
+- **regression: <preset>**: the preset's command runs in the preset's
+  working directory with `MD_CASE` exported, and the case's artifact files
+  are collected onto the case's **own** run. Nothing is written to a parent
+  run: the regression container above is virtual, and its "N/M cases
+  passed; failed: heat" summary is the rollup of the case nodes under it.
+- A stage that was **skipped** never opens an SSH session at all: the
+  scheduler closes its pending attempt with the reason, which is one log
+  line and a summary — so a stage stopped by an upstream failure is
+  distinguishable from one that ran and failed.
 
 Every stage script runs through the same preamble:
 
@@ -161,30 +195,53 @@ separate SSH session, which is why the preamble re-runs for every one.
 
 ## Logs
 
-Every sub-task's output is stored incrementally in the `task_logs` table
-(one row per chunk: at least one per 2 seconds or 32 KiB). The frontend
+Every sub-task's output is stored incrementally in the `task_logs` table,
+**keyed by (task, attempt, seq)**: one row per chunk, at least one per 2
+seconds or 32 KiB. Keying on the attempt is what keeps a retry's output
+apart from the try before it — following the current attempt and reading
+an earlier one are the same query with a different `attempt`. The frontend
 polls `GET /api/tasks/{id}/log?after=<seq>` for new chunks, so a running
-task can be followed live. Logs are capped at 8 MiB per task; the full log
-lives server-side, the UI shows the tail.
+task can be followed live; `GET /api/tasks/{id}/log/download` streams the
+whole attempt as one text file, built from the stored chunks a batch at a
+time. A read returns one page (1000 chunks) and the viewer asks for the
+next one while pages come back full, so a long log is read to its end
+rather than up to wherever the first page stopped; when a stage finishes
+the viewer reads once more before the timer stops, which is what shows
+the last lines and the summary the stage ended with. Logs are capped at
+8 MiB per attempt; the full log lives server-side, the UI shows the tail.
 
 ## Task API
 
-- `GET /api/tasks/{id}` — one task; a root carries its sub-task list plus
+- `GET /api/tasks/{id}` — one task; a root carries its node list (the
+  current graph plus the retired nodes a later dispatch dropped) and the
   commit/environment context.
-- `GET /api/tasks/{id}/log?after=<seq>` — log chunks after the given
-  sequence (incremental, for live-following).
+- `GET /api/tasks/{id}/runs` — the task's attempts, newest first; the log
+  viewer's attempt switcher. Virtual tasks answer with an empty list.
+- `GET /api/tasks/{id}/log?after=<seq>&attempt=<n>` — log chunks after the
+  given sequence (incremental, for live-following). Without `attempt` the
+  current one is read.
+- `GET /api/tasks/{id}/log/download?attempt=<n>` — the attempt's whole log
+  as a `text/plain` attachment.
+- `GET /api/tasks/{id}/artifacts/zip` — the subtree's latest attempt at the
+  archive root, every descendant's files under a directory named after it;
+  a regression stage downloads as one bundle of its cases (see
+  [Dashboard and reporting](#/docs/dashboard)).
 
-The dashboard matrix cells link to the run detail whenever a run exists
-(placeholder runs cover every queued/running stage — see
-[Live runs](#live-runs-and-the-placeholder-lifecycle)); only a cell with
-no run at all falls back to the task detail.
+Reading any of these is open to every signed-in user: the matrix is
+site-wide, so its drill-down pages are too. A virtual node's cell in the
+matrix carries `runId` 0 (it has no run), so those link to the task page
+instead — and every real node has a run from the moment it is dispatched,
+see below.
 
 ## Report handling
 
-Each test stage records its run for the dashboard: the status, a summary,
-the aggregate counts and — when the stage configured `artifacts` files —
-each raw artifact file stored as its own artifact. A graph's root is done
-when all sub-tasks are done, failed otherwise.
+A stage's outcome is written in exactly one place: `store.FinishAttempt`,
+which records the attempt's run (status, summary, error, counts, artifacts,
+timings), refreshes the node's cached values from the same numbers and
+rolls the virtual containers back up. The runner calls it in process when a
+stage ends; `POST /api/test-runs` calls it for a report that arrives over
+HTTP. One write path means the node, its run and the containers above it
+can never disagree.
 
 - A sub-task lands in **failed** (with the error on the task and in the
   task detail) when the SSH connection fails, the build fails or the stage
@@ -192,114 +249,114 @@ when all sub-tasks are done, failed otherwise.
   visible on the dashboard, not in the task status.
 - **Unit runs** fail when the command exited non-zero **or** the parsed
   artifact files report failed cases (ctest-style wrappers can swallow the
-  test binary's exit code).
+  test binary's exit code). They carry aggregate counts only (total /
+  passed / failed / skipped, with `total` counting every case once,
+  skipped included), summed across all configured artifact files; the
+  per-test list is parsed in the browser from the stored artifact file.
 - **Regression cases** are judged by their command's exit status alone
-  (exit 0 → passed, anything else — timeout, SSH failure, non-zero — →
-  failed); their `artifacts` files are stored on the case's child run for
-  display and never flip the verdict. The parent run aggregates its
-  cases: any failed case → the cell shows ✗ (see
-  [the test matrix](#/docs/test-matrix)).
-- Unit runs carry aggregate counts only (total / passed / failed /
-  skipped), summed across all configured artifact files. The per-case list
-  is parsed in the browser from the stored artifact files (see [the test
-  matrix](#/docs/test-matrix)); the run's `taskId` links back to the
-  stage's task log (stdout).
-- Regression runs aggregate **incrementally**: each case sub-task upserts
-  its child run (re-runs of the same case replace it), and the parent
-  run's counts/status/summary are recomputed over all child runs seen so
-  far ("3/4 cases passed; failed: heat"). A re-dispatch resets the run
-  before the new cases land.
+  (exit 0 → passed, anything else — timeout, SSH failure, non-zero →
+  failed); their `artifacts` files are stored on the case's own run for
+  display and never flip the verdict. The container above them rolls up:
+  any failed case fails the stage, and its summary reads
+  "3/4 cases passed; failed: heat".
+- A container's summary always describes its rollup rather than a report:
+  "3/4 cases passed; 1 in progress", "2/4 cases passed; 2 queued",
+  "4/4 cases skipped (upstream failure)", "4/4 cases passed".
 - There is no automatic retry: re-push the commit or re-run the dispatch
-  to retry.
+  to start a new attempt of every node.
 
 ### Artifacts and the regression extension
 
 Result files live in one `test_artifacts` table keyed by run — a run can
 have several. Artifacts belong to the run that produced them: a unit
 stage's results files attach to the unit run; a regression case's files
-attach to the case's own child run. Regression cases are nested runs, so
-this is the natural extension point: their per-case logs and series/plot
-data will be stored as `log` / `series` artifacts behind the same table
-and fetched by an "analyze" view in the browser.
+attach to the case's own run. Because a case is a task with a run of its
+own, this is where the regression extension lands without a new concept:
+per-case logs and series/plot data will be stored as `log` / `series`
+artifacts behind the same table, hanging off the case's run, and fetched by
+an "analyze" view in the browser.
 
-### Runs with and without a task link
+## The attempt lifecycle
 
-A run's `taskId` (and the derived `rootTaskId`) decides what its detail
-page can show. Two kinds of runs exist:
-
-- **Graph-linked runs** (`taskId ≠ 0`): reported by the runner, they carry
-  the stage sub-task's ID. Their detail page shows the stage's stdout log
-  (`GET /api/tasks/{taskId}/log`) and a breadcrumb link to the task graph;
-  the dashboard cell links to the run detail. Regression case **children**
-  carry their own case sub-task's ID, so each case row opens a run detail
-  with that case's log.
-- **External reports** (`taskId = 0`, `rootTaskId = 0`): a run recorded
-  without a task graph behind it — e.g. a CI system pushing its results
-  through the report API directly. There is no server-side task, hence no
-  stdout log and no graph page; the detail page shows only the run's own
-  summary, counts, artifacts and (for regression) the case list. The
-  dashboard cell links to the run detail as well, and falls back to the
-  task detail only when no run exists.
-
-## Live runs and the placeholder lifecycle
-
-A graph-linked run exists **before** its stage executes. At dispatch time
-the runner seeds a **placeholder run** per stage kind (status `pending`,
-linked to the stage's first sub-task via `taskId`; regression additionally
-gets one `pending` child run per preset, so the detail page lists every
-case from the start):
+A run is created **before** its stage executes, because the node it belongs
+to is created with it. At dispatch time every real node opens an attempt
+(`BeginAttempt`): the node goes back to `pending` with empty counts, and an
+attempt-N run in status `pending` is created for it:
 
 ```
-dispatch    claim          outcome
-pending  →  running    →   passed/failed (stage report)
-                         ↘ skipped      (an upstream stage failed)
+dispatch          claim                     outcome
+pending (run)  →  running            →        passed/failed/skipped
+                  (ClaimReadyTask)            (FinishAttempt)
 ```
 
-- When the scheduler claims the stage sub-task, its placeholder flips
-  `pending → running` — the matrix cell shows the spinner and the run
-  detail page follows live (3 s run polling, 2 s log polling).
-- When the stage finishes, its report **replaces** the placeholder in
-  place (same row, every field overwritten): the status becomes terminal
-  and the log stops growing.
-- When an upstream stage fails, the skipped stage's placeholder is
-  replaced by a failed run whose summary starts with `skipped: …` (and the
-  regression children by skipped child runs). A placeholder that fails to
-  even build its stage script is closed out the same way.
-- The dashboard cell therefore links to the **run detail in every state**
-  (queued, running, passed, failed, skipped); the task graph is reachable
-  from there via the breadcrumb. Only cells without any run at all (a
-  stage not part of the graph, "—") have nothing to link to.
-- `pending`/`running` are the only non-terminal run statuses; anything
-  else is final until a re-dispatch resets it (the placeholder lifecycle
-  above starts over).
+- The scheduler claims ready nodes atomically (`ClaimReadyTask`), flipping
+  the node and its in-flight run to `running` in one transaction, and rolls
+  the containers back up in the same one — a graph whose stage runs reads
+  `running`, not queued. The matrix cell shows the spinner and the run page
+  follows live (3 s run polling, 2 s log polling). The scheduler looks at
+  the whole queue rather than a fixed window of it, so a ready node is
+  handed out however many unclaimable ones sit in front of it.
+- When the stage ends, `FinishAttempt` closes that run with the outcome:
+  the status becomes terminal, the log stops growing, and the artifacts the
+  runner fetched back are attached to the run — the attempt that produced
+  them, not the task as a whole.
+- When an upstream stage fails or is reported `skipped`, the dependents'
+  pending attempts are closed as **skipped** with the reason (one summary,
+  one log line) in the same transaction, and the containers roll up to
+  `skipped` or `failed` accordingly.
+- A report for a task whose attempt already ended does **not** overwrite it:
+  the store opens the **next attempt** — a new run, with the task's counter
+  bumped — and both stay readable. That is the retry path, and it is why a
+  run's `attempt` number is part of its identity: `(task, attempt)` is
+  unique, logs are keyed by it, and the run page can offer the earlier
+  tries.
+- A **re-dispatch** while a stage is in flight re-arms the node on a new
+  attempt and closes the displaced attempt's run (status `skipped`,
+  summary "superseded by a new dispatch of this task" — the word names the
+  attempt, not the greyed-out commit row of a re-dispatched SHA): nothing
+  else would ever close it. The runner reports the attempt it actually ran
+  — the report names its attempt number — so the old attempt keeps the
+  real outcome and the new one is left for the scheduler to run for real.
+- `pending`/`running` are the only non-terminal statuses; anything else is
+  final. Re-running a dispatch opens fresh attempts; nothing is edited in
+  place.
 
 ## Demo seeds and frozen live graphs
 
 The `seed` subcommand populates a demo database with two kinds of graphs,
-which are also the reference for how the two scheduling modes behave:
+which are also the reference for how the two scheduling modes behave. It
+builds them with the production graph builder and finishes them through
+the same store calls the runner uses (`FinishAttempt`, and the skip path
+for stages an upstream failure stopped), so a seeded matrix is
+indistinguishable from a dispatched one — including the attempts, the
+per-attempt logs and the artifacts.
 
-- **Finished graphs** (older commits): terminal tasks with log chunks, and
-  their runs reported with the matching `taskId` links. Nothing here is
-  claimable.
+- **Finished graphs** (older commits): every real node on a terminal
+  attempt, with its log chunks and (for the unit and build stages) the
+  files the runner would have fetched back. Nothing here is claimable.
 - **Live graphs** (the newest commit): an in-flight snapshot — one graph
-  mid-build (clone done, build `running` with partial output, tests
-  queued), one fully queued. Their placeholder runs carry real task IDs,
-  so the matrix cells, run detail pages and log polling all behave exactly
-  like a genuine dispatch.
+  mid-build (clone finished, build `running` with partial output, the
+  test stages still queued), one not claimed at all. Their attempts are
+  real runs in `pending`/`running`, so the matrix cells, the run pages and
+  log polling behave exactly like a genuine dispatch.
 
 The scheduler treats the live graphs like any other graph; the difference
 is entirely in how the demo is served:
 
 - With `worker.enabled: false` (or `MD_BUILDER_DISABLE_WORKER=1`) the pool
-  is off: the snapshot is
-  frozen forever — no task is ever claimed, placeholder runs stay
-  pending/running, logs stop growing. Use this for a stable demo.
+  is off: the snapshot is frozen forever — no node is ever claimed, the
+  pending/running attempts stay where they are, logs stop growing. Use
+  this for a stable demo.
 - With workers enabled, the pending stages of a live graph **are claimed
   and genuinely executed** (and fail on the unreachable demo SSH host):
-  the placeholders flip through running to failed, dependents are skipped
-  and reported, and the root becomes failed. Note that a restart also
-  resets `running` tasks to pending (crash recovery), so a frozen
-  "running" demo becomes schedulable again whenever the pool is on.
+  the attempts flip through running to failed, dependents are skipped and
+  reported, and the root becomes failed. Note that a restart also resets
+  `running` tasks to pending (crash recovery), so a frozen "running" demo
+  becomes schedulable again whenever the pool is on.
+- Re-seeding is idempotent: commits are deduplicated by (repo, sha) and a
+  cell whose graph is already finished is left alone (`-force` deletes the
+  demo environments' tasks, with their runs, logs and artifacts, and
+  rebuilds every graph from scratch).
 
 ## Prerequisites
 

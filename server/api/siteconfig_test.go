@@ -6,7 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"gorm.io/gorm"
+
+	"md-builder/server/store"
 )
 
 func TestSiteConfigAPIFlow(t *testing.T) {
@@ -590,5 +595,148 @@ func TestSiteConfigWebhookToken(t *testing.T) {
 	}
 	if cfg["codeRepo"] != "https://gitlab.com/group/other" {
 		t.Fatalf("code repo not updated: %v", cfg["codeRepo"])
+	}
+}
+
+// TestSiteConfigUpdateKeepsAConcurrentlyRotatedToken interleaves the two
+// writers of the configuration row: a webhook token rotated while an update
+// request is in flight (after the handler read the row, before its write)
+// has to survive that update. An update owns the repository and timezone
+// columns; writing the whole row back from its own copy would revert the
+// rotation, and the administrator would be copying a token that no longer
+// works into GitLab.
+func TestSiteConfigUpdateKeepsAConcurrentlyRotatedToken(t *testing.T) {
+	f := newUserFixture(t)
+	adminCookie := f.login(t, "root", "root-pass")
+
+	rec := doJSON(t, f.mux, http.MethodPut, "/api/site-config",
+		`{"codeRepo":"https://gitlab.com/group/code"}`, adminCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed update: %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	// The rotation lands inside the update's own write: the callback runs
+	// after the handler has loaded the row and before its UPDATE reaches the
+	// table, which is the window a concurrent rotation falls into.
+	var rotated atomic.Bool
+	const rotatedToken = "rotated-while-the-update-was-in-flight"
+	callbackName := t.Name() + ":rotate-webhook-token"
+	if err := f.store.DB.Callback().Update().Before("gorm:update").Register(callbackName,
+		func(tx *gorm.DB) {
+			if tx.Statement.Table != "site_configs" || !rotated.CompareAndSwap(false, true) {
+				return
+			}
+			if err := f.store.UpdateSiteConfig(
+				&store.SiteConfig{WebhookToken: rotatedToken}, "WebhookToken"); err != nil {
+				t.Errorf("concurrent rotation: %v", err)
+			}
+		}); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+	t.Cleanup(func() { _ = f.store.DB.Callback().Update().Remove(callbackName) })
+
+	rec = doJSON(t, f.mux, http.MethodPut, "/api/site-config",
+		`{"codeRepo":"https://gitlab.com/group/other","timezone":"Asia/Shanghai"}`, adminCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !rotated.Load() {
+		t.Fatal("the rotation never ran: the callback did not see the update")
+	}
+
+	stored, err := f.store.GetSiteConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.WebhookToken != rotatedToken {
+		t.Fatalf("webhook token = %q after the update, want the rotated %q",
+			stored.WebhookToken, rotatedToken)
+	}
+	if stored.CodeRepo != "https://gitlab.com/group/other" || stored.Timezone != "Asia/Shanghai" {
+		t.Fatalf("the update itself did not land: %+v", stored)
+	}
+
+	// The response reports the row as it now stands, so the administrator
+	// copies the token that is actually in force.
+	var res struct {
+		WebhookToken string `json:"webhookToken"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.WebhookToken != rotatedToken {
+		t.Fatalf("response webhook token = %q, want the rotated %q", res.WebhookToken, rotatedToken)
+	}
+	// ... and it is the token the webhook endpoint accepts.
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/gitlab",
+		strings.NewReader(`{"object_kind":"pipeline"}`))
+	req.Header.Set("X-Gitlab-Token", rotatedToken)
+	whRec := httptest.NewRecorder()
+	f.mux.ServeHTTP(whRec, req)
+	if whRec.Code != http.StatusOK {
+		t.Fatalf("the rotated token should be accepted: %d, body %s", whRec.Code, whRec.Body.String())
+	}
+}
+
+// TestSiteConfigRotationKeepsAConcurrentRepoUpdate is the same interleaving
+// the other way round: rotating the webhook token must not revert a repository
+// change that landed while the rotation was in flight. The rotation owns the
+// token column alone; writing the whole row would undo the change and the next
+// push would be read from the wrong repository.
+func TestSiteConfigRotationKeepsAConcurrentRepoUpdate(t *testing.T) {
+	f := newUserFixture(t)
+	adminCookie := f.login(t, "root", "root-pass")
+
+	rec := doJSON(t, f.mux, http.MethodPut, "/api/site-config",
+		`{"codeRepo":"https://gitlab.com/group/code"}`, adminCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("seed update: %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	var landed atomic.Bool
+	const newRepo = "https://gitlab.com/group/moved"
+	callbackName := t.Name() + ":update-code-repo"
+	if err := f.store.DB.Callback().Update().Before("gorm:update").Register(callbackName,
+		func(tx *gorm.DB) {
+			if tx.Statement.Table != "site_configs" || !landed.CompareAndSwap(false, true) {
+				return
+			}
+			if err := f.store.UpdateSiteConfig(&store.SiteConfig{CodeRepo: newRepo}, "CodeRepo"); err != nil {
+				t.Errorf("concurrent repository update: %v", err)
+			}
+		}); err != nil {
+		t.Fatalf("register callback: %v", err)
+	}
+	t.Cleanup(func() { _ = f.store.DB.Callback().Update().Remove(callbackName) })
+
+	rec = doJSON(t, f.mux, http.MethodPost, "/api/site-config/webhook-token", "", adminCookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotate: %d, body %s", rec.Code, rec.Body.String())
+	}
+	if !landed.Load() {
+		t.Fatal("the repository update never ran: the callback did not see the rotation")
+	}
+	var res struct {
+		WebhookToken string `json:"webhookToken"`
+		CodeRepo     string `json:"codeRepo"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.WebhookToken) != 64 {
+		t.Fatalf("rotation did not produce a token: %q", res.WebhookToken)
+	}
+	stored, err := f.store.GetSiteConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CodeRepo != newRepo {
+		t.Fatalf("code repo = %q after the rotation, want the concurrent %q", stored.CodeRepo, newRepo)
+	}
+	if stored.WebhookToken != res.WebhookToken {
+		t.Fatalf("stored token = %q, want the rotated %q", stored.WebhookToken, res.WebhookToken)
+	}
+	if res.CodeRepo != newRepo {
+		t.Fatalf("response code repo = %q, want the concurrent %q", res.CodeRepo, newRepo)
 	}
 }

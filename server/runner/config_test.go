@@ -6,11 +6,11 @@ import (
 	"testing"
 )
 
-// md-builder.yaml v2 parsing: presets, use/disable expansion, workdir and
+// md-builder.yaml v3 parsing: presets, use/disable expansion, workdir and
 // validation.
 
-func TestParseConfigV2Presets(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+func TestParseConfigV3Presets(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -63,8 +63,8 @@ matrix:
 	}
 }
 
-func TestParseConfigV2UseDisable(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+func TestParseConfigV3UseDisable(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -93,8 +93,8 @@ matrix:
 	}
 }
 
-func TestParseConfigV2UnknownPreset(t *testing.T) {
-	if _, err := ParseConfig([]byte(`version: 2
+func TestParseConfigV3UnknownPreset(t *testing.T) {
+	if _, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -107,7 +107,7 @@ matrix:
 `)); err == nil || !strings.Contains(err.Error(), "unknown preset") {
 		t.Errorf("unknown use preset should error: %v", err)
 	}
-	if _, err := ParseConfig([]byte(`version: 2
+	if _, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -122,8 +122,8 @@ matrix:
 	}
 }
 
-func TestParseConfigV2PresetNeedsCommand(t *testing.T) {
-	if _, err := ParseConfig([]byte(`version: 2
+func TestParseConfigV3PresetNeedsCommand(t *testing.T) {
+	if _, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -137,9 +137,9 @@ matrix:
 	}
 }
 
-func TestParseConfigV2NoStages(t *testing.T) {
+func TestParseConfigV3NoStages(t *testing.T) {
 	// Unit missing and regression resolving to nothing.
-	if _, err := ParseConfig([]byte(`version: 2
+	if _, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -155,18 +155,38 @@ matrix:
 	}
 }
 
-func TestParseConfigV2VersionCheck(t *testing.T) {
-	if _, err := ParseConfig([]byte(`version: 1
-matrix:
+// The schema version gate is a hard cut: only ConfigVersion parses, and the
+// previous version (2) is refused exactly like an older or unknown one. The
+// error names the version that was found so a stale config is diagnosable.
+func TestParseConfigV3VersionCheck(t *testing.T) {
+	body := func(version string) []byte {
+		return []byte(version + `matrix:
   - tags: [cpu]
+    build: {command: "make"}
     unit: {command: "ctest"}
-`)); err == nil || !strings.Contains(err.Error(), "version must be 2") {
-		t.Errorf("version 1 should be rejected: %v", err)
+`)
+	}
+	for _, version := range []string{"version: 1\n", "version: 2\n", "version: 4\n", ""} {
+		label := strings.TrimSpace(version)
+		if label == "" {
+			label = "(missing version)"
+		}
+		if _, err := ParseConfig(body(version)); err == nil ||
+			!strings.Contains(err.Error(), "version must be 3") {
+			t.Errorf("%s should be rejected: %v", label, err)
+		}
+	}
+	entries, err := ParseConfig(body("version: 3\n"))
+	if err != nil {
+		t.Fatalf("version 3 should be accepted: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
 }
 
-func TestParseConfigV2Workdirs(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+func TestParseConfigV3Workdirs(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make -C src"
@@ -196,8 +216,8 @@ matrix:
 // description; the regression section description labels the parent run
 // while each preset's description labels its case. A build description
 // falls back to defaults.build.description like the other build fields.
-func TestParseConfigV2StageDescriptions(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+func TestParseConfigV3StageDescriptions(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -244,8 +264,8 @@ matrix:
 	}
 }
 
-func TestParseConfigV2PresetTimeoutDefault(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+func TestParseConfigV3PresetTimeoutDefault(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -320,8 +340,73 @@ func caseNames(cases []RegressionCase) []string {
 	return out
 }
 
-func TestParseConfigV2CommandList(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+// TestParseConfigV3CaseTimeoutPrecedence pins the chain a regression case's
+// command timeout resolves through: the preset's own timeout, else the matrix
+// entry's, else the defaults' one, else the package default. The entry level
+// is the one that matters — a case resolved without it keeps the defaults'
+// value (or the package default, an hour), so an entry with `timeout: 60`
+// would run its cases for far longer than the entry allows.
+func TestParseConfigV3CaseTimeoutPrecedence(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
+presets:
+  own:
+    command: "./own"
+    timeout: 120
+  plain:
+    command: "./plain"
+defaults:
+  build:
+    command: "make"
+  timeout: 900
+matrix:
+  - tags: [cpu]
+    timeout: 60
+    regression:
+      use: [own, plain]
+  - tags: [gpu]
+    regression:
+      use: [plain]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("want 2 entries, got %d", len(entries))
+	}
+	if got := entries[0].Regression[0].Timeout; got != 120 {
+		t.Errorf("preset's own timeout = %d, want 120", got)
+	}
+	if got := entries[0].Regression[1].Timeout; got != 60 {
+		t.Errorf("case of an entry with timeout 60 = %d, want 60 (the entry's, not the defaults')", got)
+	}
+	if got := entries[1].Regression[0].Timeout; got != 900 {
+		t.Errorf("case falling through to defaults = %d, want 900", got)
+	}
+
+	// Nothing to fall through to: the package default.
+	entries, err = ParseConfig([]byte(`version: 3
+defaults:
+  build:
+    command: "make"
+presets:
+  plain:
+    command: "./plain"
+matrix:
+  - tags: [cpu]
+    regression:
+      use: [plain]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entries[0].Regression[0].Timeout; got != DefaultTimeoutSeconds {
+		t.Errorf("case with nothing to fall through to = %d, want the package default %d",
+			got, DefaultTimeoutSeconds)
+	}
+}
+
+func TestParseConfigV3CommandList(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -364,8 +449,8 @@ matrix:
 	}
 }
 
-func TestParseConfigV2CommandListInvalid(t *testing.T) {
-	_, err := ParseConfig([]byte(`version: 2
+func TestParseConfigV3CommandListInvalid(t *testing.T) {
+	_, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -381,7 +466,7 @@ matrix:
 	if err == nil || !strings.Contains(err.Error(), "command must be a string or a list of strings") {
 		t.Errorf("mapping command should fail validation: %v", err)
 	}
-	_, err = ParseConfig([]byte(`version: 2
+	_, err = ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make"
@@ -395,8 +480,8 @@ matrix:
 	}
 }
 
-func TestParseConfigV2BuildArtifacts(t *testing.T) {
-	entries, err := ParseConfig([]byte(`version: 2
+func TestParseConfigV3BuildArtifacts(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
 defaults:
   build:
     command: "make -C src"

@@ -116,7 +116,23 @@ func (s *Server) triggerJobs(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		c := &store.Commit{Repo: in.CommitRepo, SHA: in.CommitSHA}
+		// The row's repo is what the dashboard's matrix filter matches on, so
+		// it is stored the way the webhook and the manual dispatches store it
+		// — the extracted "group/project" path. An empty commitRepo means the
+		// site's code repository, which is the repository the dispatch below
+		// reads the matrix from: a row recorded with no repo would match no
+		// filter and leave the graphs it dispatched invisible.
+		repo := strings.TrimSpace(in.CommitRepo)
+		if repo == "" {
+			cfg, err := s.Store.GetSiteConfig()
+			if err != nil {
+				log.Printf("jobs trigger: load site config: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+				return
+			}
+			repo = strings.TrimSpace(cfg.CodeRepo)
+		}
+		c := &store.Commit{Repo: store.RepoPath(repo), SHA: in.CommitSHA}
 		if _, err := s.Store.GetOrCreateCommit(c); err != nil {
 			log.Printf("jobs trigger: create commit: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -234,13 +250,20 @@ func (s *Server) triggerManual(w http.ResponseWriter, r *http.Request, user *sto
 		EnvironmentIDs:      in.EnvironmentIDs,
 		Username:            user.Username,
 	})
-	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-		return
-	}
+	// The graphs are built one environment at a time and the ones already
+	// built survive a failure further down the list (see DispatchManual), so
+	// they are reported whether or not the call as a whole succeeded: a 422
+	// that named no task while tasks are queued would read as "nothing ran".
 	out := make([]manualTestRoot, 0, len(roots))
 	for _, root := range roots {
 		out = append(out, manualTestRoot{TaskID: root.ID, EnvironmentID: root.EnvironmentID})
+	}
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error": err.Error(),
+			"roots": out,
+		})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"roots": out})
 }

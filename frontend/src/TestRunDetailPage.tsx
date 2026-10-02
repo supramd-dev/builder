@@ -1,15 +1,20 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router'
+import { Link, useParams } from 'react-router'
 import { LoaderCircle, Maximize2 } from 'lucide-react'
 import {
   getTestArtifact,
   getTestRun,
+  runArtifactsZipUrl,
+  testArtifactDownloadUrl,
+  type Run,
+  type TaskKind,
   type TestRunDetail,
 } from './api'
 import { formatDuration, parseGTestResults, type GTestCase } from './gtest'
 import MessageDialog from './MessageDialog'
 import ArtifactPreviewDialog from './ArtifactPreviewDialog'
 import TaskLogView from './TaskLogView'
+import { StatusText } from './StatusViews'
 import { formatTime } from './timezone'
 import { Breadcrumbs } from './Breadcrumbs'
 import PlotSection from './plot/PlotSection'
@@ -18,10 +23,16 @@ interface Props {
   onError: (message: string) => void
 }
 
-// TestRunDetailPage shows one test run in the sr.ht build style: the title
-// (kind, status in color), a summary block (environment, commit, results,
-// time), the run's one-paragraph conclusion, the per-case results (from the
-// stored results file, parsed in the browser) and the stage's stdout log.
+// TestRunDetailPage shows one attempt of one task in the sr.ht build style:
+// the title (the test's name and kind, the attempt, status in color), a
+// summary block (commit, environment, results, time), the attempt's
+// conclusion, every other attempt of the same task (a retry history), the
+// stored artifacts — results files get parsed in the browser — and the
+// attempt's stdout log.
+//
+// A run is one attempt, so it has no children of its own: the regression
+// cases are tasks beside it, reached through the task page (the breadcrumb
+// crumb, or the link next to the log).
 export default function TestRunDetailPage({ onError }: Props) {
   const runId = Number(useParams().runId)
   const [run, setRun] = useState<TestRunDetail | null>(null)
@@ -31,6 +42,9 @@ export default function TestRunDetailPage({ onError }: Props) {
   useEffect(() => {
     let cancelled = false
     setLoading(true)
+    // A new run id is a new page: a failure recorded for the previous one must
+    // not outlive it and hide the run that did load.
+    setError('')
     getTestRun(runId)
       .then((r) => {
         if (!cancelled) setRun(r)
@@ -49,37 +63,36 @@ export default function TestRunDetailPage({ onError }: Props) {
     }
   }, [runId, onError])
 
-  // A pending/running run follows its stage live: poll until the real
-  // outcome lands (status leaves pending/running). Each poll replaces the
-  // run object, so the case list's per-case states advance on screen.
+  // A pending/running attempt follows its stage live: poll until the real
+  // outcome lands (status leaves pending/running).
   const live = run?.status === 'pending' || run?.status === 'running'
   useEffect(() => {
     if (!live) return
+    // The interval is cleared on navigation/unmount, but a request already on
+    // the wire is not: without this flag its reply would land afterwards and
+    // put the run just left (or unmounted) back on the page.
+    let cancelled = false
     const timer = setInterval(() => {
       getTestRun(runId)
-        .then((r) => setRun(r))
+        .then((r) => {
+          if (!cancelled) setRun(r)
+        })
         .catch(() => {}) // transient poll errors keep the last good view
     }, 3000)
-    return () => clearInterval(timer)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
   }, [live, runId])
 
-  // The breadcrumb trail's task crumb needs the root task id, which arrives
-  // with the run; before that the trail ends at Dashboard. A child run (a
-  // regression case) also carries the crumb of its parent regression run.
+  // The breadcrumb trail's task crumb needs the task id, which arrives with
+  // the run; before that the trail ends at Dashboard.
   const trail = [
     { label: 'Dashboard', to: '/' },
-    ...(run && run.rootTaskId > 0
-      ? [{ label: `Task #${run.rootTaskId}`, to: `/tasks/${run.rootTaskId}` }]
+    ...(run && run.taskId > 0
+      ? [{ label: `Task #${run.taskId}`, to: `/tasks/${run.taskId}` }]
       : []),
-    ...(run && run.parentRunId > 0
-      ? [
-          {
-            label: run.parentName ?? `Run #${run.parentRunId}`,
-            to: `/runs/${run.parentRunId}`,
-          },
-        ]
-      : []),
-    { label: run?.name ? run.name : `Run #${runId}` },
+    { label: `Run #${runId}` },
   ]
 
   if (loading) {
@@ -116,17 +129,23 @@ export default function TestRunDetailPage({ onError }: Props) {
       : inFlight
         ? '⏳ ' + run.status
         : '✓ passed'
-  const kindLabel =
-    run.kind === 'regression' ? 'Regression tests' : run.kind === 'build' ? 'Build' : 'Unit tests'
 
   return (
     <div>
       <Breadcrumbs trail={trail} />
 
-      {/* Title: kind + status in color. */}
+      {/* Title: the test's name + status in color, and the attempt when the
+          task ran more than once (a retry). */}
       <h2 className="task-title">
-        {kindLabel} · <span className={statusCls}>{statusText}</span>
+        {run.taskName ?? kindLabel(run.taskKind ?? run.kind)} ·{' '}
+        <span className={statusCls}>{statusText}</span>
         {inFlight && <LoaderCircle size={15} className="spin" style={{ verticalAlign: '-2px' }} />}
+        {run.attempt > 1 && (
+          <span className="text-muted" style={{ fontWeight: 400 }}>
+            {' '}
+            · attempt {run.attempt}
+          </span>
+        )}
         {run.commitShortSha && (
           <>
             {' · '}
@@ -136,9 +155,9 @@ export default function TestRunDetailPage({ onError }: Props) {
         {run.environmentName && <span className="text-muted"> on {run.environmentName}</span>}
       </h2>
 
-      {/* Stage description from md-builder.yaml (stored per trigger, so it
+      {/* The test's own label from md-builder.yaml (stored per trigger, so it
           reflects the yaml at dispatch time). */}
-      {run.description && <p className="dash-run-description">{run.description}</p>}
+      {run.taskDescription && <p className="dash-run-description">{run.taskDescription}</p>}
 
       {/* Summary: commit, author, results, time. */}
       <div className="task-summary text-muted">
@@ -159,6 +178,7 @@ export default function TestRunDetailPage({ onError }: Props) {
             {run.skipped > 0 && <span className="text-warn"> ({run.skipped} skipped)</span>}
           </>
         )}
+        {run.durationMillis > 0 && <> · {formatDuration(run.durationMillis)}</>}
         {run.startedAt && (
           <>
             {' · '}
@@ -171,16 +191,25 @@ export default function TestRunDetailPage({ onError }: Props) {
       {skipped && (
         <p className="dash-skip-note">
           This stage was skipped: an upstream task failed before it could run,
-          so no tests were executed. See the summary below for the upstream
-          failure.
+          so no tests were executed. The reason is in the summary below.
         </p>
       )}
 
       {run.summary && <pre className="dash-run-summary">{run.summary}</pre>}
 
-      {/* Every stored artifact of the run, whatever its kind: build files
-          (never parsed), results files (parsed in the browser below) —
-          each downloadable; the whole bundle as one zip. */}
+      {/* The task page is where the graph, the sibling stages and — for a
+          regression stage — the cases with their own runs live. */}
+      {run.taskId > 0 && (
+        <p>
+          <Link to={`/tasks/${run.taskId}`}>Open the task: graph and stage log →</Link>
+        </p>
+      )}
+
+      <AttemptsSection run={run} />
+
+      {/* Every stored artifact of the attempt, whatever its kind: build files
+          (never parsed), results files (parsed in the browser below) — each
+          downloadable, the whole bundle as one zip. */}
       {!inFlight && run.artifacts.length > 0 && (
         <ArtifactsSection run={run} onError={onError} />
       )}
@@ -189,56 +218,118 @@ export default function TestRunDetailPage({ onError }: Props) {
           file, fetched and rendered client-side like the results files. */}
       {!inFlight && <PlotSection artifacts={run.artifacts} onError={onError} />}
 
-      {/* Unit runs parse their results file in the browser (nothing stored
-          while the stage is still executing). */}
-      {!inFlight && run.kind !== 'regression' && <ResultsFileSection run={run} onError={onError} />}
+      {/* Results files are parsed in the browser (nothing is stored while the
+          stage is still executing). */}
+      {!inFlight && <ResultsFileSection run={run} onError={onError} />}
 
-      {/* Regression cases: one child run per preset — each row opens the
-          case's own run detail page (whose log follows the case live). */}
-      {run.cases.length > 0 && (
-        <>
-          <h3 className="task-section-title">
-            Regression cases{' '}
-            <span className="text-muted" style={{ fontWeight: 400 }}>
-              ({run.passed}/{run.total} passed)
-            </span>
-          </h3>
-          <CaseTable
-            cases={run.cases.map((c) => ({
-              id: c.id,
-              name: c.name,
-              description: c.description,
-              status: c.status,
-              durationMs: c.durationMillis,
-              message: c.message,
-            }))}
-            caseHref={(childRunId) => `/runs/${childRunId}`}
-          />
-        </>
-      )}
-      {run.cases.length === 0 && !run.artifacts.some((a) => a.kind === 'results') && (
-        <p className="text-muted">
-          No per-case results were reported for this run — see the summary
-          above.
-        </p>
-      )}
+      {/* A run with no results file and no per-test counts has nothing else
+          to show: say so rather than leaving the page half empty. */}
+      {!inFlight &&
+        !run.artifacts.some((a) => a.kind === 'results') &&
+        run.total === 0 && (
+          <p className="text-muted">
+            This attempt reported no test cases — see the summary above.
+          </p>
+        )}
 
-      {/* The stage's stdout (task log) — live while the stage executes. */}
-      {run.taskId !== 0 && (
-        <section>
-          <h3 className="task-section-title">Log</h3>
-          <TaskLogView taskId={run.taskId} live={run.status === 'running'} />
-        </section>
-      )}
+      <LogSection run={run} />
     </div>
   )
 }
 
-// ArtifactsSection lists every stored artifact of the run (build files,
-// results files, future logs/series) with a per-file preview (Monaco
-// editor dialog), a per-file download link and one zip bundling them all —
-// the run's own plus its regression children's (the backend packs children
-// under cases/<name>/).
+// kindLabel names a task kind for the page title, for a run whose task was
+// deleted (or which carries no name of its own).
+function kindLabel(kind: TaskKind | string): string {
+  switch (kind) {
+    case 'build':
+      return 'Build'
+    case 'unit':
+      return 'Unit tests'
+    case 'clone':
+      return 'Clone'
+    case 'regression':
+      return 'Regression tests'
+    case 'regression_case':
+      return 'Regression case'
+    default:
+      return 'Task'
+  }
+}
+
+// AttemptsSection lists every attempt of the run's task, newest first — a
+// task is re-run on retry, so the list is how an earlier attempt stays
+// reachable. Each row is a link to that attempt's own page (this one is
+// marked); the row's counts and timings come from the stored runs.
+function AttemptsSection({ run }: { run: TestRunDetail }) {
+  const attempts = run.attempts ?? []
+  if (attempts.length <= 1) return null
+  return (
+    <section>
+      <h3 className="task-section-title">
+        Attempts{' '}
+        <span className="text-muted" style={{ fontWeight: 400 }}>
+          ({attempts.length} runs of this task, newest first)
+        </span>
+      </h3>
+      <table className="table" style={{ marginBottom: '1rem' }}>
+        <thead>
+          <tr>
+            <th>Attempt</th>
+            <th>Status</th>
+            <th>Results</th>
+            <th>Duration</th>
+            <th>Started</th>
+          </tr>
+        </thead>
+        <tbody>
+          {attempts.map((a: Run) => (
+            <tr key={a.id} className="dash-attempt-row">
+              <td>
+                {a.id === run.id ? (
+                  <span>
+                    #{a.attempt} <span className="text-muted">(this run)</span>
+                  </span>
+                ) : (
+                  <Link to={`/runs/${a.id}`}>#{a.attempt}</Link>
+                )}
+              </td>
+              <td>
+                <StatusText status={a.status} />
+              </td>
+              <td className="text-muted">
+                {a.total > 0 ? `${a.passed}/${a.total} passed` : '—'}
+              </td>
+              <td className="text-muted">{a.durationMillis > 0 ? formatDuration(a.durationMillis) : '—'}</td>
+              <td className="text-muted">{a.startedAt ? formatTime(a.startedAt) : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  )
+}
+
+// LogSection shows the attempt's stdout: the task's log at this run's
+// attempt, so an earlier attempt's page shows that attempt's output.
+function LogSection({ run }: { run: TestRunDetail }) {
+  if (run.taskId === 0) return null
+  return (
+    <section>
+      <h3 className="task-section-title">Log</h3>
+      <TaskLogView
+        taskId={run.taskId}
+        attempt={run.attempt}
+        live={run.status === 'running'}
+      />
+    </section>
+  )
+}
+
+// ArtifactsSection lists every stored artifact of the attempt (build files,
+// results files, future logs/series) with a per-file preview (Monaco editor
+// dialog), a per-file download link and one zip bundling them — only the
+// attempt's own files: a run is one attempt of one task, and the task's whole
+// subtree is zipped from the task page.
 function ArtifactsSection({
   run,
   onError,
@@ -285,7 +376,7 @@ function ArtifactsSection({
                   View
                 </a>
                 {' · '}
-                <a href={`/api/test-artifacts/${a.id}/download`}>Download</a>
+                <a href={testArtifactDownloadUrl(a.id)}>Download</a>
               </td>
             </tr>
           ))}
@@ -293,10 +384,7 @@ function ArtifactsSection({
       </table>
       {run.artifacts.length > 1 && (
         <p style={{ marginBottom: '1rem' }}>
-          <a href={`/api/test-runs/${run.id}/artifacts/zip`}>Download all as zip</a>
-          {run.cases.length > 0 && (
-            <span className="text-muted"> (includes every case's files)</span>
-          )}
+          <a href={runArtifactsZipUrl(run.id)}>Download all as zip</a>
         </p>
       )}
       {preview !== null && (
@@ -444,84 +532,7 @@ function BrowserCaseTable({ cases }: { cases: GTestCase[] }) {
             <tr key={`${c.name}-${i}`}>
               <td>{c.name}</td>
               <td>
-                {c.status === 'passed' ? (
-                  <span className="text-success">✓ passed</span>
-                ) : c.status === 'skipped' ? (
-                  <span className="text-warn">⤼ skipped</span>
-                ) : (
-                  <span className="text-danger">✗ failed</span>
-                )}
-              </td>
-              <td>{formatDuration(c.durationMs)}</td>
-              <td className="text-muted">
-                <NoteCell name={c.name} message={c.message} onExpand={setNote} />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {note && (
-        <MessageDialog
-          title={note.name}
-          message={note.message}
-          onClose={() => setNote(null)}
-        />
-      )}
-    </>
-  )
-}
-
-// CaseTable renders a regression run's case list (each row is a child run
-// of the parent regression run); clicking a row opens the child run's own
-// detail page. Row styling differs from the browser-parsed unit table (see
-// dash-case-row in index.css).
-function CaseTable({
-  cases,
-  caseHref,
-}: {
-  cases: (GTestCase & { id: number; description?: string })[]
-  caseHref: (childRunId: number) => string
-}) {
-  const [note, setNote] = useState<{ name: string; message: string } | null>(null)
-  return (
-    <>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Case</th>
-            <th>Status</th>
-            <th>Duration</th>
-            <th>Note</th>
-          </tr>
-        </thead>
-        <tbody>
-          {cases.map((c) => (
-            <tr
-              key={c.id}
-              className="dash-case-row"
-              onClick={() => (window.location.hash = caseHref(c.id))}
-              title="Click to open the case's test run"
-            >
-              <td>
-                {c.name}
-                {c.description && (
-                  <div className="dash-case-description">{c.description}</div>
-                )}
-              </td>
-              <td>
-                {c.status === 'passed' ? (
-                  <span className="text-success">✓ passed</span>
-                ) : c.status === 'skipped' ? (
-                  <span className="text-warn">⤼ skipped</span>
-                ) : c.status === 'running' ? (
-                  <span className="text-run">
-                    <LoaderCircle size={13} className="spin" /> running
-                  </span>
-                ) : c.status === 'pending' ? (
-                  <span className="text-muted">· pending</span>
-                ) : (
-                  <span className="text-danger">✗ failed</span>
-                )}
+                <StatusText status={c.status} />
               </td>
               <td>{formatDuration(c.durationMs)}</td>
               <td className="text-muted">
@@ -543,8 +554,7 @@ function CaseTable({
 }
 
 // NoteCell shows the message's truncated first line plus an expand icon
-// that opens the full text in a read-only dialog. stopPropagation keeps the
-// expand click from triggering the surrounding row link (CaseTable).
+// that opens the full text in a read-only dialog.
 function NoteCell({
   name,
   message,
