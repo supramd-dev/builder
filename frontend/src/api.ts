@@ -638,6 +638,15 @@ export function testArtifactDownloadUrl(id: number): string {
   return `/api/test-artifacts/${id}/download`
 }
 
+// testArtifactRawUrl is the same bytes for *viewing*: an HTML artifact comes
+// back as a page, which the run page frames and its "open in a new tab" link
+// points at. The server renders HTML in a sandbox (Content-Security-Policy:
+// sandbox), so the page's scripts run from an opaque origin that cannot reach
+// this app's session. Also a plain link, cookie-authenticated like the rest.
+export function testArtifactRawUrl(id: number): string {
+  return `/api/test-artifacts/${id}/raw`
+}
+
 // runArtifactsZipUrl is one attempt's artifacts as a zip. The endpoint 404s
 // when the attempt produced none.
 export function runArtifactsZipUrl(runId: number): string {

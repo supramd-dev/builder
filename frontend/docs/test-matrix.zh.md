@@ -471,9 +471,17 @@ presets:
 打开运行详情页时,每个绘图工件都会被取回并渲染为可交互的图表(缩放、
 悬浮、图例开关 —— 标准的 Plotly 工具栏)。文档几乎原样透传:[Plotly
 支持的每种轨迹类型](https://plotly.com/javascript/)(scatter、bar、
-heatmap、3D surface 等)都可用;文件里的 `layout` 优先于默认值 ——
-包括 `layout.height`(上限 1200 像素;宽度始终自适应)。格式坏的文件
-在页面内显示错误信息,仍可从工件表下载。
+heatmap、3D surface 等)都可用;文件里的 `layout` 优先于默认值。格式
+坏的文件在页面内显示错误信息,仍可从工件表下载。
+
+**尺寸。** 高度由文件说了算:`layout.height` 写多少就画多少(手写导出
+把 `height` 放在**根级**也认),只在 120–2000 像素这个宽松区间内取
+值,免得一条细线或一个失控的数字被照单全收。文件没写高度时用 480 ——
+比 plotly 自己的 450 高一些,因为这一页的图表横跨一千多像素,默认值
+再矮就成了压扁的一条。宽度始终跟随容器:文件里的 `layout.width` 会被
+丢掉,而不是让它撑出页面。每张图上方的标签会写明实际画出来的高度和它
+的来处 —— `800 px (from the file)`、`480 px (default)`、或
+`(capped from 4000)` —— 于是“图看着不对”当场就有答案,不必去翻 JSON。
 
 **判定只看文件名**(不分大小写):只认这两个后缀,因为另一种做法 ——
 取回每个 JSON 工件再看它的形状 —— 会把整个运行的结果文件都下载一遍,
@@ -486,6 +494,38 @@ heatmap、3D surface 等)都可用;文件里的 `layout` 优先于默认值 —�
 运行同样支持 —— 详情页遇到它们就会画图。
 
 [Plotly]: https://plotly.com/javascript/
+
+### HTML 工件(`*.html`)
+
+名字以 `.html`(或 `.htm`)结尾的工件就按它本来的样子显示:内嵌在运行
+详情页里,再点一下就在新标签页里单独打开。因此一个写出 Plotly HTML
+导出、覆盖率报告或自包含结果页的测试,除了把它列进 `artifacts` 之外
+什么都不用做:
+
+```yaml
+unit:
+  command: "pytest --html=report/report.html"
+  artifacts: ["report/report.html"]
+```
+
+判定规则与绘图一致 —— 只认这两个后缀,页面上也有对应的一节
+(`HTML pages`)。渲染用的接口是 `GET /api/test-artifacts/{id}/raw`,
+即工件接口“用来看、而不是存下来”的那一种:字节与下载完全相同,只是
+换上一个浏览器会直接渲染的类型,HTML 还会加上沙箱。
+
+**为什么必须沙箱。** 工件是构建产物:内容来自被测代码,不是 md-builder
+自己。若以本站 origin 渲染它,页面里的脚本就能带着你的会话去调 API
+(会话 cookie 是 HttpOnly,那只是让它读不到,并没有让它用不了)。所以
+响应带上 `Content-Security-Policy: sandbox allow-scripts …`,且**不含**
+`allow-same-origin`,iframe 上也重复同一份清单:页面自己的脚本照跑
+(Plotly 导出必须能跑,那正是它值得被当作页面的原因),但它落在一个
+opaque origin 里 —— 读不到 cookie 与本地存储,发出的请求也不带凭据。
+少数靠 `localStorage` 记 UI 状态的报告页在预览里会退化,那种情况下把
+文件下载下来本地打开即可。SVG 出于同样的原因**故意不做**预览(它同样
+能带脚本),压缩包与二进制也只走下载。
+
+HTML 工件在其他方面同样是普通工件:原样存储、8 MiB 上限、随 zip 一起
+下载;与绘图一样,build / unit / 回归运行都支持,且从不影响阶段的判定。
 
 ### 下载工件
 

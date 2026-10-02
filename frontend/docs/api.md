@@ -244,10 +244,18 @@ alongside its `id`, `runId`, `kind` and `name` — the browser-side results
 parsing and the regression "analyze" view fetch through it.
 `GET /api/test-artifacts/{id}/download` streams the same bytes as a file
 download (Content-Disposition attachment, named from the source path's
-basename). The bytes live in object storage: a read whose object is gone
-is a `404`, and one where the backend itself failed is a `502` — the row
-is still there and the request was fine (see
-[Object storage](#/docs/object-storage)).
+basename). `GET /api/test-artifacts/{id}/raw` streams them for *viewing*
+instead of saving: an `.html`/`.htm` artifact comes back as a page — the
+run page frames it and its "open in a new tab" link points at it — under
+`Content-Security-Policy: sandbox …` without `allow-same-origin`, so the
+page's scripts run from an opaque origin that can reach neither this
+site's cookies or storage nor its API with credentials. The readable text
+formats (`.json`, `.xml`, `.txt`, `.log`, `.csv`, `.md`, `.yaml`) come
+back as `text/plain`; anything else — archives, binaries, and SVG, which
+is script-capable too — falls back to the plain download. The bytes live
+in object storage: a read whose object is gone is a `404`, and one where
+the backend itself failed is a `502` — the row is still there and the
+request was fine (see [Object storage](#/docs/object-storage)).
 
 Two zips bundle artifacts, and neither is ever an empty archive:
 
@@ -455,6 +463,7 @@ administrators are created there too, with `adduser -admin`.
 | GET    | `/api/test-runs/{id}/artifacts/zip` | That attempt's own artifacts as a zip (`404` when there are none) |
 | GET    | `/api/test-artifacts/{id}`      | One stored artifact's raw content             |
 | GET    | `/api/test-artifacts/{id}/download` | One artifact as a file download          |
+| GET    | `/api/test-artifacts/{id}/raw`  | One artifact for viewing: HTML as a sandboxed page, text as text |
 | POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit (webhook-style, reads the YAML) |
 | POST   | `/api/jobs/manual`              | Dispatch a user-configured test (repo, ref, stage commands, environments; no YAML) |
 | POST   | `/api/jobs/manual-yaml`         | Dispatch the md-builder.yaml matrix at a ref (webhook flow on demand) |

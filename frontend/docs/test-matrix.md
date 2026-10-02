@@ -522,9 +522,20 @@ When you open the run detail page, every plot artifact is fetched and
 rendered as an interactive chart (zoom, hover, legend toggle — the
 standard Plotly toolbar). The document is passed through almost verbatim:
 every [Plotly trace type] (scatter, bar, heatmap, 3D surface, …) works,
-and the file's `layout` wins over the defaults — including `layout.height`
-(capped at 1200 px; the width is always responsive). A malformed file
-shows its error inline and still downloads from the artifacts table.
+and the file's `layout` wins over the defaults. A malformed file shows its
+error inline and still downloads from the artifacts table.
+
+**Size.** The height is the file's to choose: `layout.height` is drawn as
+written (a bare root-level `height` is honoured too, for hand-rolled
+exports), inside loose bounds of 120–2000 px so a hairline or a runaway
+value is not taken literally. A document that names no height gets 480 px
+— taller than Plotly's own 450, because a chart on this page spans a
+thousand pixels and a shorter default reads as squashed. The width is
+always the container's: a `layout.width` in the file is dropped rather
+than allowed to overflow the page. The label above each chart states the
+height it was drawn at and where it came from — `800 px (from the file)`,
+`480 px (default)`, or `(capped from 4000)` — so a figure that looks
+wrong says why without anyone having to read the JSON.
 
 The **name is what decides**, case-insensitively: only those two suffixes
 are charted, because the alternative — fetching every JSON artifact and
@@ -541,6 +552,46 @@ Plot files are ordinary artifacts otherwise: stored verbatim, capped at
 8 MiB, downloaded with the zip bundle, and irrelevant to the case's
 verdict (the exit code decides, as always). They also work on unit and
 build runs — the detail page charts them wherever they appear.
+
+### HTML artifacts (`*.html`)
+
+An artifact whose name ends in `.html` (or `.htm`) is shown as the page it
+is: framed in the run detail page, and one click from a tab of its own. A
+test that writes a Plotly HTML export, a coverage report or a
+self-contained results page therefore needs nothing beyond listing the
+file:
+
+```yaml
+unit:
+  command: "pytest --html=report/report.html"
+  artifacts: ["report/report.html"]
+```
+
+The same naming rule as plots applies — only those two suffixes are
+framed, and the run page says so (`HTML pages`). The rendered page is
+served by `GET /api/test-artifacts/{id}/raw`, the artifact endpoint's
+view-don't-save form: the same bytes as the download, with a type the
+browser renders instead of saving, and for HTML a sandbox.
+
+**Why the sandbox matters.** An artifact is a build product: its content
+comes from the code under test, not from md-builder. Rendered from this
+site's own origin, a page's scripts could call the API with your session
+(the session cookie is HttpOnly, which keeps it from being *read* — not
+from being *used*). The response therefore carries
+`Content-Security-Policy: sandbox allow-scripts …` without
+`allow-same-origin`, and the frame repeats that list: the page's scripts
+still run (a Plotly export has to, that is what makes it a page), but from
+an opaque origin that can read no cookie or storage, and whose requests
+carry no credentials. A report that leans on `localStorage` for its UI
+state will degrade in the preview; download it and open it locally if you
+need the full thing. SVG is deliberately *not* previewed for the same
+reason — it is script-capable too — and neither are archives or binaries:
+those stay downloads.
+
+HTML artifacts are ordinary artifacts otherwise: stored verbatim, capped
+at 8 MiB, and downloaded with the zip bundle. Like plots, they work on
+build, unit and regression runs alike, and they never affect a stage's
+verdict.
 
 ### Downloading artifacts
 

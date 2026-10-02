@@ -1677,3 +1677,20 @@ code {
 .plot-figure {
   margin-bottom: 1rem;
 }
+
+/* Run detail: one framed HTML artifact (*.html). The frame takes most of the
+   viewport — it is sandboxed to an opaque origin, so the page inside cannot
+   be measured from here and fitted to its content. The white background is
+   the page's own paper: it shows around a document that paints none. */
+.html-preview {
+  margin-bottom: 1rem;
+}
+
+.html-preview iframe {
+  width: 100%;
+  height: 65vh;
+  min-height: 420px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+}

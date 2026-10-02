@@ -202,8 +202,16 @@ Artifact 归属产出它的那次尝试:单元测试运行的结果文件挂在�
 它的 `id`、`runId`、`kind` 和 `name` —— 浏览器端的结果解析和回归的
 "分析"视图都从这里取数。`GET /api/test-artifacts/{id}/download` 以文件
 下载(Content-Disposition 附件,文件名取自源路径的 basename)形式返回
-同样的字节。字节存放在对象存储里:对象已不存在时返回 `404`,后端本身
-出错时返回 `502` —— 因为数据库行还在,请求本身没有问题(见
+同样的字节;`GET /api/test-artifacts/{id}/raw` 返回同一份字节,但用于
+**查看**而不是存下来 —— `.html`/`.htm` 会作为页面返回(运行详情页把
+它嵌进 iframe,"在新标签页打开"也指向这里),并带上
+`Content-Security-Policy: sandbox …`(不含 `allow-same-origin`):页面
+自己的脚本照跑,但它落在 opaque origin 里,既够不到本站的 cookie 与
+本地存储,也无法带着凭据调本站的 API。可读的文本类(`.json`、`.xml`、
+`.txt`、`.log`、`.csv`、`.md`、`.yaml`)按 `text/plain` 返回;其余
+——压缩包、二进制,以及同样能带脚本的 SVG —— 一律退回普通下载。字节
+存放在对象存储里:对象已不存在时返回 `404`,后端本身出错时返回 `502`
+—— 因为数据库行还在,请求本身没有问题(见
 [对象存储](#/docs/object-storage))。
 
 有两个 zip 打包工件,而且都绝不会是空归档:
@@ -388,6 +396,7 @@ POST /api/setup
 | GET    | `/api/test-runs/{id}/artifacts/zip` | 该次尝试自己的工件打成 zip(没有工件时 `404`) |
 | GET    | `/api/test-artifacts/{id}`      | 单个存储 artifact 的原始内容                 |
 | GET    | `/api/test-artifacts/{id}/download` | 单个 artifact 以文件下载               |
+| GET    | `/api/test-artifacts/{id}/raw`  | 单个 artifact 用于查看:HTML 作为沙箱页面,文本按文本 |
 | POST   | `/api/jobs`                     | 手动重新派发某提交的任务图(webhook 方式,读取 YAML) |
 | POST   | `/api/jobs/manual`              | 派发自定义测试(仓库、ref、阶段命令、环境;无需 YAML) |
 | POST   | `/api/jobs/manual-yaml`         | 派发某 ref 上的 md-builder.yaml 矩阵(按需执行的 webhook 流程) |

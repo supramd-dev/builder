@@ -7,6 +7,7 @@ import {
   isTerminalStatus,
   runArtifactsZipUrl,
   testArtifactDownloadUrl,
+  testArtifactRawUrl,
   type Run,
   type TaskKind,
   type TestRunDetail,
@@ -15,6 +16,8 @@ import { formatDuration, parseGTestResults, type GTestCase } from './gtest'
 import MessageDialog from './MessageDialog'
 import ArtifactPreviewDialog from './ArtifactPreviewDialog'
 import TaskLogView from './TaskLogView'
+import HtmlPreviewSection from './HtmlPreviewSection'
+import { isHtmlArtifact } from './artifacts'
 import { StatusText } from './StatusViews'
 import { formatTime } from './timezone'
 import { Breadcrumbs } from './Breadcrumbs'
@@ -230,6 +233,11 @@ export default function TestRunDetailPage({ onError }: Props) {
           results files. */}
       {!inFlight && <PlotSection artifacts={run.artifacts} onError={onError} />}
 
+      {/* HTML artifacts (*.html / *.htm): the pages a run produced, framed
+          next to the charts — the report a test wrote is read here, not
+          downloaded and opened elsewhere. */}
+      {!inFlight && <HtmlPreviewSection artifacts={run.artifacts} />}
+
       {/* Results files are parsed in the browser (nothing is stored while the
           stage is still executing). */}
       {!inFlight && <ResultsFileSection run={run} onError={onError} />}
@@ -386,6 +394,21 @@ function ArtifactsSection({
                   View
                 </a>
                 {' · '}
+                {/* An HTML artifact is previewed below; the rendered page is
+                    also one click away, sandboxed by the server. */}
+                {isHtmlArtifact(a) && (
+                  <>
+                    <a
+                      href={testArtifactRawUrl(a.id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      title="Open the rendered page in a new tab"
+                    >
+                      Open
+                    </a>
+                    {' · '}
+                  </>
+                )}
                 <a href={testArtifactDownloadUrl(a.id)}>Download</a>
               </td>
             </tr>
