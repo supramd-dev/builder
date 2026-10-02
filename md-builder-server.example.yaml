@@ -48,6 +48,30 @@ worker:
   # MD_BUILDER_WORKERS.
   count: 2
 
+logs:
+  # A stage's output is kept twice. The task_logs chunks are what the live
+  # viewer polls (small, indexed, streamed); the complete log is one object
+  # per run (runs/<runID>/log/full.log in the bucket below), which is what
+  # "download log" serves — and what the run's summary is derived from, so a
+  # failure at the end of a very long log is still read and reported.
+
+  # Cap on the chunks kept in the database, in bytes. Past it the stored log
+  # ends in a truncation marker pointing at the download. 0 = 8 MiB.
+  # Override with MD_BUILDER_LOG_MAX_STORED.
+  maxStoredBytes: 8388608
+
+  # Cap on the complete log kept in object storage, in bytes. A log that runs
+  # past it keeps its beginning (1 MiB) and its end, with a marker line in
+  # between naming what was dropped — a reader is never misled about what the
+  # file holds. 0 = 64 MiB. Override with MD_BUILDER_LOG_MAX_FILE.
+  maxFileBytes: 67108864
+
+  # Where a running stage's log is spooled before it is uploaded. Needs room
+  # for one maxFileBytes file per stage in flight; the files are removed when
+  # the stage ends, and leftovers from a crash are swept at startup. Empty
+  # uses the OS temp directory. Override with MD_BUILDER_LOG_SPOOL_DIR.
+  # spoolDir: /var/lib/md-builder/logs
+
 objectStorage:
   # MinIO / S3 endpoint, host and port, no scheme.
   endpoint: 127.0.0.1:9000

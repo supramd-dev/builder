@@ -798,11 +798,11 @@ export async function getTaskLogs(
 }
 
 // taskLogDownloadUrl is one attempt's whole log as a downloadable text file.
-// The viewer follows the stream incrementally and keeps only its tail, so the
-// file is assembled server-side and fetched by the browser itself (a plain
-// link — the session cookie authenticates it). The filename gains an
-// -attempt-N suffix when the caller asks for an attempt other than the
-// current one.
+// The server serves it from the run's full log in object storage — the whole
+// output, where the live view's stored chunks stop at their cap — and the
+// browser fetches it itself (a plain link — the session cookie authenticates
+// it). The filename gains an -attempt-N suffix when the caller asks for an
+// attempt other than the current one.
 export function taskLogDownloadUrl(id: number, attempt?: number): string {
   const q = attempt === undefined ? '' : `?attempt=${attempt}`
   return `/api/tasks/${id}/log/download${q}`

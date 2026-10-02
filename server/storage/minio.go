@@ -76,18 +76,28 @@ func (m *MinIO) EnsureBucket(ctx context.Context) error {
 
 // Put stores data under key, overwriting any previous object.
 func (m *MinIO) Put(ctx context.Context, key string, data []byte) (ObjectMeta, error) {
-	info, err := m.client.PutObject(ctx, m.cfg.Bucket, key, bytes.NewReader(data), int64(len(data)),
+	return m.PutStream(ctx, key, bytes.NewReader(data), int64(len(data)))
+}
+
+// PutStream stores the object read from r, whose length must be size. The SDK
+// streams the body with a known length, so a stage's full log never has to fit
+// in memory (an unknown length would make it buffer the stream to find out).
+func (m *MinIO) PutStream(ctx context.Context, key string, r io.Reader, size int64) (ObjectMeta, error) {
+	if size < 0 {
+		return ObjectMeta{}, fmt.Errorf("object storage %s: put %s: length is required", m.cfg.Describe(), key)
+	}
+	info, err := m.client.PutObject(ctx, m.cfg.Bucket, key, r, size,
 		minio.PutObjectOptions{ContentType: "application/octet-stream"})
 	if err != nil {
 		return ObjectMeta{}, fmt.Errorf("object storage %s: put %s: %w", m.cfg.Describe(), key, mapError(err))
 	}
-	size := info.Size
-	if size == 0 {
-		// UploadInfo.Size is only set by multipart uploads; a single
-		// PUT (every artifact) knows the size from the request.
-		size = int64(len(data))
+	written := info.Size
+	if written == 0 {
+		// UploadInfo.Size is only set by multipart uploads; a single PUT
+		// knows the size from the request.
+		written = size
 	}
-	return ObjectMeta{Key: key, Size: size, LastModified: time.Now()}, nil
+	return ObjectMeta{Key: key, Size: written, LastModified: time.Now()}, nil
 }
 
 // Get returns the whole object.

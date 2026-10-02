@@ -2,8 +2,9 @@
 // artifacts.
 //
 // Test output files (gtest results XML, build artifacts, per-case series data)
-// live in an S3-compatible store — MinIO in the supported deployment — and the
-// database keeps only a reference: the object key plus its size. Nothing in
+// and each run's complete task log live in an S3-compatible store — MinIO in
+// the supported deployment — and the database keeps only a reference: the
+// object key plus its size. Nothing in
 // this package knows about runs or artifacts; it stores opaque byte blobs
 // under caller-chosen keys, so the store layer owns the key layout
 // (see ArtifactKey) and the API layer owns the read paths.
@@ -49,6 +50,12 @@ type ObjectMeta struct {
 type Store interface {
 	// Put stores data under key, overwriting any previous object.
 	Put(ctx context.Context, key string, data []byte) (ObjectMeta, error)
+	// PutStream stores an object read from r instead of buffering it, for
+	// the one caller whose payload can be tens of megabytes (a stage's
+	// full log). size is the exact number of bytes r will yield, and must
+	// be non-negative: a backend that has to guess would buffer the whole
+	// stream to find out, which is what this exists to avoid.
+	PutStream(ctx context.Context, key string, r io.Reader, size int64) (ObjectMeta, error)
 	// Get returns the whole object. It returns ErrNotFound when the key
 	// does not exist.
 	Get(ctx context.Context, key string) ([]byte, error)

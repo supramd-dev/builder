@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"io"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -387,6 +388,95 @@ func TestSweepOrphanObjects(t *testing.T) {
 	}
 	if n != 1 || objs.Len() != 0 {
 		t.Fatalf("sweep removed %d objects, %d left", n, objs.Len())
+	}
+}
+
+// A run's complete log is referenced by the run row, not by an artifact row:
+// the sweep must keep it while the run is there and reclaim it with the run.
+func TestSweepKeepsTheRunsFullLog(t *testing.T) {
+	s, objs := newTestStoreWithObjects(t)
+	env, commit := seedEnvAndCommit(t, s)
+	_, run := unitRun(t, s, env, commit)
+
+	key := storage.ArtifactKey(objs.KeyPrefix(), run.ID, ArtifactKindLog, "full.log", 0)
+	if _, err := objs.Put(context.Background(), key, []byte("the whole log\n")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	ok, err := s.SetRunLogObject(run.ID, key, int64(len("the whole log\n")))
+	if err != nil || !ok {
+		t.Fatalf("set run log object: ok=%t err=%v", ok, err)
+	}
+	if got, err := s.GetTestRun(run.ID); err != nil || got.LogObjectKey != key || got.LogBytes != int64(len("the whole log\n")) {
+		t.Fatalf("run log fields = %+v, %v", got, err)
+	}
+
+	// Aged past the grace period but still referenced: kept.
+	objs.SetLastModified(key, time.Now().Add(-2*artifactGracePeriod))
+	if n, err := s.SweepOrphanObjects(context.Background()); err != nil || n != 0 {
+		t.Fatalf("sweep with a referenced full log: n=%d err=%v", n, err)
+	}
+	if objs.Len() != 1 {
+		t.Fatal("a referenced full log was swept")
+	}
+
+	// Deleting the task's runs drops the reference; now it is an orphan.
+	if err := s.DeleteTasksForEnvironment(env.ID); err != nil {
+		t.Fatalf("delete environment tasks: %v", err)
+	}
+	if _, err := s.GetTestRun(run.ID); !errors.Is(err, ErrTestRunNotFound) {
+		t.Fatalf("run still there: %v", err)
+	}
+	n, err := s.SweepOrphanObjects(context.Background())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 || objs.Len() != 0 {
+		t.Fatalf("sweep removed %d objects, %d left", n, objs.Len())
+	}
+}
+
+// SetRunLogObject on a run that is gone reports "not stored" rather than
+// failing: the writer then removes the object it just uploaded.
+func TestSetRunLogObjectWithoutARun(t *testing.T) {
+	s, _ := newTestStoreWithObjects(t)
+	ok, err := s.SetRunLogObject(9999, "runs/9999/log/full.log", 12)
+	if err != nil || ok {
+		t.Fatalf("unknown run: ok=%t err=%v", ok, err)
+	}
+	if ok, err := s.SetRunLogObject(0, "", 0); err != nil || ok {
+		t.Fatalf("empty reference: ok=%t err=%v", ok, err)
+	}
+}
+
+// OpenRunLog streams the run's complete log, and refuses a run without one.
+func TestOpenRunLog(t *testing.T) {
+	s, objs := newTestStoreWithObjects(t)
+	env, commit := seedEnvAndCommit(t, s)
+	_, run := unitRun(t, s, env, commit)
+
+	ctx := context.Background()
+	if _, _, err := s.OpenRunLog(ctx, run); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("run without a full log: %v", err)
+	}
+	key := storage.ArtifactKey(objs.KeyPrefix(), run.ID, ArtifactKindLog, "full.log", 0)
+	if _, err := objs.Put(ctx, key, []byte("done\n")); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if ok, err := s.SetRunLogObject(run.ID, key, 5); err != nil || !ok {
+		t.Fatalf("set run log object: ok=%t err=%v", ok, err)
+	}
+	run, err := s.GetTestRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, size, err := s.OpenRunLog(ctx, run)
+	if err != nil {
+		t.Fatalf("open run log: %v", err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil || string(data) != "done\n" || size != 5 {
+		t.Fatalf("run log = %q (%d bytes, size %d, err %v)", data, len(data), size, err)
 	}
 }
 

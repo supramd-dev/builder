@@ -298,10 +298,14 @@ type logChunkJSON struct {
 }
 
 // taskLogDownload handles GET /api/tasks/{id}/log/download[?attempt=<n>]: the
-// attempt's whole log as one text file. The log viewer in the browser keeps
-// only the tail of the stream it followed, so the file is produced from the
-// stored chunks here, streamed batch by batch (ReadTaskLogs caps how many it
-// returns).
+// attempt's whole log as one text file.
+//
+// A finished attempt has its complete log in object storage, and that object
+// is streamed here: it is the whole output, where the stored chunks stop at
+// their cap and end in a truncation marker. An attempt that has no object —
+// still running, never ran, written before the full log existed, or a stage
+// whose spool failed — falls back to the stored chunks, read batch by batch
+// (ReadTaskLogs caps how many it returns).
 func (s *Server) taskLogDownload(w http.ResponseWriter, r *http.Request, id int64) {
 	task, ok := s.loadTask(w, id, "task log download")
 	if !ok {
@@ -317,6 +321,25 @@ func (s *Server) taskLogDownload(w http.ResponseWriter, r *http.Request, id int6
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name+".log"))
+
+	// The complete log, when the attempt has one. A read failure falls
+	// through to the stored chunks: they are the same log, minus the cap.
+	if run, err := s.Store.FindTaskRun(task.ID, attempt); err == nil && run.LogObjectKey != "" {
+		rc, size, openErr := s.Store.OpenRunLog(r.Context(), run)
+		if openErr == nil {
+			defer rc.Close()
+			if size >= 0 {
+				w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+			}
+			if _, err := io.Copy(w, rc); err != nil {
+				log.Printf("task %d log download (full log %s): %v", task.ID, run.LogObjectKey, err)
+			}
+			return
+		}
+		log.Printf("task %d log download: read the full log %s: %v; serving the stored chunks",
+			task.ID, run.LogObjectKey, openErr)
+	}
+
 	// Walk the log by sequence: each batch continues after the last chunk
 	// written, so a long build's output never has to fit in memory.
 	after := 0

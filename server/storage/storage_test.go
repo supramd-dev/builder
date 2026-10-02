@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,53 @@ func TestMemoryStoreRoundTrip(t *testing.T) {
 	}
 	if got := m.Describe(); got != "memory" {
 		t.Fatalf("describe = %q", got)
+	}
+}
+
+// TestPutStreamStoresTheWholeReader: the streaming write stores what the
+// reader yields. It is how a stage's full log is uploaded, so the payload is
+// large enough to be interesting and the reader is not seekable — the shape
+// the runner hands over (an io.MultiReader over the spool's regions).
+func TestPutStreamStoresTheWholeReader(t *testing.T) {
+	ctx := context.Background()
+	payload := strings.Repeat("log line\n", 100_000)
+
+	for _, backend := range []struct {
+		name string
+		make func() (Store, error)
+	}{
+		{"memory", func() (Store, error) { return NewMemory(), nil }},
+		{"minio", func() (Store, error) {
+			objs, _ := newTestMinIO(t, Config{AutoCreateBucket: true})
+			return objs, objs.EnsureBucket(ctx)
+		}},
+	} {
+		t.Run(backend.name, func(t *testing.T) {
+			m, err := backend.make()
+			if err != nil {
+				t.Fatalf("backend: %v", err)
+			}
+			stream := struct{ io.Reader }{strings.NewReader(payload)}
+			meta, err := m.PutStream(ctx, "runs/7/log/full.log", stream, int64(len(payload)))
+			if err != nil {
+				t.Fatalf("put stream: %v", err)
+			}
+			if meta.Size != int64(len(payload)) {
+				t.Errorf("size = %d, want %d", meta.Size, len(payload))
+			}
+			data, err := m.Get(ctx, meta.Key)
+			if err != nil {
+				t.Fatalf("get: %v", err)
+			}
+			if string(data) != payload {
+				t.Errorf("stored %d bytes, want %d", len(data), len(payload))
+			}
+			// The length is not optional: a backend that has to guess would
+			// buffer the stream to find out, which is what this avoids.
+			if _, err := m.PutStream(ctx, "runs/7/log/unknown.log", strings.NewReader("x"), -1); err == nil {
+				t.Error("a negative length must be rejected")
+			}
+		})
 	}
 }
 

@@ -13,16 +13,17 @@ import (
 // run's artifacts, a re-dispatch resets a regression run, an environment is
 // removed), and removing an object before that transaction commits would lose
 // data if it rolled back. Instead the database stays the index: every sweep
-// compares the bucket against the artifact rows and deletes what nothing
-// references any more.
+// compares the bucket against the rows that reference objects — the artifact
+// rows and the runs' complete logs — and deletes what nothing references any
+// more.
 
 // artifactGracePeriod protects a freshly written object. Uploads happen just
 // before the row that references them is committed, so an object younger than
 // this may simply be mid-insert.
 const artifactGracePeriod = time.Hour
 
-// SweepOrphanObjects deletes every object under the runs prefix that no
-// artifact row references and that is older than artifactGracePeriod. It
+// SweepOrphanObjects deletes every object under the runs prefix that nothing
+// in the database references and that is older than artifactGracePeriod. It
 // returns the number of objects removed.
 func (s *Store) SweepOrphanObjects(ctx context.Context) (int, error) {
 	objs, err := s.requireObjects()
@@ -38,13 +39,19 @@ func (s *Store) SweepOrphanObjects(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 
-	// Every key the database still references. Reading them in one query
-	// keeps the sweep exact: it also reclaims the object of an artifact
-	// whose row was replaced by a newer report of the same run.
+	// Every key the database still references: the artifacts' objects and the
+	// runs' complete logs. Reading them in one query per owner keeps the sweep
+	// exact: it also reclaims the object of an artifact, or of a log, whose
+	// row was replaced by a newer report of the same run.
 	var referenced []string
 	if err := s.DB.Model(&TestArtifact{}).Where("object_key <> ''").Pluck("object_key", &referenced).Error; err != nil {
 		return 0, err
 	}
+	var runLogs []string
+	if err := s.DB.Model(&TestRun{}).Where("log_object_key <> ''").Pluck("log_object_key", &runLogs).Error; err != nil {
+		return 0, err
+	}
+	referenced = append(referenced, runLogs...)
 	live := make(map[string]struct{}, len(referenced))
 	for _, key := range referenced {
 		live[key] = struct{}{}

@@ -95,14 +95,40 @@ type TestRun struct {
 	// never disagree; which of the two a reader uses is a matter of what it
 	// already has in hand (the matrix and the task page read the node, the run
 	// page reads the run).
-	Total      int `gorm:"not null;default:0"`
-	Passed     int `gorm:"not null;default:0"`
-	Failed     int `gorm:"not null;default:0"`
-	Skipped    int `gorm:"not null;default:0"`
-	StartedAt  time.Time
-	FinishedAt time.Time
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	Total   int `gorm:"not null;default:0"`
+	Passed  int `gorm:"not null;default:0"`
+	Failed  int `gorm:"not null;default:0"`
+	Skipped int `gorm:"not null;default:0"`
+	// LogObjectKey is the run's complete log in object storage ("" when it
+	// has none: the stage never finished, its writer could not spool, or the
+	// log was written before this existed). The chunks in task_logs are the
+	// live copy — capped, and what the viewer reads; this object is the whole
+	// log, and what the download serves. LogBytes is its size.
+	//
+	// It is on the run (not the task) because a run is one attempt: a retry
+	// is a new attempt with a new log, and the previous attempt keeps its own.
+	LogObjectKey string `gorm:"not null;default:''"`
+	LogBytes     int64  `gorm:"not null;default:0"`
+	StartedAt    time.Time
+	FinishedAt   time.Time
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// SetRunLogObject records a run's complete log: the object key and its size.
+// ok is false when no such run exists — a stage that finished after its run
+// was replaced by a re-dispatch — which tells the caller the object it just
+// wrote is unreferenced and can be removed. A missing run is not an error.
+func (s *Store) SetRunLogObject(runID int64, key string, size int64) (bool, error) {
+	if runID == 0 || key == "" {
+		return false, nil
+	}
+	res := s.DB.Model(&TestRun{}).Where("id = ?", runID).
+		Updates(map[string]any{"log_object_key": key, "log_bytes": size})
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // EnvCommit keys a run by its environment and commit.

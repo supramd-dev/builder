@@ -45,6 +45,17 @@ type Service struct {
 
 	// FetchTimeout caps the md-builder.yaml read (0 = defaultFetchTimeout).
 	FetchTimeout time.Duration
+
+	// LogLimits bounds the log copies a stage leaves behind (the stored
+	// chunks and the complete log object). The zero value is the default for
+	// every field; main sets it from the configuration's logs section.
+	LogLimits LogLimits
+}
+
+// logWriter returns a log writer for a task's current attempt, with the
+// Service's log limits.
+func (s *Service) logWriter(task *store.Task) *LogWriter {
+	return NewLogWriter(s.Store, task, s.LogLimits)
 }
 
 // fetchTimeout is the effective deadline for reading the test matrix.

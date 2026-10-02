@@ -13,9 +13,10 @@ import (
 )
 
 // Artifact bytes live in object storage; the database keeps a reference (the
-// object key plus the size) in test_artifacts. This file owns that split: the
-// key layout, the upload that precedes every artifact insert, and the
-// accessor the API layer reads through.
+// object key plus the size) in test_artifacts. A run's complete task log works
+// the same way, with its key on the run row (TestRun.LogObjectKey). This file
+// owns that split: the key layout, the upload that precedes every artifact
+// insert, and the accessors the API layer reads through.
 
 // putTimeout bounds one artifact upload. The runner caps each fetched file
 // (maxArtifactBytes), so an upload that takes this long is a broken backend,
@@ -141,6 +142,21 @@ func (s *Store) OpenArtifact(ctx context.Context, a *TestArtifact) (io.ReadClose
 		return nil, 0, err
 	}
 	return objs.Open(ctx, a.ObjectKey)
+}
+
+// OpenRunLog streams a run's complete log (the object the runner uploaded when
+// the stage ended) with its size, for the download path — a log is read once
+// and can be tens of megabytes, so it is never buffered. It fails for a run
+// that has no log object: callers fall back to the stored task_logs chunks.
+func (s *Store) OpenRunLog(ctx context.Context, run *TestRun) (io.ReadCloser, int64, error) {
+	if run == nil || run.LogObjectKey == "" {
+		return nil, 0, ErrNotFound
+	}
+	objs, err := s.requireObjects()
+	if err != nil {
+		return nil, 0, err
+	}
+	return objs.Open(ctx, run.LogObjectKey)
 }
 
 // deleteArtifactsByRunIDs removes the artifact rows of the given runs. The

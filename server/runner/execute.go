@@ -109,7 +109,7 @@ func (s *Service) failEarly(task *store.Task, msg string) {
 		msg = Redact(msg, cfg.AccessToken)
 		msg = Redact(msg, cfg.SecretToken)
 	}
-	logw := NewLogWriter(s.Store, task)
+	logw := s.logWriter(task)
 	fmt.Fprintf(logw, "task failed: %s\n", msg)
 	logw.Close()
 	s.finishStage(task, store.StatusFailed, truncateSummary(msg), msg, stageCounts{}, nil)
@@ -124,7 +124,7 @@ func (rc *rootContext) creds() *GitCredentials {
 // (access token, MD_SECRET_TOKEN) armed for scrubbing — a stage command
 // echoing its environment would otherwise persist them in the log.
 func (s *Service) stageLogWriter(rc *rootContext, task *store.Task) *LogWriter {
-	logw := NewLogWriter(s.Store, task)
+	logw := s.logWriter(task)
 	logw.SetSecrets(rc.cfg.AccessToken, rc.cfg.SecretToken)
 	return logw
 }
@@ -164,7 +164,7 @@ func (s *Service) executeClone(ctx context.Context, task *store.Task) {
 	if !ok {
 		return
 	}
-	logw := NewLogWriter(s.Store, task)
+	logw := s.logWriter(task)
 	defer logw.Close()
 
 	if rc.cfg.CodeRepo == "" {
@@ -258,10 +258,10 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 	// Build artifacts (when configured) are fetched back verbatim as file
 	// artifacts — no results parsing, the build verdict is the exit code.
 	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindFile, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
-	logw.Flush() // the build run's summary is derived from the persisted log
+	logw.Flush() // store the output before the run row that reports the outcome
 
 	// Record the dashboard build run from the log tail (no per-case results).
-	output := s.readLogTail(task)
+	output := s.stageOutput(task, logw)
 	summary := ExtractSummary(output, res.ExitCode)
 	if res.ExitCode < 0 {
 		summary = truncateSummary(fmt.Sprintf("ssh execution failed: %s; log tail: %s", res.Stderr, tailLine(output, 3)))
@@ -297,10 +297,10 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 
 	counts, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindResults, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
-	logw.Flush() // the summary is derived from the persisted log
+	logw.Flush() // store the output before the run row that reports the outcome
 
 	// The log holds the full output; the summary is derived from it.
-	output := s.readLogTail(task)
+	output := s.stageOutput(task, logw)
 	summary := ExtractSummary(output, res.ExitCode)
 	if res.ExitCode < 0 {
 		// Session-level failure (dial, timeout): surface the transport error.
@@ -349,8 +349,8 @@ func (s *Service) executeCase(ctx context.Context, task *store.Task) {
 	// parsed here are dropped.
 	_, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindResults, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
-	logw.Flush() // the case's summary is derived from the persisted log
-	output := s.readLogTail(task)
+	logw.Flush() // store the output before the run row that reports the outcome
+	output := s.stageOutput(task, logw)
 
 	summary := ExtractSummary(output, res.ExitCode)
 	if res.ExitCode < 0 {
@@ -451,6 +451,28 @@ func (s *Service) fetchArtifactFile(ctx context.Context, h SSHHost, rc *rootCont
 		content = Redact(content, secret)
 	}
 	return content, nil
+}
+
+// logSummaryTailBytes is how much of a stage's tail the summary is derived
+// from. The summary line is the last thing a stage prints; anything before it
+// is context a parser should not need.
+const logSummaryTailBytes = 256 * 1024
+
+// stageOutput returns the text a stage's summary is derived from: the end of
+// the writer's output, read from its spool. The spool holds the complete log
+// (its end always survives its cap), where the stored chunks stop at their own
+// cap and end in a truncation marker — so a stage that printed 30 MiB and then
+// failed would otherwise have its outcome derived from no output at all. The
+// stored chunks remain the fallback for when there is no spool.
+//
+// It reads the end, not the beginning: a summary is the last thing a stage
+// prints (see ExtractSummary, which takes the last match), so a window at the
+// head of a long log would miss it.
+func (s *Service) stageOutput(task *store.Task, logw *LogWriter) string {
+	if out := logw.Tail(logSummaryTailBytes); out != "" {
+		return out
+	}
+	return s.readLogTail(task)
 }
 
 // readLogTail re-reads the persisted log tail of the task's current attempt

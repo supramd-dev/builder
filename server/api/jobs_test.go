@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"md-builder/server/runner"
+	"md-builder/server/storage"
 	"md-builder/server/store"
 )
 
@@ -547,6 +548,32 @@ func TestTaskDetailAndLogs(t *testing.T) {
 	}
 	if got := rec.Body.String(); got != want.String() {
 		t.Errorf("long log download: got %d bytes, want %d", len(got), want.Len())
+	}
+
+	// A finished attempt has its complete log in object storage, and the
+	// download serves that object rather than the stored chunks: it is the
+	// whole output, where the chunks stop at their cap.
+	full := "the complete log\n" + strings.Repeat("noise\n", 10) + "error: it failed here\n"
+	buildRun, err := s.FindTaskRun(build.ID, 1)
+	if err != nil {
+		t.Fatalf("build run: %v", err)
+	}
+	key := storage.ArtifactKey(s.Objects().KeyPrefix(), buildRun.ID, store.ArtifactKindLog, "full.log", 0)
+	if _, err := s.Objects().Put(context.Background(), key, []byte(full)); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.SetRunLogObject(buildRun.ID, key, int64(len(full))); err != nil || !ok {
+		t.Fatalf("record the full log on the run: ok=%t err=%v", ok, err)
+	}
+	rec = authed(http.MethodGet, fmt.Sprintf("/api/tasks/%d/log/download", build.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full-log download: expected 200, got %d", rec.Code)
+	}
+	if got := rec.Body.String(); got != full {
+		t.Errorf("full-log download body = %q, want the object's bytes", got)
+	}
+	if got, want := rec.Header().Get("Content-Length"), fmt.Sprint(len(full)); got != want {
+		t.Errorf("full-log download Content-Length = %q, want %q", got, want)
 	}
 
 	// An unknown task has no file to download.

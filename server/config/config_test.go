@@ -26,7 +26,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		EnvConfigPath, EnvAddr, EnvPort, EnvDSN, EnvDist, EnvWorkers,
-		EnvDisableWorker,
+		EnvDisableWorker, EnvLogMaxStored, EnvLogMaxFile, EnvLogSpoolDir,
 		"MD_BUILDER_S3_ENDPOINT", "MD_BUILDER_S3_ACCESS_KEY",
 		"MD_BUILDER_S3_SECRET_KEY", "MD_BUILDER_S3_BUCKET", "MD_BUILDER_S3_REGION",
 		"MD_BUILDER_S3_PREFIX", "MD_BUILDER_S3_USE_SSL",
@@ -83,6 +83,10 @@ dist: /srv/dist
 worker:
   enabled: false
   count: 7
+logs:
+  maxStoredBytes: 1048576
+  maxFileBytes: 33554432
+  spoolDir: /var/lib/md-builder/logs
 objectStorage:
   endpoint: minio:9000
   accessKey: ak
@@ -104,6 +108,49 @@ objectStorage:
 	}
 	if cfg.Worker.Enabled || cfg.Worker.Count != 7 {
 		t.Fatalf("worker = %+v", cfg.Worker)
+	}
+	if cfg.Logs.MaxStoredBytes != 1048576 || cfg.Logs.MaxFileBytes != 33554432 ||
+		cfg.Logs.SpoolDir != "/var/lib/md-builder/logs" {
+		t.Fatalf("logs = %+v", cfg.Logs)
+	}
+}
+
+// The log limits and the spool directory come from the environment too (a
+// container points the spool at a mounted volume).
+func TestLoadLogsFromEnv(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, "objectStorage:\n  endpoint: e\n  accessKey: ak\n  secretKey: sk\n  bucket: b\n")
+	t.Setenv(EnvLogMaxStored, "4096")
+	t.Setenv(EnvLogMaxFile, "8192")
+	t.Setenv(EnvLogSpoolDir, "/tmp/spool")
+
+	cfg, _, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Logs.MaxStoredBytes != 4096 || cfg.Logs.MaxFileBytes != 8192 || cfg.Logs.SpoolDir != "/tmp/spool" {
+		t.Fatalf("logs = %+v", cfg.Logs)
+	}
+
+	// A size that does not parse is an error, not a silent default: a typo
+	// must not cap a log the operator meant to keep.
+	t.Setenv(EnvLogMaxFile, "64M")
+	if _, _, err := Load(""); err == nil {
+		t.Fatal("want an error for an unparseable log size")
+	}
+}
+
+// Unset log settings keep the runner's defaults: the file section is
+// optional, so a deployment that never mentions logs still gets capped ones.
+func TestLoadLogsDefaultsAreUnset(t *testing.T) {
+	clearEnv(t)
+	writeConfig(t, "objectStorage:\n  endpoint: e\n  accessKey: ak\n  secretKey: sk\n  bucket: b\n")
+	cfg, _, err := Load("")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Logs.MaxStoredBytes != 0 || cfg.Logs.MaxFileBytes != 0 || cfg.Logs.SpoolDir != "" {
+		t.Fatalf("logs = %+v, want the zero value (the runner resolves it)", cfg.Logs)
 	}
 }
 

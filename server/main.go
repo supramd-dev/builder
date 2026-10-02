@@ -202,6 +202,19 @@ func main() {
 	// --- Runner component: task dispatch + scheduling pool ---
 	runnerSvc := runner.NewService(s)
 	runnerSvc.Workers = cfg.Worker.Count
+	runnerSvc.LogLimits = runner.LogLimits{
+		MaxStoredBytes: cfg.Logs.MaxStoredBytes,
+		MaxFileBytes:   cfg.Logs.MaxFileBytes,
+		SpoolDir:       cfg.Logs.SpoolDir,
+	}
+	// A crash leaves a stage's spool file behind (the writer removes it on
+	// the way out): clear the ones old enough that no stage can still hold
+	// them before the pool starts writing new ones.
+	if n, err := runner.CleanStaleSpools(runnerSvc.LogLimits.SpoolDirectory(), 24*time.Hour); err != nil {
+		log.Printf("log spool cleanup: %v", err)
+	} else if n > 0 {
+		log.Printf("log spool cleanup: removed %d stale spool file(s)", n)
+	}
 	if cfg.Worker.Enabled {
 		rootCtx, cancel := context.WithCancel(context.Background())
 		runnerSvc.Start(rootCtx)

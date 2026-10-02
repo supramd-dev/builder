@@ -67,6 +67,12 @@ const (
 	EnvDisableWorker = "MD_BUILDER_DISABLE_WORKER"
 	// EnvPublicURL overrides server.publicURL.
 	EnvPublicURL = "MD_BUILDER_PUBLIC_URL"
+	// EnvLogMaxStored overrides logs.maxStoredBytes.
+	EnvLogMaxStored = "MD_BUILDER_LOG_MAX_STORED"
+	// EnvLogMaxFile overrides logs.maxFileBytes.
+	EnvLogMaxFile = "MD_BUILDER_LOG_MAX_FILE"
+	// EnvLogSpoolDir overrides logs.spoolDir.
+	EnvLogSpoolDir = "MD_BUILDER_LOG_SPOOL_DIR"
 )
 
 // DefaultDSN is the database opened when neither the file nor the environment
@@ -116,6 +122,24 @@ type Worker struct {
 	Count int `yaml:"count"`
 }
 
+// Logs is the `logs` section: how much task output is kept. A stage's output
+// is kept twice — as chunks in the database, which the live viewer polls, and
+// as one complete log per run in object storage, which the download serves.
+type Logs struct {
+	// MaxStoredBytes caps the task output kept in the database (0 = 8 MiB).
+	// Past it the stored log ends in a truncation marker; the complete log
+	// is unaffected.
+	MaxStoredBytes int64 `yaml:"maxStoredBytes"`
+	// MaxFileBytes caps the complete log kept in object storage, per run
+	// (0 = 64 MiB). A log that runs past it keeps its beginning and its
+	// end, with a marker naming what was dropped.
+	MaxFileBytes int64 `yaml:"maxFileBytes"`
+	// SpoolDir is where a stage's log is written while it runs, before it is
+	// uploaded ("" = the OS temp directory). A deployment should point this
+	// at a disk with room for one MaxFileBytes file per running stage.
+	SpoolDir string `yaml:"spoolDir"`
+}
+
 // Config is the whole configuration file, and also the resolved configuration
 // Load returns: the file's values with the environment overlaid on top.
 type Config struct {
@@ -127,6 +151,8 @@ type Config struct {
 	Dist string `yaml:"dist"`
 	// Worker is the scheduling pool.
 	Worker Worker `yaml:"worker"`
+	// Logs bounds the task output kept per stage.
+	Logs Logs `yaml:"logs"`
 	// ObjectStorage configures the artifact store (MinIO / S3).
 	ObjectStorage storage.Config `yaml:"objectStorage"`
 }
@@ -308,6 +334,28 @@ func applyEnv(cfg *Config) error {
 		}
 		cfg.Worker.Enabled = !disabled
 	}
+
+	// The log limits are byte counts; a value that does not parse is an
+	// error rather than a silent fallback to the default (a typo would
+	// otherwise cap a log the operator meant to keep).
+	for _, b := range []struct {
+		key string
+		dst *int64
+	}{
+		{EnvLogMaxStored, &cfg.Logs.MaxStoredBytes},
+		{EnvLogMaxFile, &cfg.Logs.MaxFileBytes},
+	} {
+		v := strings.TrimSpace(os.Getenv(b.key))
+		if v == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("%s: %q is not a positive number of bytes", b.key, v)
+		}
+		*b.dst = n
+	}
+	setString(EnvLogSpoolDir, &cfg.Logs.SpoolDir)
 
 	setString("MD_BUILDER_S3_ENDPOINT", &cfg.ObjectStorage.Endpoint)
 	setString("MD_BUILDER_S3_ACCESS_KEY", &cfg.ObjectStorage.AccessKey)
