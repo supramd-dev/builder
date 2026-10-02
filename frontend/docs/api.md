@@ -246,7 +246,8 @@ parsing and the regression "analyze" view fetch through it.
 download (Content-Disposition attachment, named from the source path's
 basename). `GET /api/test-artifacts/{id}/raw` streams them for *viewing*
 instead of saving: an `.html`/`.htm` artifact comes back as a page — the
-run page frames it and its "open in a new tab" link points at it — under
+artifact preview dialog frames it, and its "open in a new tab" link points
+at it — under
 `Content-Security-Policy: sandbox …` without `allow-same-origin`, so the
 page's scripts run from an opaque origin that can reach neither this
 site's cookies or storage nor its API with credentials. The readable text

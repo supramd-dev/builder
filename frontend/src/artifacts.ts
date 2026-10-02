@@ -6,7 +6,7 @@
 // Plotly renderer into runs that have no plot at all. So the naming
 // conventions are the contract, and they are documented for the people
 // writing the pipelines (docs/test-matrix.md: *"Plot artifacts"*, *"HTML
-// artifacts"*).
+// artifacts"*, *"Markdown artifacts"*).
 
 import type { TestArtifactRef } from './api'
 
@@ -20,4 +20,11 @@ export function isPlotArtifact(a: TestArtifactRef): boolean {
 // `xxxx.html` or `xxxx.htm`, case-insensitively.
 export function isHtmlArtifact(a: TestArtifactRef): boolean {
   return /\.html?$/i.test(a.name)
+}
+
+// isMarkdownArtifact reports whether an artifact is a Markdown document:
+// `xxxx.md` or `xxxx.markdown`, case-insensitively. It decides whether the
+// preview dialog offers a rendered view of the file alongside its source.
+export function isMarkdownArtifact(a: TestArtifactRef): boolean {
+  return /\.(md|markdown)$/i.test(a.name)
 }

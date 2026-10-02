@@ -10,7 +10,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { TestArtifactRef } from './api.ts'
-import { isHtmlArtifact, isPlotArtifact } from './artifacts.ts'
+import { isHtmlArtifact, isMarkdownArtifact, isPlotArtifact } from './artifacts.ts'
 
 // ref builds the smallest artifact reference the predicates read: only the
 // name is looked at.
@@ -73,18 +73,49 @@ test('isHtmlArtifact leaves other markup and near misses alone', () => {
   }
 })
 
-test('no name is served by both predicates', () => {
+test('isMarkdownArtifact accepts .md and .markdown, case-insensitively', () => {
+  for (const name of [
+    'report/summary.md',
+    'report/README.markdown',
+    'report/SUMMARY.MD',
+    'report/Notes.Markdown',
+    '.md',
+  ]) {
+    assert.equal(isMarkdownArtifact(ref(name)), true, name)
+  }
+})
+
+test('isMarkdownArtifact leaves other text and near misses alone', () => {
+  for (const name of [
+    'report/summary.mdx', // nothing renders .mdx here
+    'report/summary.md.txt',
+    'report/summary.md.bak',
+    'report/summary.mdown',
+    'report/md',
+    'report/summary.markdown.html', // a page, whatever it was written in
+    'report/summary.txt',
+    'results/nvt-compare.plotly.json',
+  ]) {
+    assert.equal(isMarkdownArtifact(ref(name)), false, name)
+  }
+})
+
+test('no name is served by two predicates at once', () => {
   const names = [
     'a.plot.json',
     'a.plotly.json',
     'a.html',
     'a.htm',
+    'a.md',
+    'a.markdown',
     'a.json',
     'a.txt',
     'a',
   ]
   for (const name of names) {
-    const both = isPlotArtifact(ref(name)) && isHtmlArtifact(ref(name))
-    assert.equal(both, false, name)
+    const hits = [isPlotArtifact, isHtmlArtifact, isMarkdownArtifact].filter((p) =>
+      p(ref(name)),
+    )
+    assert.ok(hits.length <= 1, `${name}: ${hits.length} predicates matched`)
   }
 })

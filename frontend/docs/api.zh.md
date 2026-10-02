@@ -203,8 +203,8 @@ Artifact 归属产出它的那次尝试:单元测试运行的结果文件挂在�
 "分析"视图都从这里取数。`GET /api/test-artifacts/{id}/download` 以文件
 下载(Content-Disposition 附件,文件名取自源路径的 basename)形式返回
 同样的字节;`GET /api/test-artifacts/{id}/raw` 返回同一份字节,但用于
-**查看**而不是存下来 —— `.html`/`.htm` 会作为页面返回(运行详情页把
-它嵌进 iframe,"在新标签页打开"也指向这里),并带上
+**查看**而不是存下来 —— `.html`/`.htm` 会作为页面返回(工件的预览
+弹窗把它嵌进 iframe,弹窗里的"新标签页打开"也指向这里),并带上
 `Content-Security-Policy: sandbox …`(不含 `allow-same-origin`):页面
 自己的脚本照跑,但它落在 opaque origin 里,既够不到本站的 cookie 与
 本地存储,也无法带着凭据调本站的 API。可读的文本类(`.json`、`.xml`、

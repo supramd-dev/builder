@@ -1678,19 +1678,60 @@ code {
   margin-bottom: 1rem;
 }
 
-/* Run detail: one framed HTML artifact (*.html). The frame takes most of the
-   viewport — it is sandboxed to an opaque origin, so the page inside cannot
-   be measured from here and fitted to its content. The white background is
-   the page's own paper: it shows around a document that paints none. */
-.html-preview {
-  margin-bottom: 1rem;
+/* The artifact preview dialog's rendered views. The frame is sandboxed to an
+   opaque origin, so the page inside cannot be measured from here and fitted
+   to its content: it fills the dialog body and scrolls on its own. The white
+   background is the page's own paper — it shows around a document that
+   paints none. */
+.artifact-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
 }
 
-.html-preview iframe {
-  width: 100%;
-  height: 65vh;
-  min-height: 420px;
+/* A rendered Markdown artifact: the docs' own typography (.md-doc) in a box
+   that scrolls, since the dialog body's height is fixed. */
+.artifact-doc {
+  height: 100%;
+  overflow: auto;
+  padding: 0.5rem 1.25rem 1.5rem;
+  line-height: 1.6;
+}
+
+/* The Preview | Source switch in the dialog head: two small buttons, the
+   active one plain text, the other muted. Pushed to the right of the title
+   by the head's own gap, next to the icon actions. */
+.dialog-modes {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.dialog-modes button {
+  padding: 0.1rem 0.5rem;
+  font-size: 0.8rem;
+  background: none;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #fff;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.dialog-modes button + button {
+  border-left: none;
+}
+
+.dialog-modes button[aria-pressed='true'] {
+  color: var(--text);
+  background: var(--btn-default-bg);
+}
+
+/* The one-line explanation under the head of a sandboxed preview. */
+.dialog-note {
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--muted);
+  font-size: 0.8rem;
 }

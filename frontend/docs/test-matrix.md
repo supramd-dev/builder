@@ -556,10 +556,11 @@ build runs — the detail page charts them wherever they appear.
 ### HTML artifacts (`*.html`)
 
 An artifact whose name ends in `.html` (or `.htm`) is shown as the page it
-is: framed in the run detail page, and one click from a tab of its own. A
-test that writes a Plotly HTML export, a coverage report or a
-self-contained results page therefore needs nothing beyond listing the
-file:
+is: press *View* on its row in the artifacts table and the preview dialog
+opens on the rendered page — with a *Source* switch for the markup, a link
+to open it in a tab of its own, and a line saying it runs sandboxed. A test
+that writes a Plotly HTML export, a coverage report or a self-contained
+results page therefore needs nothing beyond listing the file:
 
 ```yaml
 unit:
@@ -567,9 +568,9 @@ unit:
   artifacts: ["report/report.html"]
 ```
 
-The same naming rule as plots applies — only those two suffixes are
-framed, and the run page says so (`HTML pages`). The rendered page is
-served by `GET /api/test-artifacts/{id}/raw`, the artifact endpoint's
+The same naming rule as plots applies — only those two suffixes render, and
+the dialog says so (*Preview* is the view they open on). The rendered page
+is served by `GET /api/test-artifacts/{id}/raw`, the artifact endpoint's
 view-don't-save form: the same bytes as the download, with a type the
 browser renders instead of saving, and for HTML a sandbox.
 
@@ -592,6 +593,30 @@ HTML artifacts are ordinary artifacts otherwise: stored verbatim, capped
 at 8 MiB, and downloaded with the zip bundle. Like plots, they work on
 build, unit and regression runs alike, and they never affect a stage's
 verdict.
+
+### Markdown artifacts (`*.md`)
+
+An artifact whose name ends in `.md` (or `.markdown`) opens in the preview
+dialog as a rendered document — headings, lists, tables, fenced code,
+links — with a *Source* switch for the plain text:
+
+```yaml
+unit:
+  command: "./tools/report.sh > report/summary.md"
+  artifacts: ["report/summary.md"]
+```
+
+It is rendered by md-builder itself (the same renderer the built-in docs
+are shown with), which builds DOM nodes directly: the file's bytes are
+never handed to the browser as markup, so a `.md` file needs no sandbox —
+nothing in it can script the page — and only those two suffixes get the
+rendered view. The rendered document is a reading convenience: the file is
+still stored verbatim, and downloads as it is.
+
+Like a plot or a page, it is a display artifact: it is not one of the
+result formats the matrix counts, so listing one never changes a stage's
+verdict. It is how a run's own notes, a summary a script wrote or a
+per-case report reach the person reading the run.
 
 ### Downloading artifacts
 
