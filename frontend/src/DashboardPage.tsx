@@ -320,7 +320,11 @@ function MatrixTable({
             <tr
               key={row.commit.id}
               className={
-                row.commit.superseded
+                // An older row of the same revision dims once nothing in it
+                // can change any more; while a graph of it is still running it
+                // stays as bright as the newest row (the fork policies let
+                // both run at once).
+                row.commit.superseded && !row.commit.live
                   ? 'dash-row-superseded'
                   : ri % 2 === 1
                     ? 'dash-row-alt'
@@ -478,8 +482,15 @@ function CommitCell({ commit }: { commit: DashboardCommit }) {
         </span>
       )}
       {commit.superseded && (
-        <span className="dash-superseded" title="a newer attempt of this commit exists">
-          superseded
+        <span
+          className="dash-superseded"
+          title={
+            commit.live
+              ? 'a newer row of this commit exists; this one is still running'
+              : 'a newer row of this commit exists'
+          }
+        >
+          {commit.live ? 'older, running' : 'older'}
         </span>
       )}
     </div>

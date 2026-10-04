@@ -56,10 +56,14 @@ clicking opens the full text. The message is stored on the commit row
 that works), so it outlives the webhook response that carried it.
 
 Manually dispatched graphs carry a small **M** badge in their cells and
-a "manual" label on the task pages. Rows of manual dispatches that were
-re-run (a newer attempt of the same commit exists) are kept but greyed
-out with a **superseded** tag — only the newest attempt of a commit is
-live.
+a "manual" label on the task pages. Rows that were superseded — a manual
+re-dispatch of the same SHA, or a `fork`/`fork_cancel` event — are kept:
+the commit row carries `superseded` (an older row of the same SHA
+exists) and `live` (a task graph of this row is still unfinished), and
+the frontend greys out only the rows that are `superseded` **and** not
+`live`. An older row whose work is still running is therefore readable,
+badged "older, running"; a row whose work the policy cancelled is
+superseded and not live, so it reads as history.
 
 The full matrix response shape:
 
@@ -365,21 +369,30 @@ POST /api/jobs/manual-yaml
 ```
 
 The ref is resolved (the same `git ls-remote` as the manual dispatch),
-the commit recorded **deduplicated like a webhook push**, the
-md-builder.yaml at that commit read and parsed, and one graph per
-matching environment created:
+the commit recorded **under the site's repeated-commit policy exactly
+like a webhook push**, the md-builder.yaml at that commit read and
+parsed, and one graph per matching environment created:
 
 ```
 {
   "commitId": 7, "commitSha": "abc123…", "commitCreated": true,
-  "jobsCreated": 2, "entriesSkipped": 0
+  "jobsCreated": 2, "entriesSkipped": 0, "graphsCancelled": 0
 }
 ```
 
-- Graphs are marked `trigger: 2` (manual yaml). Re-triggering the same
-  ref requeues the **same** graphs (keyed by commit+environment) with
-  fresh snapshots — yaml or environment-tag changes are picked up, and
-  no extra matrix row appears.
+- Graphs are marked `trigger: 2` (manual yaml). Under the default
+  `requeue` policy, re-triggering the same ref requeues the **same**
+  graphs (keyed by commit+environment) with fresh snapshots — yaml or
+  environment-tag changes are picked up, and no extra matrix row
+  appears. Under `fork`/`fork_cancel` the dispatch lands on a row of its
+  own; see [Site configuration → Repeated
+  commits](#/docs/site-configuration).
+- `graphsCancelled` is non-zero only under `fork_cancel`: the number of
+  graphs of the **earlier** recordings of that revision this dispatch
+  dropped — only those that had unfinished work to give up, so a graph
+  that had finished, or that an earlier recording had already dropped, is
+  not counted. A dispatch that created no graph cancels nothing, so a
+  failing fetch never kills a run.
 - There is no environment list in the request: each yaml entry is matched
   by tags against **every enabled environment on the site**, whoever
   registered it — the same matching a webhook push does, so a run may
@@ -454,8 +467,8 @@ administrators are created there too, with `adduser -admin`.
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
-| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`, `webhookToken` — administrators only) |
-| PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local; the `gitlab*` fields are administrator-only) |
+| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`, `commitOverlapPolicy`, `webhookToken` — administrators only) |
+| PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local; `commitOverlapPolicy`: `requeue` \| `fork` \| `fork_cancel`, any signed-in user; the `gitlab*` fields are administrator-only) |
 | POST   | `/api/site-config/webhook-token`| Rotate the webhook secret and return the configuration (administrators only) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
@@ -521,6 +534,18 @@ no way to clear it, only to rotate it with
 whole configuration). The webhook endpoint compares `X-Gitlab-Token` against
 it in constant time and answers `401` on a mismatch, before parsing the body.
 See [Site configuration → Webhook secret](#/docs/site-configuration).
+
+`commitOverlapPolicy` is what the site does when the same revision is
+dispatched again: `requeue` (the default, and what an unknown value falls
+back to), `fork` or `fork_cancel` (see
+[Site configuration → Repeated commits](#/docs/site-configuration)). It is
+readable and writable by **any signed-in user**, like `codeRepo` and
+`timezone` — not administrator-only like the tokens and the GitLab
+sign-in fields — because the policy decides the fate of everybody's
+dispatches, and a run it drops is somebody's run. An update that omits
+the field keeps the stored policy, so saving the repository form never
+rewrites it; any other value is a `400` naming what is accepted, and
+nothing is written.
 
 The GitLab sign-in configuration lives on the same endpoint but is
 administrator-only: `gitlabUrl`, `gitlabClientId`, `gitlabClientSecret` and

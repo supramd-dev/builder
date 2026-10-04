@@ -51,6 +51,14 @@ const (
 	// StatusSkipped is a real status, not a summary convention: the node never
 	// ran because an upstream task failed. Its reason is free text in Summary.
 	StatusSkipped = "skipped"
+	// StatusCancelled is the status of work a site policy dropped: when a
+	// repeated commit is configured to cancel the older dispatch
+	// (CommitOverlapForkCancel), the earlier commit's unfinished nodes and
+	// their in-flight runs become cancelled. It is terminal, and unlike a
+	// failure it is not the stage's verdict — the work was stopped from the
+	// outside. Finished work is never rewritten: only nodes that had not
+	// reached a terminal state are cancelled.
+	StatusCancelled = "cancelled"
 )
 
 // Task trigger sources: what dispatched the graph. Webhook (0) is the
@@ -159,7 +167,8 @@ func TaskKindVirtual(kind string) bool {
 // TaskStatusTerminal returns whether status is a final state of a node.
 func TaskStatusTerminal(status string) bool {
 	return status == StatusPassed || status == StatusFailed ||
-		status == StatusTimeout || status == StatusSkipped
+		status == StatusTimeout || status == StatusSkipped ||
+		status == StatusCancelled
 }
 
 // ValidateTaskKind reports whether kind is a known task kind.
@@ -457,6 +466,11 @@ func (s *Store) BeginAttempt(taskID int64) (*TestRun, error) {
 		}
 		if task.Virtual {
 			return ErrVirtualTask
+		}
+		if task.Status == StatusCancelled {
+			// Cancelled is absorbing: opening an attempt on it would put the
+			// node back in the scheduler's queue under a cancelled graph.
+			return ErrTaskCancelled
 		}
 		runs, err := beginAttemptsTx(tx, []*Task{task})
 		if err != nil {
@@ -1078,10 +1092,13 @@ type virtualRollup struct {
 // any failed child fails the container; a container whose failures are all
 // timeouts takes the timeout status instead (the cause is the point); otherwise
 // a child already running makes it running; otherwise a queued child keeps it
-// pending; otherwise a skipped child (an upstream failure stopped it) makes the
-// container skipped; everything else passed.
+// pending; otherwise a cancelled child (a policy stopped the graph) makes the
+// container cancelled; otherwise a skipped child (an upstream failure stopped
+// it) makes the container skipped; everything else passed.
 //
-// A timed-out child counts in the failed tally: it is not a pass either, and
+// A cancelled child counts in the skipped tally rather than one of its own: it
+// did not run and it did not pass, so the counts keep adding up, and the
+// status word is what carries "cancelled" to the dashboard. A timed-out child counts in the failed tally: it is not a pass either, and
 // the counts column has to add up. A real child counts as one unit; a container
 // child (the root's regression stage) contributes its own children's tally
 // instead of itself, so a container counts the leaves under it and never a
@@ -1099,9 +1116,9 @@ func rollupChildren(kind string, kids []*Task) virtualRollup {
 		out.Summary = "no " + noun
 		return out
 	}
-	var failedNames, timeoutNames []string
+	var failedNames, timeoutNames, cancelledNames []string
 	runningKids, pendingKids, skippedKids := 0, 0, 0
-	failedKids, timeoutKids := 0, 0
+	failedKids, timeoutKids, cancelledKids := 0, 0, 0
 	for _, kid := range kids {
 		if kid.Virtual {
 			out.Total += kid.Total
@@ -1115,7 +1132,9 @@ func rollupChildren(kind string, kids []*Task) virtualRollup {
 				out.Passed++
 			case StatusFailed, StatusTimeout:
 				out.Failed++
-			case StatusSkipped:
+			case StatusSkipped, StatusCancelled:
+				// Both ended without running to a verdict; cancelled has no
+				// tally of its own (the status word carries it).
 				out.Skipped++
 			}
 		}
@@ -1130,6 +1149,9 @@ func rollupChildren(kind string, kids []*Task) virtualRollup {
 		case StatusTimeout:
 			timeoutKids++
 			timeoutNames = append(timeoutNames, kid.Name)
+		case StatusCancelled:
+			cancelledKids++
+			cancelledNames = append(cancelledNames, kid.Name)
 		case StatusSkipped:
 			skippedKids++
 		}
@@ -1162,6 +1184,10 @@ func rollupChildren(kind string, kids []*Task) virtualRollup {
 		out.Status = StatusPending
 		out.Summary = fmt.Sprintf("%d/%d %s passed; %d queued",
 			out.Passed, out.Total, noun, pendingKids)
+	case cancelledKids > 0:
+		out.Status = StatusCancelled
+		out.Summary = fmt.Sprintf("%d/%d %s passed; cancelled: %s",
+			out.Passed, out.Total, noun, nameList(cancelledNames))
 	case skippedKids > 0:
 		out.Status = StatusSkipped
 		out.Summary = fmt.Sprintf("%d/%d %s skipped (upstream failure)",

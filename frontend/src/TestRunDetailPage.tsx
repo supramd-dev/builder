@@ -17,6 +17,7 @@ import MessageDialog from './MessageDialog'
 import ArtifactPreviewDialog from './ArtifactPreviewDialog'
 import TaskLogView from './TaskLogView'
 import { StatusText } from './StatusViews'
+import { statusView } from './status'
 import { formatTime } from './timezone'
 import { Breadcrumbs } from './Breadcrumbs'
 import PlotSection from './plot/PlotSection'
@@ -120,27 +121,14 @@ export default function TestRunDetailPage({ onError }: Props) {
   }
 
   const failed = run.status === 'failed'
-  const timedOut = run.status === 'timeout'
   const skipped = run.status === 'skipped'
   const inFlight = run.status === 'pending' || run.status === 'running'
-  const statusCls = failed
-    ? 'text-danger'
-    : timedOut
-      ? 'text-timeout'
-      : skipped
-        ? 'text-warn'
-        : inFlight
-          ? 'text-run'
-          : 'text-success'
-  const statusText = failed
-    ? '✗ failed'
-    : timedOut
-      ? '⏱ timed out'
-      : skipped
-        ? '⤼ skipped'
-        : inFlight
-          ? '⏳ ' + run.status
-          : '✓ passed'
+  // The status' wording and color come from the shared table (status.ts), so
+  // this page, the task graph and the dashboard cannot drift apart. An open
+  // attempt reads as the state it is in ("⏳ running"), not as a verdict.
+  const view = statusView(run.status)
+  const statusCls = view.textCls
+  const statusText = view.live ? '⏳ ' + run.status : view.text
 
   return (
     <div>

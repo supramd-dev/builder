@@ -200,7 +200,7 @@ func (s *Server) recordPush(w http.ResponseWriter, payload gitlabEventPayload, e
 		Event:    event,
 		PushedAt: time.Now(),
 	}
-	created, err := s.Store.GetOrCreateCommit(commit)
+	created, err := s.Store.RecordCommit(commit, s.overlapPolicy())
 	if err != nil {
 		log.Printf("gitlab webhook: record commit %s/%s: %v", commit.Repo, commit.SHA, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -224,6 +224,7 @@ func (s *Server) recordPush(w http.ResponseWriter, payload gitlabEventPayload, e
 			d := s.Runner.DispatchForCommit(commit)
 			resp["jobsCreated"] = d.TasksCreated
 			resp["entriesSkipped"] = d.EntriesSkipped
+			resp["graphsCancelled"] = d.Cancelled
 			if d.Err != nil {
 				// The commit is recorded; the dispatch failure is surfaced but
 				// is not a webhook-level error (GitLab would retry pointlessly).
@@ -308,7 +309,7 @@ func (s *Server) recordMergeRequest(w http.ResponseWriter, payload gitlabEventPa
 		Event:    store.CommitEventMergeRequest,
 		PushedAt: time.Now(),
 	}
-	created, err := s.Store.GetOrCreateCommit(commit)
+	created, err := s.Store.RecordCommit(commit, s.overlapPolicy())
 	if err != nil {
 		log.Printf("gitlab webhook: record commit %s/%s: %v", commit.Repo, commit.SHA, err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
@@ -337,6 +338,7 @@ func (s *Server) recordMergeRequest(w http.ResponseWriter, payload gitlabEventPa
 				d := s.Runner.DispatchForCommit(commit)
 				resp["jobsCreated"] = d.TasksCreated
 				resp["entriesSkipped"] = d.EntriesSkipped
+				resp["graphsCancelled"] = d.Cancelled
 				if d.Err != nil {
 					resp["dispatchError"] = d.Err.Error()
 					log.Printf("gitlab webhook: dispatch for commit %d failed: %v", commit.ID, d.Err)
@@ -353,6 +355,19 @@ func (s *Server) recordMergeRequest(w http.ResponseWriter, payload gitlabEventPa
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// overlapPolicy is the site's repeated-commit policy, as the commit-recording
+// paths need it (see store.RecordCommit). A config that cannot be read falls
+// back to the default requeue behavior: the recording itself must not fail for
+// it, and the dispatch decision below reports and records the same failure.
+func (s *Server) overlapPolicy() string {
+	cfg, err := s.Store.GetSiteConfig()
+	if err != nil {
+		log.Printf("gitlab webhook: site config: %v", err)
+		return store.CommitOverlapRequeue
+	}
+	return cfg.OverlapPolicy()
 }
 
 // dispatchDecision reports whether a push should trigger jobs and, when it

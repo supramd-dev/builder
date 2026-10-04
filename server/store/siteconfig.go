@@ -83,7 +83,59 @@ type SiteConfig struct {
 	// accidentally half-filled configuration cannot expose a login path.
 	GitLabLoginEnabled bool
 
+	// DuplicateCommitPolicy decides what happens when an event re-records a
+	// revision that is already on the dashboard (the same repo + sha): see
+	// the CommitOverlap* values below. Empty — a row written before the
+	// column existed — means CommitOverlapRequeue, the behaviour of every
+	// earlier release.
+	DuplicateCommitPolicy string
+
 	UpdatedAt time.Time
+}
+
+// Repeated-commit policies: what a second event for the same revision does to
+// the work the first one dispatched. The name of each value is the wire value
+// (the settings page sends it as JSON), so they are part of the API.
+const (
+	// CommitOverlapRequeue re-records the existing commit row (restamping its
+	// event) and requeues its graph: the stages run again on a new attempt,
+	// and an attempt still in flight is closed as superseded. One revision
+	// keeps one row and one graph per environment.
+	CommitOverlapRequeue = "requeue"
+	// CommitOverlapFork records a fresh commit row for the new event, so it
+	// gets its own matrix row and its own graph, and leaves the earlier one
+	// alone — both run, independently.
+	CommitOverlapFork = "fork"
+	// CommitOverlapForkCancel is CommitOverlapFork plus a cancellation: once
+	// the new graph is dispatched, the unfinished work of the earlier rows for
+	// that revision — their nodes and the runs of their in-flight attempts —
+	// is cancelled (StatusCancelled), and a stage already running on an
+	// environment is aborted. Finished work is never touched.
+	CommitOverlapForkCancel = "fork_cancel"
+)
+
+// OverlapPolicy returns the repeated-commit policy in force, mapping the empty
+// value (a configuration written before the option existed) to the requeue
+// behaviour it used to have, and any unrecognized value to the same place: an
+// unknown policy must never silently cancel work.
+func (c *SiteConfig) OverlapPolicy() string {
+	switch c.DuplicateCommitPolicy {
+	case CommitOverlapFork:
+		return CommitOverlapFork
+	case CommitOverlapForkCancel:
+		return CommitOverlapForkCancel
+	}
+	return CommitOverlapRequeue
+}
+
+// ValidOverlapPolicy reports whether value names a known policy. The empty
+// value is accepted and means the default (CommitOverlapRequeue).
+func ValidOverlapPolicy(value string) bool {
+	switch value {
+	case "", CommitOverlapRequeue, CommitOverlapFork, CommitOverlapForkCancel:
+		return true
+	}
+	return false
 }
 
 // NewWebhookToken returns a fresh webhook shared secret (32 random bytes as

@@ -153,7 +153,13 @@ type commitJSON struct {
 	Message    string `json:"message"`
 	Event      string `json:"event,omitempty"` // what created the row: push | tag_push | merge_request | manual | manual_yaml
 	PushedAt   string `json:"pushedAt"`
-	Superseded bool   `json:"superseded,omitempty"` // a newer attempt of the same SHA exists (manual re-dispatch)
+	Superseded bool   `json:"superseded,omitempty"` // an older row of the same SHA exists (manual re-dispatch, or the fork policies)
+	// Live reports that a task graph of this row is still unfinished. It is
+	// what an older row is judged by: under the default policy the newest row
+	// of a revision is the only one that runs, but the fork policies let the
+	// earlier ones keep running, so the matrix must not dim work that is still
+	// moving.
+	Live bool `json:"live,omitempty"`
 	// Why the dispatch of this commit produced no task graph — the webhook's
 	// dispatchError, stored at dispatch time (fetch/parse failure, no entry
 	// matching an environment, no code repo configured). Empty when a graph
@@ -304,6 +310,7 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 		commit := &commits[i]
 		cj := s.toCommitJSON(commit)
 		cj.Superseded = superseded[commit.ID]
+		cj.Live = commitLive(graphs, commit.ID)
 		row := dashboardRowJSON{
 			Commit: cj,
 			Cells:  make([]*runCellJSON, len(envs)),
@@ -448,6 +455,7 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 		commit := &commits[i]
 		cj := s.toCommitJSON(commit)
 		cj.Superseded = superseded[commit.ID]
+		cj.Live = commitLive(graphs, commit.ID)
 		row := fullRowJSON{
 			Commit:   cj,
 			Stages:   map[int64][]fullStageJSON{},
@@ -1241,6 +1249,22 @@ func (s *Server) toCommitJSON(c *store.Commit) commitJSON {
 		PushedAt:      c.PushedAt.UTC().Format(time.RFC3339),
 		DispatchError: c.DispatchError,
 	}
+}
+
+// commitLive reports whether any task graph of a commit row is still
+// unfinished: its root task is not terminal, so something in it may still
+// change. A row with no graph at all (never dispatched, or the dispatch
+// failed) is not live.
+func commitLive(graphs map[store.EnvCommit]store.RootTaskSummary, commitID int64) bool {
+	for key, graph := range graphs {
+		if key.Commit != commitID || graph.Root == nil {
+			continue
+		}
+		if !store.TaskStatusTerminal(graph.Root.Status) {
+			return true
+		}
+	}
+	return false
 }
 
 // supersededCommits returns the ids of every commit row but the newest of

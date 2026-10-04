@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"testing"
@@ -11,9 +12,9 @@ import (
 // one the model promises:
 //
 //   - a container's status and counts are its children's, by the documented
-//     precedence (failed > running > pending > skipped > passed), with a real
-//     child counting one unit and a virtual child contributing its subtree's
-//     tally;
+//     precedence (failed > running > pending > cancelled > skipped > passed),
+//     with a real child counting one unit and a virtual child contributing its
+//     subtree's tally;
 //   - a real node's status and counts are its current attempt's run's, and the
 //     run for the current attempt exists;
 //   - no superseded attempt is left non-terminal: nothing would ever close it.
@@ -33,7 +34,7 @@ func specRollup(kids []*Task) specRoll {
 	if len(kids) == 0 {
 		return out
 	}
-	var anyFailed, anyRunning, anyPending, anySkipped bool
+	var anyFailed, anyRunning, anyPending, anyCancelled, anySkipped bool
 	for _, k := range kids {
 		if k.Virtual {
 			// A container counts the leaves under it, never itself.
@@ -48,7 +49,8 @@ func specRollup(kids []*Task) specRoll {
 				out.passed++
 			case StatusFailed:
 				out.failed++
-			case StatusSkipped:
+			case StatusSkipped, StatusCancelled:
+				// Cancelled has no tally of its own; it counts as not-passed.
 				out.skipped++
 			}
 		}
@@ -59,6 +61,8 @@ func specRollup(kids []*Task) specRoll {
 			anyRunning = true
 		case StatusPending:
 			anyPending = true
+		case StatusCancelled:
+			anyCancelled = true
 		case StatusSkipped:
 			anySkipped = true
 		}
@@ -70,6 +74,8 @@ func specRollup(kids []*Task) specRoll {
 		out.status = StatusRunning
 	case anyPending:
 		out.status = StatusPending
+	case anyCancelled:
+		out.status = StatusCancelled
 	case anySkipped:
 		out.status = StatusSkipped
 	default:
@@ -204,7 +210,7 @@ func TestTaskGraphInvariantsRandomWalk(t *testing.T) {
 
 		var ops []string
 		for step := 0; step < 20; step++ {
-			switch rnd.Intn(10) {
+			switch rnd.Intn(11) {
 			case 0, 1, 2, 3: // the scheduler: claim a ready node, report it
 				task, err := s.ClaimReadyTask()
 				if err != nil {
@@ -225,7 +231,10 @@ func TestTaskGraphInvariantsRandomWalk(t *testing.T) {
 					res.Skipped = 2
 				}
 				ops = append(ops, "claim+report "+task.NodeKey+" "+status)
-				if _, err := s.FinishAttempt(task.ID, res); err != nil {
+				// A cancellation may have landed between the claim and the
+				// report; the store refuses the outcome then instead of
+				// reviving a cancelled attempt.
+				if _, err := s.FinishAttempt(task.ID, res); err != nil && !errors.Is(err, ErrTaskCancelled) {
 					t.Fatalf("iter %d step %d (%v): report: %v", iter, step, ops, err)
 				}
 			case 4: // a cascade from a random node
@@ -248,7 +257,7 @@ func TestTaskGraphInvariantsRandomWalk(t *testing.T) {
 			case 7: // a report from outside, against a random node
 				id := reals[rnd.Intn(len(reals))].ID
 				ops = append(ops, fmt.Sprintf("report %d", id))
-				if _, err := s.FinishAttempt(id, AttemptResult{Status: StatusPassed, Passed: 1, Total: 1}); err != nil {
+				if _, err := s.FinishAttempt(id, AttemptResult{Status: StatusPassed, Passed: 1, Total: 1}); err != nil && !errors.Is(err, ErrTaskCancelled) {
 					t.Fatalf("iter %d step %d (%v): report: %v", iter, step, ops, err)
 				}
 			case 8: // a re-dispatch of the same yaml
@@ -256,7 +265,19 @@ func TestTaskGraphInvariantsRandomWalk(t *testing.T) {
 				if _, err := s.UpsertTaskGraph(graphRoot(commit.ID, env.ID), nodes); err != nil {
 					t.Fatalf("iter %d: redispatch: %v", iter, err)
 				}
-			case 9: // a re-dispatch that drops the unit stage (it is retired)
+			case 9: // a cancellation: what a fork-cancel policy does to an
+				// older dispatch of the same revision
+				ops = append(ops, "cancel")
+				cancelled, err := s.CancelGraph(root.ID, CancelledSummary)
+				if err != nil {
+					t.Fatalf("iter %d step %d (%v): cancel: %v", iter, step, ops, err)
+				}
+				for _, id := range cancelled {
+					if id == 0 {
+						t.Fatalf("iter %d: cancel returned a zero id", iter)
+					}
+				}
+			case 10: // a re-dispatch that drops the unit stage (it is retired)
 				ops = append(ops, "redispatch-no-unit")
 				if _, err := s.UpsertTaskGraph(graphRoot(commit.ID, env.ID),
 					withoutUnit(graphNodes(commit.ID, env.ID))); err != nil {

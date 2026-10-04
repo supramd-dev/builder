@@ -58,10 +58,14 @@ that repository (matched by path), dispatching kicks in automatically:
    [The test matrix](#/docs/test-matrix)).
 3. The response carries `jobsCreated` / `entriesSkipped`, plus a
    `dispatchError` when the YAML cannot be fetched or parsed — the
-   commit is still recorded either way. The response is for the caller
-   (GitLab's webhook log); the same message is stored on the commit row,
-   so the dashboard explains the commit's empty columns long after the
-   response is gone — see below.
+   commit is still recorded either way. It also carries
+   `graphsCancelled`: the earlier graphs of that revision this event
+   dropped under the `fork_cancel` policy, and 0 under the other two. A
+   graph that had already finished, or that an earlier event had already
+   dropped, is not counted — the number says what this event did. The
+   response is for the caller (GitLab's webhook log); the same message is
+   stored on the commit row, so the dashboard explains the commit's empty
+   columns long after the response is gone — see below.
 
 **GitLab gives a webhook ten seconds to answer**, so the read in step 1
 must not scale with the repository. It does not: the server asks the code
@@ -135,3 +139,69 @@ manual dispatch on the **Run command** page or
 
 `GET /api/jobs?limit=20` lists recent graphs for monitoring (status,
 attempts, error).
+
+### One SHA, two events: a push and then an MR
+
+A common sequence triggers tests twice on one revision: you push a branch
+(a **push** event), then open a merge request for it. The MR's
+`last_commit` is the commit you just pushed, so both events carry the same
+(repo, sha). What actually happens:
+
+- **Both events dispatch.** The push dispatches, and the MR's `open`
+  dispatches again — `open`, `reopen` and `merge` mean "a new source state
+  to test", so the server does not try to recognise the second event as a
+  repeat of the first. Two events, two dispatches.
+- **What the second dispatch does to the first one's task is a setting.**
+  **Settings → Dispatch** picks between requeueing that task (the default),
+  giving the new event a task of its own, or doing that *and* cancelling the
+  older one. The three modes are laid out in
+  [Site configuration → Repeated commits](#/docs/site-configuration); what
+  follows is how each one reads on the dashboard.
+
+**Under the default (requeue):**
+
+- **One column, not two.** `commits` is deduplicated by (repo, sha), so the
+  MR re-records the row the push created: same row, same commit id, with
+  `event` restamped to `merge_request` and `ref` to the MR's source branch
+  (and the message to the MR's last-commit title). A commit you pushed can
+  therefore wear an MR badge on the matrix — that is this restamp, not a
+  second row. An MR row is *not* created on top of the pushed one, and the
+  push's own `event` is not preserved.
+- **The graph is the same graph.** Task graphs are keyed by
+  (commit, environment), so the second dispatch requeues the graph the
+  first one created instead of adding another: one root, one column of
+  cells, `attempts` incremented.
+- **A task that was still running starts over.** Requeuing re-arms every
+  node as a fresh attempt — statuses and counters reset to `pending` — and
+  closes the displaced in-flight attempt's run as `skipped` with the
+  summary `superseded by a new dispatch of this task`; nothing else would
+  ever close it. The stage then runs again from the beginning on the new
+  attempt, while the superseded attempt, its log and its artifacts stay
+  readable on the run page as history.
+
+So "the push's task got relabelled MR and restarted" is the designed
+behaviour rather than a lost result: one commit row, one graph, with the
+new attempt running and the earlier one kept as history. Note that the
+restamp is independent of the dispatch — an MR action that does *not*
+dispatch (`update`, `close`, `approved`) still restamps the row's event
+and ref, because the SHA is the same revision either way. The same holds
+for any other re-recording of an already-recorded SHA: a tag push of a
+pushed commit, or re-running a manual yaml dispatch of the same ref.
+
+**Under `fork`:** the MR gets a commit row and a task graph of its own, and
+the push's are left exactly as they were — still queued or still running,
+nothing restamped, nothing closed. The matrix then shows two rows for that
+SHA, each with its own cells; the older one is marked `older` and dimmed
+once it stops moving. Both graphs really do run at the same time, on the
+same environment: expect the load, and expect two sets of logs.
+
+**Under `fork_cancel`:** the same, plus the older rows' unfinished work is
+cancelled once the new graphs exist — a stage still running on an
+environment is aborted, its attempt is closed as `cancelled` with the
+summary `cancelled by a newer dispatch of this commit`, and a stage that had
+already finished keeps its result and its log. The response then carries
+`graphsCancelled` next to `jobsCreated`: how many of the revision's earlier
+graphs this event dropped. A dispatch that creates nothing — an unreadable
+YAML, no entry matching an environment — cancels nothing: the cancellation
+waits for the new work to exist, so a broken read never kills a running
+test.

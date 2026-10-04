@@ -517,6 +517,14 @@ func (s *Service) finishStage(task *store.Task, status, summary, errMsg string,
 		Artifacts:  artifacts,
 	}
 	if err := s.finishAttempt(task, res); err != nil {
+		if errors.Is(err, store.ErrTaskCancelled) {
+			// Expected after a cancellation aborted this stage: the store
+			// keeps the cancelled outcome it wrote when it dropped the node,
+			// and this attempt's report is not an outcome any more.
+			log.Printf("runner: task %d: %s attempt %d was cancelled while it ran; "+
+				"its result was discarded", task.ID, task.Kind, task.Attempts)
+			return
+		}
 		log.Printf("runner: task %d: finish %s attempt %d gave up after %d tries: %v "+
 			"(the node stays running; restart the service or re-dispatch its commit)",
 			task.ID, task.Kind, task.Attempts, finishAttemptTries, err)
@@ -549,10 +557,11 @@ func (s *Service) finishAttempt(task *store.Task, res store.AttemptResult) error
 			break
 		}
 		if errors.Is(err, store.ErrVirtualTask) || errors.Is(err, store.ErrInvalidRunStatus) ||
-			errors.Is(err, store.ErrTestRunNotFound) {
+			errors.Is(err, store.ErrTestRunNotFound) || errors.Is(err, store.ErrTaskCancelled) {
 			// A refusal, not a flake: the store rejected the report itself
-			// (wrong kind of node, unknown status, attempt row gone), so
-			// repeating it changes nothing.
+			// (wrong kind of node, unknown status, attempt row gone, or the
+			// node was cancelled while this attempt ran), so repeating it
+			// changes nothing.
 			return err
 		}
 		log.Printf("runner: task %d: finish %s attempt %d: %v; retrying in %s",

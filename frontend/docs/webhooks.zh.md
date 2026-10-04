@@ -52,7 +52,10 @@ Merge request 事件在 `open`、`reopen` 和 `merge` 动作时派发
    [Runner 与任务](#/docs/runner-strategy)和
    [测试矩阵](#/docs/test-matrix))。
 3. 响应携带 `jobsCreated` / `entriesSkipped`,以及 YAML 无法获取或解析
-   时的 `dispatchError` —— 无论成败,提交都会被记录。响应是给调用方
+   时的 `dispatchError` —— 无论成败,提交都会被记录。它还携带
+   `graphsCancelled`:在 `fork_cancel` 模式下,本次事件丢弃了该 revision
+   早先的多少张图(另外两种模式下为 0);已经跑完的、或更早的事件已经丢
+   掉过的图不计入 —— 这个数字说的是本次事件做了什么。响应是给调用方
    (GitLab 的 webhook 日志)看的;同一条消息还会存到 commit 行上,
    因此响应早已消失之后,仪表板仍然能解释该 commit 的空列 —— 见下。
 
@@ -117,3 +120,58 @@ webhook 触发。如果想用**自己指定的阶段命令**运行测试(不需�
 [Runner 与任务](#/docs/runner-strategy))。
 
 `GET /api/jobs?limit=20` 列出最近的图用于监控(状态、attempts、错误)。
+
+### 同一个 SHA,两个事件:先 push,后开 MR
+
+有一种很常见的顺序会让同一个版本被触发两次:先推送分支(一个
+**push** 事件),然后为它开一个 merge request。MR 的 `last_commit`
+就是你刚推的那个提交,因此两个事件携带的是同一个 (repo, sha)。
+实际发生的是:
+
+- **两个事件都会派发。** push 派发一次,MR 的 `open` 再派发一次 ——
+  `open`、`reopen`、`merge` 的含义是"有一个新的源状态需要测试",服务端
+  不会去识别第二个事件是第一个事件的重复。两个事件,两次派发。
+- **第二次派发对第一次的任务做什么,是一项设置。** **Settings → Dispatch**
+  决定是重排那个任务(默认)、给新事件一个自己的任务,还是在此基础上再把
+  较早的那个取消。三种模式的完整说明见
+  [站点配置 → 重复 commit](#/docs/site-configuration);下面说明每种模式在
+  仪表板上的表现。
+
+**默认模式(requeue)下:**
+
+- **仪表板上只有一列,不是两列。** `commits` 按 (repo, sha) 去重,因此
+  MR 记录的是 push 创建的那一行:同一行、同一个 commit id,`event` 被
+  刷新为 `merge_request`,`ref` 刷新为 MR 的源分支(消息刷新为 MR
+  last-commit 的标题)。所以一个你明明用 push 推上去的提交,在矩阵上
+  可能戴着 MR 徽标 —— 这是刷新 (restamp),不是多了一行。MR 并**不会**
+  在推送行之外另建一行,push 原本的 `event` 也不会保留。
+- **图还是同一张图。** 任务图以(提交, 环境)为键,因此第二次派发是
+  重排第一次创建的图,而不是再建一张:一个 root、一列单元格,
+  `attempts` 加一。
+- **还在运行的任务会重新开始。** 重排会把每个节点重新武装成一个新的
+  attempt —— 状态和计数全部回到 `pending` —— 并把被顶掉的那个在途
+  attempt 的运行关闭为 `skipped`,摘要为
+  `superseded by a new dispatch of this task`;否则没有任何东西会去关闭
+  它。随后该阶段在新的 attempt 上从头再跑一遍,而被顶替的 attempt 连同
+  它的日志和工件仍然留在运行页面上,作为历史可读。
+
+所以"push 触发的任务被改标成 MR 并从头重跑"是设计行为,而不是结果丢失:
+一行提交、一张图,新的 attempt 在跑,早先的 attempt 保留为历史。注意
+刷新与派发是相互独立的 —— 不派发的 MR 动作(`update`、`close`、
+`approved`)同样会把该行的 event 和 ref 刷新,因为无论哪种情况 SHA 都是
+同一个版本。任何其他"再次记录同一 SHA"的情况也是如此:对已推送提交的
+tag push,或对同一 ref 重跑手动 yaml 派发,都是这样刷新并重排。
+
+**`fork` 模式下:** MR 会有自己的 commit 行和自己的任务图,而 push 的那些
+原样不动 —— 仍在排队或仍在运行,不刷新任何字段,也不关闭任何运行。矩阵上
+于是出现同一个 SHA 的两行,各有各的单元格;较早的那行标为 `older`,在它不再
+变化之后置灰。两张图确实会在同一个环境上同时运行:请预期相应的负载,也预期
+两份日志。
+
+**`fork_cancel` 模式下:** 同上,并且在新的任务图存在之后,较早那些行尚未完成
+的工作会被取消 —— 仍在环境上运行的阶段会被中断,其 attempt 以 `cancelled`
+关闭,摘要为 `cancelled by a newer dispatch of this commit`,而已经完成的阶段
+保留其结果与日志。此时响应会在 `jobsCreated` 之外携带 `graphsCancelled`:
+本次事件丢弃了该 revision 早先的多少张图。什么都创建不出来的派发 —— YAML
+读不到、没有条目匹配到环境 —— 不会取消任何东西:取消要等新的工作真的存在,
+因此一次失败的读取永远不会杀掉正在运行的测试。

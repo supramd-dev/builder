@@ -51,10 +51,13 @@ func RunKindValid(kind string) bool {
 	return false
 }
 
-// AttemptStatusValid reports whether status may end an attempt.
+// AttemptStatusValid reports whether status may end an attempt. Cancelled is
+// in the list because a policy can end an attempt from the outside (see
+// CancelGraph); a runner never reports it — it is only written by the store.
 func AttemptStatusValid(status string) bool {
 	return status == StatusPassed || status == StatusFailed ||
-		status == StatusTimeout || status == StatusSkipped
+		status == StatusTimeout || status == StatusSkipped ||
+		status == StatusCancelled
 }
 
 // AttemptStatusGatesDependents reports whether an attempt's outcome means the
@@ -294,6 +297,14 @@ func (s *Store) FinishAttempt(taskID int64, res AttemptResult) (*TestRun, error)
 		}
 		if task.Virtual {
 			return ErrVirtualTask
+		}
+		if task.Status == StatusCancelled {
+			// A repeated-commit policy cancelled this graph while the attempt
+			// was in flight. The outcome belongs to work nobody is waiting for
+			// any more, and taking it would both rewrite the cancelled run and
+			// — through currentAttemptTx — open an attempt nobody asked for.
+			// The store refuses instead; the runner logs the refusal.
+			return ErrTaskCancelled
 		}
 		stale := res.Attempt > 0 && res.Attempt != task.Attempts
 		if stale {

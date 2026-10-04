@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router'
 import { LoaderCircle } from 'lucide-react'
 import { getTask, isTerminalStatus, taskArtifactsZipUrl, type TaskDetail, type TaskNode } from './api'
 import { StatusText, commitUrl } from './StatusViews'
+import { statusGlyph, statusView } from './status'
 import { Breadcrumbs } from './Breadcrumbs'
 import TaskLogView from './TaskLogView'
 import {
@@ -372,7 +373,7 @@ function GraphCanvas({
                   {status === 'running' ? (
                     <LoaderCircle size={13} className="spin" />
                   ) : (
-                    nodeGlyph(status)
+                    statusGlyph(status)
                   )}
                 </span>
                 <span className="graph-node-name">{node.name}</span>
@@ -452,11 +453,11 @@ function StepList({
             onClick={() => onSelect(node)}
             title={node.error || node.summary || node.name}
           >
-            <span className={'task-step-status ' + statusTextClass(node.status)}>
+            <span className={'task-step-status ' + statusView(node.status).textCls}>
               {node.status === 'running' ? (
                 <LoaderCircle size={13} className="spin" />
               ) : (
-                nodeGlyph(node.status)
+                statusGlyph(node.status)
               )}
             </span>
             <span className="task-step-name">{node.name}</span>
@@ -491,8 +492,8 @@ function StepPanel({
   return (
     <div className="pipeline-log">
       <div className="pipeline-log-head">
-        <span className={'pipeline-log-status ' + statusTextClass(node.status)}>
-          {nodeGlyph(node.status)}
+        <span className={'pipeline-log-status ' + statusView(node.status).textCls}>
+          {statusGlyph(node.status)}
         </span>
         <span className="pipeline-log-name">{node.name}</span>
         <span className="text-muted pipeline-log-kind">{node.kind}</span>
@@ -578,34 +579,3 @@ function graphLive(task: TaskDetail): boolean {
   )
 }
 
-function nodeGlyph(status: string): string {
-  switch (status) {
-    case 'passed':
-      return '✓'
-    case 'failed':
-      return '✗'
-    case 'timeout':
-      return '⏱'
-    case 'skipped':
-      return '⤼'
-    default:
-      return '·'
-  }
-}
-
-function statusTextClass(status: string): string {
-  switch (status) {
-    case 'passed':
-      return 'text-success'
-    case 'failed':
-      return 'text-danger'
-    case 'timeout':
-      return 'text-timeout'
-    case 'skipped':
-      return 'text-warn'
-    case 'running':
-      return 'text-run'
-    default:
-      return 'text-muted'
-  }
-}

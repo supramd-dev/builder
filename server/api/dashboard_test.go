@@ -1151,6 +1151,90 @@ func TestDashboardSupersededRows(t *testing.T) {
 	check(t, "/api/dashboard/regression")
 }
 
+// TestDashboardLiveFlagOnAnOlderRow covers the fork policy's presentation: an
+// older row of the same revision keeps its own task graph, and while that graph
+// can still change the row must not be dimmed like dead history. superseded
+// says "a newer row of this revision exists"; live says "this one is still
+// moving", and the matrix dims a row only when the second is false.
+func TestDashboardLiveFlagOnAnOlderRow(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	env := seedDispatchEnv(t, s, "cpu-live", "cpu", true)
+	setOverlapPolicy(t, s, store.CommitOverlapFork)
+	seedUser(t, s, "dashboard-live", "dashboard-live@example.com", "s3cret")
+	cookie := loginAndGetCookie(t, mux, "dashboard-live", "s3cret")
+
+	const sha = "9999999999999999999999999999999999999999"
+	// Two events for one SHA: under the fork policy each gets its own row and
+	// its own graph, and both graphs stay pending (nothing claims them here).
+	var rows []int64
+	for _, body := range []string{
+		pushBody("group/code", sha),
+		mrBody("group/code", sha, "fix: energy drift"),
+	} {
+		rec := postWebhook(t, mux, s, body, "X-Gitlab-Event", "Push Hook")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("webhook: %d %s", rec.Code, rec.Body.String())
+		}
+		var res map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, int64(res["commitId"].(float64)))
+	}
+	older, newer := rows[0], rows[1]
+	if older == newer {
+		t.Fatalf("the fork policy recorded one row for both events: %d", older)
+	}
+
+	rowState := func(t *testing.T) map[int64]commitJSON {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/dashboard/full", nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("dashboard: %d %s", rec.Code, rec.Body.String())
+		}
+		var dash fullDashboardJSON
+		if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+			t.Fatal(err)
+		}
+		out := map[int64]commitJSON{}
+		for _, row := range dash.Rows {
+			out[row.Commit.ID] = row.Commit
+		}
+		return out
+	}
+
+	state := rowState(t)
+	if got := state[older]; !got.Superseded || !got.Live {
+		t.Fatalf("the older row while its graph is pending: want superseded+live, got %+v", got)
+	}
+	if got := state[newer]; got.Superseded || !got.Live {
+		t.Fatalf("the newer row: want live and not superseded, got %+v", got)
+	}
+
+	// Once the older row's graph is finished — here, cancelled by the same
+	// policy the fork_cancel mode applies — it stops being live and is dimmed.
+	root, err := s.FindRootTaskByCommitEnv(older, env.ID)
+	if err != nil {
+		t.Fatalf("the older graph: %v", err)
+	}
+	if _, err := s.CancelGraph(root.ID, store.CancelledSummary); err != nil {
+		t.Fatal(err)
+	}
+	if got := rowState(t)[older]; !got.Superseded || got.Live {
+		t.Fatalf("the older row after its graph ended: want superseded and not live, got %+v", got)
+	}
+}
+
 // TestTaskDetailRetiredNodes checks the re-dispatch presentation on the task
 // graph: a node the new graph no longer defines stays readable as history
 // (retiredTasks) and drops out of the active node list and of its parent's

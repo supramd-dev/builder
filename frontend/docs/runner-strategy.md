@@ -25,7 +25,12 @@ how repeated triggers are recorded.
   history of the earlier attempts where it is, and **retires** — never
   deletes — the nodes the new YAML no longer defines: a dropped case keeps
   its runs, logs and artifacts, stops being scheduled and drops out of
-  the aggregate. The YAML read itself is one request for one file through
+  the aggregate. One revision can be requeued this way without anyone
+  triggering anything by hand: pushing a branch and then opening an MR
+  for it dispatches the same (commit, environment) graph twice on one
+  commit row, and the second dispatch restarts whatever was still
+  running (see [Webhooks](#/docs/webhooks)). The YAML read itself is one
+  request for one file through
   the code host, with the full clone as a fallback, and is capped by a
   timeout — so a dispatch never scales with the repository, and a silent
   repository server cannot hold it open (see
@@ -57,8 +62,11 @@ how repeated triggers are recorded.
   private key. Unlike webhook pushes, every manual dispatch records a **fresh commit
   row**: re-running the same ref gives each attempt its own matrix row
   (the commit message carries the dispatch time), and older rows of the
-  same (repo, sha) are marked **superseded** — still listed on the
-  dashboard, but greyed out.
+  same (repo, sha) are marked **older** (`superseded` in the API) — still
+  listed on the dashboard, and greyed out once nothing in them can change
+  any more (the same treatment the `fork` policies give a webhook event
+  that opens a row of its own — see
+  [Site configuration → Repeated commits](#/docs/site-configuration)).
 
 The `trigger` column of a task records how its graph was created —
 `0` = webhook, `1` = manual (custom commands), `2` = manual yaml — and is
@@ -134,6 +142,19 @@ root (test <sha> on <environment>)   # virtual: the whole pipeline
   dashboard says so. Stages that are not part of the graph at all (an
   empty manual stage command, or a case a later dispatch dropped) are not
   "skipped" — they are simply not there, and their cells show "—".
+- A node can also end as **cancelled**, which is a decision about the *run*,
+  not about the code: the site's repeated-commit policy dropped it, either
+  because a newer dispatch of the same revision replaced it
+  (`fork_cancel`, see
+  [Site configuration → Repeated commits](#/docs/site-configuration)) or
+  because the runner aborted the stage it was executing. Nothing about a
+  cancelled node was judged — the summary names the dispatch that dropped it
+  (`cancelled by a newer dispatch of this commit`) — and only unfinished work
+  is ever cancelled: a node that had already passed keeps its status, its
+  result and its log. Cancelling is **absorbing**: a report that arrives
+  afterwards (the aborted stage's own outcome, or a late write from another
+  worker) is refused by the store instead of reopening the node on a fresh
+  attempt, so cancelled work cannot come back to life.
 
 ## Execution pool
 
@@ -291,9 +312,10 @@ to is created with it. At dispatch time every real node opens an attempt
 attempt-N run in status `pending` is created for it:
 
 ```
-dispatch          claim                     outcome
+dispatch          claim                          outcome
 pending (run)  →  running            →        passed/failed/timeout/skipped
                   (ClaimReadyTask)            (FinishAttempt)
+                                                cancelled (CancelGraph)
 ```
 
 - The scheduler claims ready nodes atomically (`ClaimReadyTask`), flipping
@@ -324,9 +346,25 @@ pending (run)  →  running            →        passed/failed/timeout/skipped
   else would ever close it. The runner reports the attempt it actually ran
   — the report names its attempt number — so the old attempt keeps the
   real outcome and the new one is left for the scheduler to run for real.
+- A **cancellation** (`fork_cancel`, or the runner aborting a stage) closes
+  the in-flight attempt's run as `cancelled` with the policy's summary and
+  cancels the node — in one transaction, so a reader never sees a cancelled
+  node with a live run. The stage the runner was executing is aborted at the
+  same time (the SSH session is closed under it); when its result arrives
+  afterwards, `FinishAttempt` refuses it (`the task was cancelled`) rather
+  than letting a stage verdict overwrite the cancellation. Cancelled nodes
+  are terminal, so nothing claims them again and no queue is left holding
+  them.
 - `pending`/`running` are the only non-terminal statuses; anything else is
   final. Re-running a dispatch opens fresh attempts; nothing is edited in
-  place.
+  place. Absorbing is what `cancelled` does to a *report*, not to a
+  dispatch: while the policy that dropped the work is in force, that row is
+  never dispatched again — the newer dispatch has a row of its own, which is
+  what "run this revision again" means under `fork` and `fork_cancel` — but
+  a row that does get dispatched a second time (the site went back to
+  `requeue`, so a further push of that revision deduplicates onto it) runs
+  its whole graph afresh on new attempts, cancelled nodes included, with the
+  cancelled attempt kept as history.
 
 ## Demo seeds and frozen live graphs
 

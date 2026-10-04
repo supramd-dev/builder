@@ -5,11 +5,13 @@ import {
   getSiteConfig,
   rotateWebhookToken,
   updateSiteConfig,
+  type CommitOverlapPolicy,
   type Me,
   type SiteConfig,
 } from './api'
 import AccountPanel from './AccountPanel'
 import { gitlabWebhooksURL } from './gitlab'
+import { OVERLAP_DEFAULT, overlapChoice, overlapChoices } from './overlap'
 import {
   allTimezones,
   applySiteTimezone,
@@ -27,16 +29,18 @@ interface SettingsPageProps {
 
 // SettingsPage organizes the site-wide configuration into tabs, in this
 // order: the code repository (and its credentials), the GitLab webhook
-// reference, the GitLab sign-in integration (administrators only), the
-// account tab — everyone edits their own account there, and an administrator
-// also manages the other accounts — and the display settings (timezone). Test
+// reference, the dispatch behavior (what a repeated commit does to the task
+// already dispatched for it), the GitLab sign-in integration (administrators
+// only), the account tab — everyone edits their own account there, and an
+// administrator also manages the other accounts — and the display settings
+// (timezone). Test
 // inputs live inside the code repository itself, so there is no separate
 // test-input tab; the environment variable whitelist for md-builder.yaml
 // `variables:` is per build host and lives on the environment, under
 // Environments.
 export default function SettingsPage({ me, onMeChange, onError }: SettingsPageProps) {
   const [tab, setTab] = useState<
-    'repo' | 'webhook' | 'gitlab' | 'account' | 'display'
+    'repo' | 'webhook' | 'dispatch' | 'gitlab' | 'account' | 'display'
   >('repo')
   const isAdmin = me.role === 'admin'
 
@@ -61,6 +65,15 @@ export default function SettingsPage({ me, onMeChange, onError }: SettingsPagePr
           onClick={() => setTab('webhook')}
         >
           Webhook
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'dispatch'}
+          className={tab === 'dispatch' ? 'tab active' : 'tab'}
+          onClick={() => setTab('dispatch')}
+        >
+          Dispatch
         </button>
         {/* The GitLab sign-in integration holds credentials, so the tab is
             rendered only for an administrator. (The Repository tab, which
@@ -102,6 +115,8 @@ export default function SettingsPage({ me, onMeChange, onError }: SettingsPagePr
         <RepositoryTab onError={onError} />
       ) : tab === 'webhook' ? (
         <WebhookTab me={me} />
+      ) : tab === 'dispatch' ? (
+        <DispatchTab onError={onError} />
       ) : tab === 'gitlab' ? (
         <GitLabTab onError={onError} />
       ) : tab === 'account' ? (
@@ -723,6 +738,125 @@ function DisplayTab({ onError }: { onError: (message: string) => void }) {
             <code>{siteTimezone() || `${browser || 'browser local'}`}</code>{' '}
             — times render as {sample}.
           </small>
+        </div>
+
+        <button type="submit" className="btn btn-primary" disabled={saving}>
+          {saving ? 'Saving…' : 'Save'}
+        </button>{' '}
+        {saved && <span style={{ color: 'var(--success)' }}>Saved.</span>}
+        {updatedAt && (
+          <span className="text-muted" style={{ marginLeft: '0.75rem' }}>
+            Last updated {formatTime(updatedAt)}
+          </span>
+        )}
+      </form>
+    </div>
+  )
+}
+
+// --- Dispatch tab (repeated commits) ------------------------------------------
+
+// DispatchTab holds what a repeated commit does to the work already dispatched
+// for it: the md-builder.yaml matrix of a revision that reaches the site twice
+// (a push and then a merge request, a tag push of a pushed commit, the same ref
+// dispatched by hand twice) can either restart the existing task or get one of
+// its own, optionally cancelling the older one. One option, site-wide: the
+// choice is about the site's dispatch pipeline, not about a repository or an
+// environment. Every logged-in user may change it, like the Repository tab.
+function DispatchTab({ onError }: { onError: (message: string) => void }) {
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [saveError, setSaveError] = useState('')
+  // The repository and the timezone are part of every update body: the API
+  // validates the repository and writes the columns the request owns, so a tab
+  // that left them out would wipe them.
+  const [codeRepo, setCodeRepo] = useState('')
+  const [timezone, setTimezone] = useState('')
+  const [policy, setPolicy] = useState<CommitOverlapPolicy>(OVERLAP_DEFAULT)
+  const [updatedAt, setUpdatedAt] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    getSiteConfig()
+      .then((cfg: SiteConfig) => {
+        if (cancelled) return
+        setCodeRepo(cfg.codeRepo)
+        setTimezone(cfg.timezone)
+        setPolicy(overlapChoice(cfg.commitOverlapPolicy).value)
+        setUpdatedAt(cfg.updatedAt)
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        const msg = err instanceof Error ? err.message : String(err)
+        setSaveError(msg)
+        onError(msg)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [onError])
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setSaving(true)
+    setSaveError('')
+    setSaved(false)
+    try {
+      const cfg = await updateSiteConfig({ codeRepo, timezone, commitOverlapPolicy: policy })
+      setPolicy(overlapChoice(cfg.commitOverlapPolicy).value)
+      setUpdatedAt(cfg.updatedAt)
+      setSaved(true)
+    } catch (err: unknown) {
+      setSaveError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) {
+    return <p className="text-muted">Loading…</p>
+  }
+
+  const choice = overlapChoice(policy)
+
+  return (
+    <div>
+      {saveError && <div className="alert alert-danger">{saveError}</div>}
+
+      <h3>Repeated commits</h3>
+      <p className="text-muted">
+        A revision can reach md-builder more than once: a branch is pushed and
+        then opened as a merge request, a tag is pushed for a commit that was
+        already built, the same ref is dispatched twice by hand. Both events
+        are recorded and both dispatch the md-builder.yaml matrix — this is what
+        the second one does to the task the first one started. It applies to
+        webhook events (push, tag push, merge request) and to the manual yaml
+        dispatch, not to a manually entered test command, which always gets a
+        task of its own.
+      </p>
+
+      <form onSubmit={save} style={{ maxWidth: '36rem' }}>
+        <div className="form-group">
+          <label htmlFor="cfg-overlap">When a commit is dispatched again</label>
+          <select
+            id="cfg-overlap"
+            value={policy}
+            onChange={(e) => {
+              setPolicy(e.target.value as CommitOverlapPolicy)
+              setSaved(false)
+            }}
+          >
+            {overlapChoices.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+          <small className="text-muted">{choice.description}</small>
         </div>
 
         <button type="submit" className="btn btn-primary" disabled={saving}>

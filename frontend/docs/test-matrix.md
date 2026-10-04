@@ -690,6 +690,13 @@ Each matched entry becomes a task graph (see
    files and records its own run; the matrix cell shows the container's
    rollup across cases.
 
+A graph can also stop short of an outcome for a reason that is not about
+the code: when a newer dispatch of the same revision drops it under the
+site's `fork_cancel` policy, the stages it had not finished read
+**cancelled** — they were never judged, and the cell, the graph and the
+run page say so rather than showing a failure (see
+[Site configuration → Repeated commits](#/docs/site-configuration)).
+
 ## Custom summaries
 
 A stage command may print a summary line on stdout:
