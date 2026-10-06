@@ -130,6 +130,14 @@ event has a row of its own, which is what "run this revision again" means here
 whole graph afresh, on new attempts, with the cancelled attempt kept as
 history.
 
+The same **cancelled** status is what a run stopped by hand gets — from the
+run page or the task page, whatever this setting says (see
+[Runner strategy](#/docs/runner-strategy)). The summary differs, because the
+cause does: *cancelled by &lt;username&gt;* rather than *by a newer dispatch of
+this commit*, and a stage that was still running is aborted on the
+environment. The work waiting on a stopped stage reads **skipped**, since it
+can never run now.
+
 Any logged-in user may change this setting, like the Repository tab: it decides
 how the site dispatches, not who may do what.
 

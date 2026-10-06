@@ -190,6 +190,11 @@ cd "$MD_CODE_DIR/<workdir>"           # 空 workdir 即代码目录
   的文件在归档根目录,每个后代的文件放在以它命名的目录下;一个回归阶段
   因此会作为一个包含其全部用例的包下载(见
   [仪表板与报告](#/docs/dashboard))。
+- `POST /api/tasks/{id}/cancel` —— 停掉该任务及其下所有未完成的工作
+  (单个阶段、一个容器的用例,或整张图):这里是唯一的**写**接口,也是
+  API 中唯一任何已登录用户都可执行的写操作。它把进行中尝试的运行以
+  `cancelled` 关闭,并中止 worker 正在为它执行的阶段;已经没有任何东西
+  可停的任务返回 `409`(见 [API](#/docs/api))。
 
 读取以上任何一项都对所有已登录用户开放:矩阵本身是全站级的,它的下钻
 页面同样如此。矩阵中虚拟节点的单元格携带 `runId` 0(它没有运行),因此
@@ -245,7 +250,7 @@ HTTP 到达的报告则由 `POST /api/test-runs` 调用它。只有这一条写�
 派发              认领                     结果
 pending(运行)  →  running            →     passed/failed/timeout/skipped
                   (ClaimReadyTask)          (FinishAttempt)
-                                            cancelled (CancelGraph)
+                                            cancelled (策略或手动取消)
 ```
 
 - 调度器原子地认领就绪节点(`ClaimReadyTask`),在一个事务里把节点与其
@@ -272,14 +277,25 @@ pending(运行)  →  running            →     passed/failed/timeout/skipped
 - `pending`/`running` 是仅有的两个非终态;其他任何状态都是最终状态。
   重新执行派发会开启新的尝试;没有任何内容被原地改写。
 - 节点也可能以 **cancelled** 收尾 —— 这是对*运行*的决定,不是对代码的
-  判定:站点的重复 commit 策略把它丢掉了(`fork_cancel`,见
-  [站点配置](#/docs/site-configuration)),或者是 runner 中止了它正在执行
-  的阶段。状态与摘要同时写在该节点与那次尝试的运行上,并且只有未完成的
-  工作会被取消:已经通过的节点保留它的状态、结果与日志(见
-  [测试矩阵](#/docs/test-matrix))。
+  判定:被取消的节点没有被评判过任何东西。取消有两种起因,摘要会写明是
+  哪一种:站点的重复 commit 策略因为同版本的新派发顶替了它而丢弃了这些
+  工作(`fork_cancel`,见 [站点配置](#/docs/site-configuration),摘要为
+  `cancelled by a newer dispatch of this commit`),或者有人手动停掉了它
+  (`POST /api/tasks/{id}/cancel`,入口在运行详情页与任务页,摘要为
+  `cancelled by <用户名>`)。只有未完成的工作会被取消:已经通过的节点
+  保留它的状态、结果与日志(见 [测试矩阵](#/docs/test-matrix))。
+- 依赖被取消节点的工作不可能再运行 —— 队列只会派发依赖全部通过的节点
+  —— 因此它们会在同一个事务里被标记为 **skipped**,与某个节点失败之后
+  的处理完全一致,原因里写明被取消的任务
+  (`upstream task build was cancelled`)。不会留下任何永远无法被认领的
+  排队节点,因此带被取消阶段的图仍然会收敛。除此之外手动取消的粒度很
+  窄:停掉回归容器只会带走它下面尚未完成的用例(包括正在运行的),旁边
+  的 build 与 unit 阶段不受影响;停掉 root 则停掉整张图。
 - **取消**在同一个事务里把进行中尝试的运行以 `cancelled` 关闭并取消该
-  节点,因此读者不会看到"已取消却仍有一条实时运行"的节点。runner 正在
-  执行的阶段同时被中止(其下的 SSH 会话被关闭);它随后送来的结果会被
+  节点,因此读者不会看到"已取消却仍有一条实时运行"的节点,同时在同一
+  事务里把等待它的一切标记为 skipped。runner 正在执行的阶段同时被中止
+  (`Service.CancelSubtree` 先写存储,再关闭它本地丢弃的那些阶段下面的
+  SSH 会话 —— 这是存储层唯一做不到的事);它随后送来的结果会被
   `FinishAttempt` 拒绝(记为"the task was cancelled"),而不会覆盖这次
   取消。取消对*报告*是吸收态 —— 晚到的结果既不复活该节点,也不在其后
   开启新尝试 —— 但对*派发*不是:触发取消的策略仍在生效期间,这一行不会

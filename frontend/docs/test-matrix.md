@@ -696,6 +696,12 @@ site's `fork_cancel` policy, the stages it had not finished read
 **cancelled** — they were never judged, and the cell, the graph and the
 run page say so rather than showing a failure (see
 [Site configuration → Repeated commits](#/docs/site-configuration)).
+The same is true of work stopped by hand from the run page or the task
+page: the stage that was cancelled reads cancelled, and the stages that
+were waiting on it — which can never run now — read **skipped**, with a
+summary naming the cancelled task (`upstream task build was cancelled`).
+Like `skipped`, cancelled counts as *not passed* in the roll-up, so a
+graph with a cancelled stage still settles to an outcome.
 
 ## Custom summaries
 

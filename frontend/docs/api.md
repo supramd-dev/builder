@@ -195,7 +195,10 @@ they name was deleted — a run outlives the environment it ran on, so an
 old run page stays readable. Reading is like the matrix itself, which is
 site-wide: any signed-in user may open any task, run, log or artifact.
 Only the writes are restricted — reporting to a task (the environment's
-owner or an administrator) and dispatching onto an environment. Reading
+owner or an administrator) and dispatching onto an environment — with one
+exception: **cancelling** is open to any signed-in user (see below), because
+it stops work that has produced no result yet and rewrites nothing that
+has. Reading
 is where the ownership model does not apply, so the pages stay useful
 for a colleague asking why a case failed. Artifacts belong to the attempt that
 produced them: a unit run's results files attach to the unit run, a
@@ -278,6 +281,41 @@ Two zips bundle artifacts, and neither is ever an empty archive:
 - A request whose bundle has no files at all is a `404`
   (`{"error":"no artifacts"}`) — an empty zip would look like a
   successful download.
+
+### Cancelling running work
+
+`POST /api/tasks/{id}/cancel` stops the unfinished work of one task and of
+everything below it, and answers
+`{"taskId": 64, "cancelled": 2, "aborted": 1, "summary": "cancelled by alice"}`:
+
+- the id is any node of a graph, so the same endpoint stops **one stage**
+  (a leaf, e.g. a single regression case), a **whole container** — the
+  regression stage takes every case under it that has not finished, the
+  running ones included — or the **entire graph**, when the id is the
+  graph's root. Three entry points in the UI call it: the run page and the
+  task page's step panel (stop this node), and the task page's header
+  button (stop the whole graph).
+- only unfinished work goes. A node that already reached an outcome keeps
+  its status, its counts, its log and its artifacts — cancelling stops
+  what is still running, it never rewrites what already ran. The nodes it
+  drops, and the runs of the attempts in flight, become `cancelled` with
+  the caller's summary (`cancelled by <username>`).
+- the work waiting on a cancelled node cannot run any more, so it is
+  marked `skipped` with the reason (`upstream task build was cancelled`)
+  rather than left queued for ever. `cancelled` counts in the `skipped`
+  tally of the roll-up, and a container with a cancelled child reads
+  `cancelled` too.
+- `cancelled` counts the nodes dropped and `aborted` how many of them this
+  server was executing and had to interrupt; a second call for the same
+  target — or one for a task that has already finished — is a `409`
+  (`{"error":"nothing to cancel: this task has no unfinished work"}`)
+  rather than a success that stopped nothing. An unknown id is a `404`.
+
+Any signed-in user may cancel: this is the one write in the API that is not
+gated on owning an environment, because it can only end work whose result
+does not exist yet. See
+[Runner strategy](#/docs/runner-strategy) for how a node a worker is
+executing right now is ended.
 
 ## Script execution (interactive)
 
@@ -487,6 +525,7 @@ administrators are created there too, with `adduser -admin`.
 | GET    | `/api/tasks/{id}/log?after=<seq>&attempt=<n>` | The task's log chunks after the given sequence (incremental, live-following) |
 | GET    | `/api/tasks/{id}/log/download?attempt=<n>` | The attempt's full log as a `text/plain` file attachment (`Content-Disposition`) |
 | GET    | `/api/tasks/{id}/artifacts/zip` | The subtree's latest artifacts as one zip, descendants under a directory named after them (`404` when there are none) |
+| POST   | `/api/tasks/{id}/cancel`        | Cancel the task's unfinished work and everything below it (one stage, a container's cases, or the whole graph; `409` when there is nothing left) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session: authenticated by the `X-Gitlab-Token` header, see [Webhooks](#/docs/webhooks)) |
 
 The environment list is **not** owner-scoped: dispatch matches a yaml entry

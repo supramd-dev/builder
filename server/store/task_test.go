@@ -684,7 +684,7 @@ func TestSkipTasksLeavesAClaimedNodeAlone(t *testing.T) {
 	}
 
 	tx := s.DB.Begin()
-	if err := skipTasksTx(tx, []*Task{snapshot}, "upstream failed"); err != nil {
+	if err := skipTasksTx(tx, []skipEntry{{task: snapshot, reason: "upstream failed"}}); err != nil {
 		t.Fatalf("skip: %v", err)
 	}
 	if err := tx.Commit().Error; err != nil {

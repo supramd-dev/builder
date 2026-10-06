@@ -826,6 +826,30 @@ export async function getTaskRuns(id: number): Promise<Run[]> {
   return res.runs ?? []
 }
 
+// CancelResult is what stopping work answers with: the task that was asked
+// about, how many nodes were dropped (never 0 — a cancellation with nothing to
+// stop is a 409, see cancelTask), how many of them this server was executing and
+// had to abort, and the summary the cancelled nodes and runs now carry.
+export interface CancelResult {
+  taskId: number
+  cancelled: number
+  aborted: number
+  summary: string
+}
+
+// cancelTask stops the unfinished work of a task and of everything below it: a
+// stage on its own, a whole container's worth of tests (the regression container
+// takes every case under it that has not finished, running ones included), or
+// the entire graph when the id is that graph's root. The stages waiting on a
+// cancelled node are skipped rather than left queued.
+//
+// Any signed-in user may call it, and only unfinished work goes: what already
+// ran keeps its results. A task with nothing left to cancel fails with a 409
+// (ApiError) instead of reporting an empty success.
+export async function cancelTask(id: number): Promise<CancelResult> {
+  return api<CancelResult>(`/api/tasks/${id}/cancel`, { method: 'POST' })
+}
+
 // LogChunk is one piece of a task's log as it is read: the text, and the byte
 // offset its end is at (the cursor the next read continues from).
 export interface LogChunk {

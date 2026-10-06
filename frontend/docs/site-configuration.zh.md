@@ -107,6 +107,12 @@ a newer dispatch of this commit*,其中没有任何关于代码的判定:仪表�
 的后续推送于是重新落到该行 —— 整张图都会以新的尝试重新跑一遍,被取消的那次
 尝试作为历史保留。
 
+从运行详情页或任务页**手动停止**的运行得到的是同一个 **cancelled** 状态,
+与此处的设置无关(见 [Runner 策略](#/docs/runner-strategy))。摘要不同,
+因为起因不同:*cancelled by <用户名>* 而不是 *by a newer dispatch of this
+commit*,并且仍在运行的 stage 会在环境上被中止。等待被停止 stage 的工作读作
+**skipped**,因为它永远不会再运行。
+
 与 Repository 标签页一样,任何已登录用户都可以修改这项设置:它决定站点如何
 派发,而不是谁有权限做什么。
 

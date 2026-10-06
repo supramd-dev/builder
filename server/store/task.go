@@ -848,7 +848,7 @@ func (s *Store) SkipTask(taskID int64, reason string) error {
 		if task.Status != StatusPending {
 			return nil
 		}
-		if err := skipTasksTx(tx, []*Task{task}, reason); err != nil {
+		if err := skipTasksTx(tx, []skipEntry{{task: task, reason: reason}}); err != nil {
 			return err
 		}
 		if err := skipDependentsTx(tx, task.RootID, task.ID, reason); err != nil {
@@ -870,10 +870,10 @@ func (s *Store) SkipTask(taskID int64, reason string) error {
 // work and its own run. Skipping a running node would close the attempt that
 // is executing and leave the report of the goroutine that ran it landing on
 // an attempt it never touched.
-func skipTasksTx(tx *gorm.DB, tasks []*Task, reason string) error {
+func skipTasksTx(tx *gorm.DB, entries []skipEntry) error {
 	now := time.Now()
-	for i := range tasks {
-		t := tasks[i]
+	for i := range entries {
+		t, reason := entries[i].task, entries[i].reason
 		cur, err := getTaskTx(tx, t.ID)
 		if err != nil {
 			if errors.Is(err, ErrTaskNotFound) {
@@ -938,50 +938,80 @@ func (s *Store) SkipDependents(rootID, failedID int64, reason string) error {
 	})
 }
 
+// skipEntry is one node to mark skipped, with the reason it carries: the same
+// cascade can have several origins (a cancellation drops a whole container, and
+// every node of it blocks what stands behind it), and a node names the origin
+// that reached it rather than "something upstream".
+type skipEntry struct {
+	task   *Task
+	reason string
+}
+
 // skipDependentsTx is SkipDependents' body, callable inside a transaction the
 // caller already owns: a report that ends a node (FinishAttempt) skips what
 // stands behind it in the very transaction that records the outcome, so no
 // reader can see a failed node whose dependents are still queued.
 func skipDependentsTx(tx *gorm.DB, rootID, failedID int64, reason string) error {
+	skipped, err := blockedTx(tx, rootID, map[int64]string{failedID: reason})
+	if err != nil {
+		return err
+	}
+	if len(skipped) == 0 {
+		return nil
+	}
+	if err := skipTasksTx(tx, skipped); err != nil {
+		return err
+	}
+	return rollupTx(tx, rootID)
+}
+
+// blockedTx walks the graph's reverse dependency edges from the given origins —
+// the nodes that just ended without passing, or the ones a cancellation just
+// dropped — and returns the pending real nodes that can no longer run, each with
+// the reason of the origin that reached it first. Nodes already running or
+// terminal are left alone, as are the retired ones (history) and the virtual
+// containers (the rollup derives those). The walk is transitive: what stands
+// behind a blocked node is blocked too, and carries the same origin's reason.
+func blockedTx(tx *gorm.DB, rootID int64, origins map[int64]string) ([]skipEntry, error) {
 	var tasks []Task
 	if err := tx.Where("root_id = ? AND id <> ? AND virtual = ? AND retired = ?",
 		rootID, rootID, false, false).Order("id ASC").Find(&tasks).Error; err != nil {
-		return err
+		return nil, err
 	}
-	// BFS from the failed task over reverse dependency edges.
-	blocked := map[int64]bool{failedID: true}
+	// BFS from the origins over the reverse dependency edges.
+	blocked := map[int64]string{}
+	for id, reason := range origins {
+		blocked[id] = reason
+	}
 	changed := true
 	for changed {
 		changed = false
 		for i := range tasks {
 			t := &tasks[i]
-			if blocked[t.ID] || t.Status != StatusPending {
+			if _, done := blocked[t.ID]; done || t.Status != StatusPending {
 				continue
 			}
 			for _, d := range t.DependsOnIDs() {
-				if blocked[d] {
-					blocked[t.ID] = true
+				if reason, ok := blocked[d]; ok {
+					blocked[t.ID] = reason
 					changed = true
 					break
 				}
 			}
 		}
 	}
-	var skipped []*Task
+	var skipped []skipEntry
 	for i := range tasks {
-		// failedID itself is the origin of the walk, not one of its
-		// dependents: ending it is the caller's business.
-		if tasks[i].ID != failedID && blocked[tasks[i].ID] && tasks[i].Status == StatusPending {
-			skipped = append(skipped, &tasks[i])
+		// An origin is where the walk started, not one of its dependents:
+		// ending it is the caller's business.
+		if _, isOrigin := origins[tasks[i].ID]; isOrigin {
+			continue
+		}
+		if reason, ok := blocked[tasks[i].ID]; ok && tasks[i].Status == StatusPending {
+			skipped = append(skipped, skipEntry{task: &tasks[i], reason: reason})
 		}
 	}
-	if len(skipped) == 0 {
-		return nil
-	}
-	if err := skipTasksTx(tx, skipped, reason); err != nil {
-		return err
-	}
-	return rollupTx(tx, rootID)
+	return skipped, nil
 }
 
 // maxReasonLen caps the reason a skipped node carries, matching the runner's
@@ -991,7 +1021,8 @@ const maxReasonLen = 500
 
 // FailureReason is the reason a node's dependents carry once the node ended
 // without passing: which task stopped them and why. A timeout says so: the
-// stages behind it were stopped by the clock, not by a failing assertion.
+// stages behind it were stopped by the clock, not by a failing assertion, and a
+// cancellation says so too: nobody's assertion failed, the work was dropped.
 func FailureReason(task *Task, res AttemptResult) string {
 	reason := "upstream task " + task.Name
 	switch res.Status {
@@ -999,6 +1030,8 @@ func FailureReason(task *Task, res AttemptResult) string {
 		reason += " was skipped"
 	case StatusTimeout:
 		reason += " timed out"
+	case StatusCancelled:
+		reason += " was cancelled"
 	default:
 		reason += " failed"
 	}

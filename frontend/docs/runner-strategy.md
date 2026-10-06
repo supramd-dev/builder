@@ -143,18 +143,28 @@ root (test <sha> on <environment>)   # virtual: the whole pipeline
   empty manual stage command, or a case a later dispatch dropped) are not
   "skipped" — they are simply not there, and their cells show "—".
 - A node can also end as **cancelled**, which is a decision about the *run*,
-  not about the code: the site's repeated-commit policy dropped it, either
-  because a newer dispatch of the same revision replaced it
-  (`fork_cancel`, see
-  [Site configuration → Repeated commits](#/docs/site-configuration)) or
-  because the runner aborted the stage it was executing. Nothing about a
-  cancelled node was judged — the summary names the dispatch that dropped it
-  (`cancelled by a newer dispatch of this commit`) — and only unfinished work
-  is ever cancelled: a node that had already passed keeps its status, its
-  result and its log. Cancelling is **absorbing**: a report that arrives
-  afterwards (the aborted stage's own outcome, or a late write from another
-  worker) is refused by the store instead of reopening the node on a fresh
-  attempt, so cancelled work cannot come back to life.
+  not about the code: nothing about a cancelled node was judged. There are
+  two reasons for one, and the summary names which: the site's
+  repeated-commit policy dropped the work because a newer dispatch of the
+  same revision replaced it (`fork_cancel`, see
+  [Site configuration → Repeated commits](#/docs/site-configuration)) —
+  summary `cancelled by a newer dispatch of this commit` — or somebody
+  stopped it by hand (`POST /api/tasks/{id}/cancel`, from the run page or
+  the task page) with the summary `cancelled by <username>`. Only
+  unfinished work is ever cancelled: a node that had already passed keeps
+  its status, its result and its log. Cancelling is **absorbing**: a report
+  that arrives afterwards (the aborted stage's own outcome, or a late write
+  from another worker) is refused by the store instead of reopening the node
+  on a fresh attempt, so cancelled work cannot come back to life.
+- What is waiting on a cancelled node cannot run any more — the queue only
+  hands out nodes whose dependencies all passed — so it is **skipped** in
+  the same transaction, exactly as it is behind a failed node, with the
+  reason naming the cancelled task (`upstream task build was cancelled`).
+  Nothing is left queued that could never be claimed, so a graph with a
+  cancelled stage still settles. A hand cancellation is otherwise narrow:
+  stopping the regression container drops its unfinished cases (running
+  ones included) and leaves the build and unit stages beside it alone;
+  stopping a root drops that graph.
 
 ## Execution pool
 
@@ -248,6 +258,13 @@ the last lines and the summary the stage ended with. Logs are capped at
   archive root, every descendant's files under a directory named after it;
   a regression stage downloads as one bundle of its cases (see
   [Dashboard and reporting](#/docs/dashboard)).
+- `POST /api/tasks/{id}/cancel` — stop the task's unfinished work and
+  everything below it (one stage, a container's cases, or the whole graph):
+  the one **write** here, and the one write in the API that any signed-in
+  user may perform. It closes the in-flight attempt's run as `cancelled`
+  and aborts the stage a worker is executing for it; a task with nothing
+  left to stop is a `409` (see
+  [API → Cancelling running work](#/docs/api)).
 
 Reading any of these is open to every signed-in user: the matrix is
 site-wide, so its drill-down pages are too. A virtual node's cell in the
@@ -315,7 +332,8 @@ attempt-N run in status `pending` is created for it:
 dispatch          claim                          outcome
 pending (run)  →  running            →        passed/failed/timeout/skipped
                   (ClaimReadyTask)            (FinishAttempt)
-                                                cancelled (CancelGraph)
+                                                cancelled (the policy, or a
+                                                hand cancellation)
 ```
 
 - The scheduler claims ready nodes atomically (`ClaimReadyTask`), flipping
@@ -346,15 +364,18 @@ pending (run)  →  running            →        passed/failed/timeout/skipped
   else would ever close it. The runner reports the attempt it actually ran
   — the report names its attempt number — so the old attempt keeps the
   real outcome and the new one is left for the scheduler to run for real.
-- A **cancellation** (`fork_cancel`, or the runner aborting a stage) closes
-  the in-flight attempt's run as `cancelled` with the policy's summary and
-  cancels the node — in one transaction, so a reader never sees a cancelled
-  node with a live run. The stage the runner was executing is aborted at the
-  same time (the SSH session is closed under it); when its result arrives
-  afterwards, `FinishAttempt` refuses it (`the task was cancelled`) rather
-  than letting a stage verdict overwrite the cancellation. Cancelled nodes
-  are terminal, so nothing claims them again and no queue is left holding
-  them.
+- A **cancellation** (`fork_cancel`, or the hand cancellation of
+  `POST /api/tasks/{id}/cancel`) closes the in-flight attempt's run as
+  `cancelled` with the summary and cancels the node — in one transaction, so
+  a reader never sees a cancelled node with a live run — and skips whatever
+  was waiting on it, in that same transaction. The stage the runner was
+  executing is aborted at the same time (`Service.CancelSubtree` asks the
+  store first and then closes the SSH session under the stages it dropped
+  locally, which is the only thing a store cannot do). When that stage's
+  result arrives afterwards, `FinishAttempt` refuses it
+  (`the task was cancelled`) rather than letting a stage verdict overwrite
+  the cancellation. Cancelled nodes are terminal, so nothing claims them
+  again and no queue is left holding them.
 - `pending`/`running` are the only non-terminal statuses; anything else is
   final. Re-running a dispatch opens fresh attempts; nothing is edited in
   place. Absorbing is what `cancelled` does to a *report*, not to a

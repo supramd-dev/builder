@@ -77,9 +77,8 @@ type taskDetailJSON struct {
 }
 
 // handleTaskItem routes /api/tasks/{id} and its sub-resources: /log,
-// /log/download, /runs and /artifacts/zip.
+// /log/download, /runs, /artifacts/zip and /cancel.
 func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request, user *store.User) {
-	_ = user
 	rest := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
 	if rest == "" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
@@ -96,29 +95,94 @@ func (s *Server) handleTaskItem(w http.ResponseWriter, r *http.Request, user *st
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 			return
 		}
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-			return
-		}
+		// Each sub-resource owns its method: the log, the runs and the artifact
+		// zip are reads, and cancelling is the one write among them.
 		switch parts[1] {
 		case "log":
-			s.taskLogs(w, r, id)
+			if requireMethod(w, r, http.MethodGet) {
+				s.taskLogs(w, r, id)
+			}
 		case "log/download":
-			s.taskLogDownload(w, r, id)
+			if requireMethod(w, r, http.MethodGet) {
+				s.taskLogDownload(w, r, id)
+			}
 		case "runs":
-			s.taskRuns(w, id)
+			if requireMethod(w, r, http.MethodGet) {
+				s.taskRuns(w, id)
+			}
 		case "artifacts/zip":
-			s.downloadTaskArtifactsZip(w, r, id)
+			if requireMethod(w, r, http.MethodGet) {
+				s.downloadTaskArtifactsZip(w, r, id)
+			}
+		case "cancel":
+			if requireMethod(w, r, http.MethodPost) {
+				s.cancelTask(w, id, user)
+			}
 		default:
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		}
 		return
 	}
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	s.taskDetail(w, id)
+}
+
+// cancelTask handles POST /api/tasks/{id}/cancel: it stops the unfinished work
+// of that task and of everything below it — one stage, a whole container's
+// worth of tests (cancelling the regression container drops every case in it
+// that has not finished, running ones included), or the entire graph when the
+// id is that graph's root.
+//
+// Any signed-in user may stop a run. Cancelling is the one write here that is
+// not gated on owning an environment: it ends work that has produced no result
+// yet, and rewrites nothing that has (store.CancelSubtree), so what it can
+// destroy is the running of the tests, which is what the person asking wants
+// stopped. The nodes and runs it drops carry a summary naming them.
+//
+// A task with nothing left to cancel — one that finished, or one cancelled
+// before — is a 409 rather than a silent success: the caller asked for work to
+// be stopped and there was none.
+func (s *Server) cancelTask(w http.ResponseWriter, id int64, user *store.User) {
+	task, ok := s.loadTask(w, id, "cancel task")
+	if !ok {
+		return
+	}
+	summary := "cancelled by " + user.Username
+	cancelled, aborted := 0, 0
+	if s.Runner != nil {
+		out, err := s.Runner.CancelSubtree(task.ID, summary)
+		if err != nil {
+			log.Printf("task %d cancel: %v", task.ID, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		cancelled, aborted = len(out.Nodes), out.Aborted
+	} else {
+		// No runner here: the store's cancellation is still the whole of what
+		// ends the work (it closes the run of the attempt in flight, and the
+		// report that follows is refused), there is just no local session for
+		// this process to close — whoever is executing it is not running here.
+		nodeIDs, err := s.Store.CancelSubtree(task.ID, summary)
+		if err != nil {
+			log.Printf("task %d cancel: %v", task.ID, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+			return
+		}
+		cancelled = len(nodeIDs)
+	}
+	if cancelled == 0 {
+		writeJSON(w, http.StatusConflict, map[string]string{
+			"error": "nothing to cancel: this task has no unfinished work"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"taskId":    task.ID,
+		"cancelled": cancelled,
+		"aborted":   aborted,
+		"summary":   summary,
+	})
 }
 
 // taskDetail handles GET /api/tasks/{id}.

@@ -61,7 +61,10 @@ func (s *Service) cancelPriorWork(cfg *store.SiteConfig, commit *store.Commit) i
 	cancelled := 0
 	for i := range roots {
 		root := roots[i]
-		nodeIDs, err := s.Store.CancelGraph(root.ID, store.CancelledSummary)
+		// CancelSubtree writes the cancelled status and aborts whatever this
+		// process is running for the graph (see its doc): the policy only has to
+		// count which graphs it dropped.
+		out, err := s.CancelSubtree(root.ID, store.CancelledSummary)
 		if err != nil {
 			// One graph failing to cancel must not stop the others: the next
 			// recording of this revision retries it, and the nodes it did not
@@ -70,18 +73,11 @@ func (s *Service) cancelPriorWork(cfg *store.SiteConfig, commit *store.Commit) i
 				root.ID, root.CommitID, err)
 			continue
 		}
-		// Abort the stages this process is running for it: the store has
-		// already written the cancelled status, so the runner is only closing
-		// the sessions that would otherwise keep going until they report an
-		// outcome the store then refuses (store.ErrTaskCancelled).
-		for _, nodeID := range nodeIDs {
-			s.CancelTask(nodeID)
-		}
 		// Counted only when the graph had something left to drop: an earlier
 		// recording that finished, or one a recording before that already
-		// cancelled (its nodes are terminal, so CancelGraph returns none), was
-		// not dropped by this dispatch and must not be reported as if it were.
-		if len(nodeIDs) > 0 {
+		// cancelled (its nodes are terminal, so nothing comes back), was not
+		// dropped by this dispatch and must not be reported as if it were.
+		if out.Cancelled() {
 			cancelled++
 		}
 	}
