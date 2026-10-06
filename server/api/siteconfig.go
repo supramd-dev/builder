@@ -3,6 +3,7 @@ package api
 import (
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,14 @@ type siteConfigJSON struct {
 	SecretTokenSet bool   `json:"secretTokenSet"`
 	WebhookToken   string `json:"webhookToken"` // administrators only
 	UpdatedAt      string `json:"updatedAt"`
+
+	// CommitOverlapPolicy is what a re-recorded revision (same repo + sha) does
+	// to the work already dispatched for it: store.CommitOverlapRequeue (the
+	// default, and what a row written before the option existed reports),
+	// CommitOverlapFork or CommitOverlapForkCancel. It is read and written by
+	// every logged-in user, like the rest of this tab: it changes what a push
+	// does, not who can do anything.
+	CommitOverlapPolicy string `json:"commitOverlapPolicy"`
 
 	// The GitLab sign-in integration. Whether it is on, and whether a client
 	// secret is stored, are plain booleans that leak nothing, so everybody
@@ -58,6 +67,13 @@ type siteConfigInput struct {
 	SecretToken      string `json:"secretToken"` // empty = keep current
 	ClearAccessToken bool   `json:"clearAccessToken"`
 	ClearSecretToken bool   `json:"clearSecretToken"`
+
+	// CommitOverlapPolicy is a pointer for the same reason as the GitLab
+	// fields below: the tabs that do not show it (repository, display,
+	// account) send neither it nor any intent about it, and an absent field
+	// must keep the stored policy rather than reset it to the default. An
+	// empty string is a value, not an absence, and means the default.
+	CommitOverlapPolicy *string `json:"commitOverlapPolicy"`
 
 	GitLabURL               *string `json:"gitlabUrl"`      // absent = keep current
 	GitLabClientID          *string `json:"gitlabClientId"` // absent = keep current
@@ -193,6 +209,12 @@ func (s *Server) updateSiteConfig(w http.ResponseWriter, r *http.Request, user *
 		owned = append(owned, "SecretToken")
 	}
 	cfg.Timezone = strings.TrimSpace(in.Timezone)
+	// Repeated-commit policy: written only when the request mentions it, so the
+	// tabs that do not show it leave whatever is in force alone.
+	if in.CommitOverlapPolicy != nil {
+		cfg.DuplicateCommitPolicy = strings.TrimSpace(*in.CommitOverlapPolicy)
+		owned = append(owned, "DuplicateCommitPolicy")
+	}
 
 	// GitLab sign-in: only an administrator reaches here with these set.
 	// A nil address or id means the request said nothing about it, so the
@@ -259,6 +281,16 @@ func validateSiteConfigInput(in *siteConfigInput) string {
 			return "unknown timezone " + tz + " (use an IANA name like Asia/Shanghai)"
 		}
 	}
+	// An unknown policy is refused rather than stored: the store would treat it
+	// as the default on the next dispatch (see store.OverlapPolicy), so the
+	// setting page would show a choice the server is not actually making.
+	if in.CommitOverlapPolicy != nil {
+		if v := strings.TrimSpace(*in.CommitOverlapPolicy); !store.ValidOverlapPolicy(v) {
+			return "unknown repeated-commit policy " + strconv.Quote(v) +
+				" (use " + store.CommitOverlapRequeue + ", " + store.CommitOverlapFork +
+				" or " + store.CommitOverlapForkCancel + ")"
+		}
+	}
 	return ""
 }
 
@@ -290,6 +322,8 @@ func (s *Server) toSiteConfigJSON(cfg *store.SiteConfig, user *store.User) siteC
 		Timezone:       cfg.Timezone,
 		SecretTokenSet: strings.TrimSpace(cfg.SecretToken) != "",
 		UpdatedAt:      cfg.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+
+		CommitOverlapPolicy: cfg.OverlapPolicy(),
 
 		GitLabLoginEnabled:    cfg.GitLabLoginEnabled,
 		GitLabClientSecretSet: strings.TrimSpace(cfg.GitLabClientSecret) != "",

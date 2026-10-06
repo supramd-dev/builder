@@ -44,9 +44,12 @@
 派发会清空它),因此不会随 webhook 响应一起消失。
 
 手动派发的图在单元格上带一个小的 **M** 徽标,在任务页面上显示
-"manual" 标签。被重跑过的手动派发行(同一提交存在更新的尝试)会保留
-但置灰并带 **superseded**(已过期)标签 —— 同一提交只有最新一次尝试
-是生效的。
+"manual" 标签。被取代的行会保留 —— 同一 SHA 的手动重跑,或
+`fork`/`fork_cancel` 事件:commit 行上带 `superseded`(同一 SHA 存在
+更新的行)与 `live`(这一行仍有未结束的任务图),前端只把
+`superseded` **且** 不 `live` 的行置灰。因此仍在运行的旧行仍清晰可读,
+标签写作 "older, running";而被策略取消掉工作的行是 superseded 且
+不 live,读作历史。
 
 全量矩阵响应形状:
 
@@ -160,7 +163,9 @@ ID,用于图链接;`triggers` 映射到该 root 的触发方式(0 = webhook,
 任务身份与提交/环境字段在所引用的行已被删除时返回 `null` —— 运行比它
 所运行的环境活得久,因此旧的运行页面仍然打得开。读取权限与矩阵本身一致,
 是站点级的:任何已登录用户都可以打开任意任务、运行、日志或工件。受限的
-只有写操作 —— 向任务报告(环境 owner 或管理员)以及向环境派发。读取正是
+只有写操作 —— 向任务报告(环境 owner 或管理员)以及向环境派发 —— 但有
+一个例外:**取消**对任何已登录用户开放(见下文),因为它停掉的只是尚未
+产出结果的工作,不会改写任何已有结果。读取正是
 所有权模型不适用的地方,这样同事想问"这个用例为什么失败"时页面才用得上。
 Artifact 归属产出它的那次尝试:单元测试运行的结果文件挂在单元测试运行上,
 回归用例的文件挂在该用例自己的运行上 —— 回归容器不产出任何东西,只汇总
@@ -227,6 +232,32 @@ Artifact 归属产出它的那次尝试:单元测试运行的结果文件挂在�
   节点不会包含在内:它们的文件属于更早的图形态。
 - 请求的包中完全没有文件时返回 `404`(`{"error":"no artifacts"}`)——
   空 zip 看起来会像一次成功的下载。
+
+### 取消运行中的工作
+
+`POST /api/tasks/{id}/cancel` 停止某个任务及其下所有尚未完成的工作,返回
+`{"taskId": 64, "cancelled": 2, "aborted": 1, "summary": "cancelled by alice"}`:
+
+- id 可以是图里的任意节点,因此同一个接口既能停**单个阶段**(叶子,例如
+  一个回归用例),也能停**整个容器** —— 回归阶段会带走它下面所有尚未结束
+  的用例,包括正在运行的 —— 还能停**整张图**(id 为该图的 root)。界面上
+  有三处入口调用它:运行详情页和任务页的步骤面板(停这个节点),以及任务
+  页顶部的按钮(停整张图)。
+- 只会停掉尚未完成的工作。已有结果(status、计数、日志、工件)的节点原样
+  保留 —— 取消只是停掉仍在运行的东西,绝不改写已经跑完的东西。被停掉的
+  节点以及正在进行的那次尝试的运行会变为 `cancelled`,并带上调用方的摘要
+  (`cancelled by <用户名>`)。
+- 依赖被取消节点的工作不可能再运行,因此会被标记为 `skipped` 并写明原因
+  (`upstream task build was cancelled`),而不是永远留在队列里。`cancelled`
+  计入汇总的 `skipped` 计数,含被取消子节点的容器也会读作 `cancelled`。
+- `cancelled` 是被停掉的节点数,`aborted` 是本进程正在执行、因而被中断的
+  节点数;对同一目标再次调用(或对已经结束的任务调用)返回 `409`
+  (`{"error":"nothing to cancel: this task has no unfinished work"}`),
+  而不是一次什么都没停掉的"成功"。未知 id 返回 `404`。
+
+任何已登录用户都可以取消:这是 API 里唯一一处不要求拥有环境的写操作,
+因为它只能结束尚无结果的工作。某个 worker 正在执行的节点是如何被结束的,
+见 [Runner 策略](#/docs/runner-strategy)。
 
 ## 脚本执行(交互式)
 
@@ -305,20 +336,26 @@ POST /api/jobs/manual-yaml
 }
 ```
 
-ref 被解析(与手动派发相同的 `git ls-remote`)后,提交行按 **webhook
-同样的去重方式**记录,读取并解析该提交上的 md-builder.yaml,为每个匹配
-的环境创建一个任务图:
+ref 被解析(与手动派发相同的 `git ls-remote`)后,提交行**完全按 webhook
+推送的重复 commit 策略**记录,读取并解析该提交上的 md-builder.yaml,为
+每个匹配的环境创建一个任务图:
 
 ```
 {
   "commitId": 7, "commitSha": "abc123…", "commitCreated": true,
-  "jobsCreated": 2, "entriesSkipped": 0
+  "jobsCreated": 2, "entriesSkipped": 0, "graphsCancelled": 0
 }
 ```
 
-- 图标记 `trigger: 2`(手动 yaml)。重复触发同一 ref 会**复用同一批**
-  图(按 commit+environment 定位)并以最新快照重建 —— yaml 或环境标签
-  的修改会被采纳,矩阵不会多出新行。
+- 图标记 `trigger: 2`(手动 yaml)。默认的 `requeue` 策略下,重复触发
+  同一 ref 会**复用同一批**图(按 commit+environment 定位)并以最新快照
+  重建 —— yaml 或环境标签的修改会被采纳,矩阵不会多出新行;在
+  `fork`/`fork_cancel` 下,这次派发会落到属于它自己的新行上,见
+  [站点配置 → 重复 commit](#/docs/site-configuration)。
+- `graphsCancelled` 只在 `fork_cancel` 下非零:这次派发丢掉的、该版本
+  **更早**那些记录所对应的图数量 —— 只算真有未完成工作的那些,因此已经
+  跑完的图、或更早的记录已经丢掉过的图都不计入。没有创建任何图的派发
+  不会取消任何东西,因此一次失败的拉取不会杀掉正在跑的运行。
 - 请求里没有环境列表:每个 yaml 条目按 tags 与**全站所有已启用环境**
   匹配,不管环境是哪个账号注册的 —— 与 webhook 推送的匹配完全一致,
   因此一次运行可能落在别的账号的机器上。
@@ -386,8 +423,8 @@ POST /api/setup
 | PUT    | `/api/environments/{id}/enabled`| 启用/停用(`{"enabled": bool}`)               |
 | POST   | `/api/environments/{id}/exec`   | 运行 shell 命令(`{"command": string}`)       |
 | POST   | `/api/environments/{id}/script` | 运行脚本(`{"language", "script"}`)           |
-| GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`accessTokenSet`、`timezone`、`webhookToken` 仅管理员) |
-| PUT    | `/api/site-config`              | 更新站点配置(access token:留空保留,`clearAccessToken` 删除;`timezone`:IANA 名称,空 = 浏览器本地;`gitlab*` 字段仅管理员) |
+| GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`accessTokenSet`、`timezone`、`commitOverlapPolicy`、`webhookToken` 仅管理员) |
+| PUT    | `/api/site-config`              | 更新站点配置(access token:留空保留,`clearAccessToken` 删除;`timezone`:IANA 名称,空 = 浏览器本地;`commitOverlapPolicy`:`requeue` \| `fork` \| `fork_cancel`,任意已登录用户;`gitlab*` 字段仅管理员) |
 | POST   | `/api/site-config/webhook-token`| 轮换 webhook 密钥并返回配置(仅管理员) |
 | GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
@@ -406,6 +443,7 @@ POST /api/setup
 | GET    | `/api/tasks/{id}/log?after=<seq>&attempt=<n>` | 给定序号之后的任务日志块(增量,实时跟随)   |
 | GET    | `/api/tasks/{id}/log/download?attempt=<n>` | 该次尝试的完整日志,以 `text/plain` 文件附件返回(`Content-Disposition`) |
 | GET    | `/api/tasks/{id}/artifacts/zip` | 子树的全部最新工件打成一个 zip,后代位于以自身命名的目录下(没有工件时 `404`) |
+| POST   | `/api/tasks/{id}/cancel`        | 取消该任务及其下所有未完成的工作(单个阶段、一个容器的用例,或整张图;无剩余工作时 `409`) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook 接收器(无需会话:由 `X-Gitlab-Token` 请求头认证,见 [Webhooks](#/docs/webhooks)) |
 
 环境列表**不按 owner 过滤**:派发会把 yaml entry 与所有已启用环境逐一匹配,
@@ -442,6 +480,14 @@ GitLab —— 且只对管理员返回,其他人拿到的该字段为空。它�
 `POST /api/site-config/webhook-token` 轮换(仅管理员,返回完整配置)。
 webhook 端点用常量时间比较 `X-Gitlab-Token`,不匹配时在解析请求体之前
 就返回 401。见 [站点配置 → Webhook 密钥](#/docs/site-configuration)。
+
+`commitOverlapPolicy` 决定同一版本被再次派发时站点的处理方式:`requeue`
+(默认,无法识别的值也回落到它)、`fork` 或 `fork_cancel`(见
+[站点配置 → 重复 commit](#/docs/site-configuration))。与 `codeRepo`、
+`timezone` 一样,**任意已登录用户**都可读可写 —— 它不像 token 与 GitLab
+登录字段那样仅限管理员 —— 因为该策略决定所有人的派发去向,而它丢掉的
+运行是某个人的运行。更新时省略该字段会保留已存的策略,因此保存仓库表单
+不会改写它;传其他值则返回 `400` 并说明可接受的取值,且不写入任何内容。
 
 GitLab 登录配置位于同一端点,但仅管理员可写:`gitlabUrl`、
 `gitlabClientId`、`gitlabClientSecret` 和 `gitlabLoginEnabled`。其他账号

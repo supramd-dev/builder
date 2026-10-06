@@ -22,6 +22,7 @@ type DispatchResult struct {
 	SubtasksTotal  int  // total sub-task nodes across graphs
 	EntriesSkipped int  // entries with no matching environment
 	CommitCreated  bool // the commit row was newly inserted (false = deduplicated)
+	Cancelled      int  // graphs of the earlier recordings of this revision dropped by the site's fork-cancel policy
 	Err            error
 }
 
@@ -61,10 +62,12 @@ func (s *Service) DispatchForCommit(commit *store.Commit) DispatchResult {
 // DispatchForRef is the manual yaml-matrix trigger ("run the webhook flow
 // on demand"): the ref (branch, tag, short/full SHA; empty = HEAD) is
 // resolved against the site-configured code repository, recorded as a
-// commit row (deduplicated like a webhook push), and the yaml matrix at
-// that commit is dispatched exactly as the webhook would. Graphs are keyed
-// by (commit, environment): re-triggering the same ref requeues the same
-// graphs with fresh snapshots, so yaml/environment changes are picked up.
+// commit row under the site's repeated-commit policy — deduplicated like a
+// webhook push by default, its own row when the policy forks — and the yaml
+// matrix at that commit is dispatched exactly as the webhook would. Under the
+// default policy, graphs are keyed by (commit, environment): re-triggering the
+// same ref requeues the same graphs with fresh snapshots, so yaml/environment
+// changes are picked up.
 func (s *Service) DispatchForRef(ctx context.Context, ref string) (store.Commit, DispatchResult) {
 	var commit store.Commit
 	cfg, err := s.Store.GetSiteConfig()
@@ -91,7 +94,7 @@ func (s *Service) DispatchForRef(ctx context.Context, ref string) (store.Commit,
 		Event:    store.CommitEventManualYAML,
 		PushedAt: time.Now(),
 	}
-	created, err := s.Store.GetOrCreateCommit(&commit)
+	created, err := s.Store.RecordCommit(&commit, cfg.OverlapPolicy())
 	if err != nil {
 		return commit, DispatchResult{Err: err}
 	}
@@ -157,6 +160,15 @@ func (s *Service) dispatchYAML(ctx context.Context, commit *store.Commit, trigge
 			return res
 		}
 		res.TasksCreated++
+	}
+
+	// The new work exists, so the site's repeated-commit policy may now drop
+	// what the earlier recordings of this revision left unfinished (nothing,
+	// unless the policy is fork-cancel — see cancelPriorWork). Deliberately
+	// after the success above: a dispatch that created nothing is not a reason
+	// to cancel a running test.
+	if res.TasksCreated > 0 {
+		res.Cancelled = s.cancelPriorWork(cfg, commit)
 	}
 	return res
 }

@@ -72,6 +72,65 @@ func TestSiteConfigSaveLoad(t *testing.T) {
 	}
 }
 
+// TestSiteConfigOverlapPolicy covers the repeated-commit policy's storage and
+// its mapping to the value a dispatch uses: the three known policies round-trip
+// through the row, an empty column (a database written before the option
+// existed) and an unrecognized value both mean the default requeue — an unknown
+// policy must never be read as one that cancels work — and ValidOverlapPolicy
+// is what refuses a value on the way in.
+func TestSiteConfigOverlapPolicy(t *testing.T) {
+	s := newTestStore(t)
+
+	cfg, err := s.GetSiteConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DuplicateCommitPolicy != "" || cfg.OverlapPolicy() != CommitOverlapRequeue {
+		t.Fatalf("a fresh configuration: want the empty column and the requeue policy, got %q/%q",
+			cfg.DuplicateCommitPolicy, cfg.OverlapPolicy())
+	}
+
+	for _, p := range []string{CommitOverlapRequeue, CommitOverlapFork, CommitOverlapForkCancel} {
+		if !ValidOverlapPolicy(p) {
+			t.Fatalf("%q should be a valid policy", p)
+		}
+		if err := s.UpdateSiteConfig(&SiteConfig{DuplicateCommitPolicy: p}, "DuplicateCommitPolicy"); err != nil {
+			t.Fatalf("store %q: %v", p, err)
+		}
+		got, err := s.GetSiteConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.DuplicateCommitPolicy != p || got.OverlapPolicy() != p {
+			t.Fatalf("round-trip of %q: got %q/%q", p, got.DuplicateCommitPolicy, got.OverlapPolicy())
+		}
+		// The one-column write leaves the rest of the row alone.
+		if got.CodeRepo != cfg.CodeRepo || got.WebhookToken != cfg.WebhookToken {
+			t.Fatalf("storing %q changed the rest of the row: %+v", p, got)
+		}
+	}
+
+	if ValidOverlapPolicy("") != true {
+		t.Fatal("the empty value is the default policy and must be accepted on the way in")
+	}
+	if ValidOverlapPolicy("cancel-everything") {
+		t.Fatal("an unknown policy must be refused")
+	}
+	if p := (&SiteConfig{DuplicateCommitPolicy: "cancel-everything"}).OverlapPolicy(); p != CommitOverlapRequeue {
+		t.Fatalf("an unrecognized policy must read as requeue, got %q", p)
+	}
+
+	// The empty value clears back to the default explicitly.
+	if err := s.UpdateSiteConfig(&SiteConfig{DuplicateCommitPolicy: ""}, "DuplicateCommitPolicy"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetSiteConfig(); err != nil {
+		t.Fatal(err)
+	} else if got.OverlapPolicy() != CommitOverlapRequeue {
+		t.Fatalf("after clearing: want requeue, got %q", got.OverlapPolicy())
+	}
+}
+
 // TestSiteConfigWebhookToken covers the webhook secret's lifecycle: it comes
 // with the configuration row, survives updates, and is regenerated when a
 // row has none (the upgrade path from a database written before the column

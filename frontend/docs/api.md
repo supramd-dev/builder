@@ -56,10 +56,14 @@ clicking opens the full text. The message is stored on the commit row
 that works), so it outlives the webhook response that carried it.
 
 Manually dispatched graphs carry a small **M** badge in their cells and
-a "manual" label on the task pages. Rows of manual dispatches that were
-re-run (a newer attempt of the same commit exists) are kept but greyed
-out with a **superseded** tag — only the newest attempt of a commit is
-live.
+a "manual" label on the task pages. Rows that were superseded — a manual
+re-dispatch of the same SHA, or a `fork`/`fork_cancel` event — are kept:
+the commit row carries `superseded` (an older row of the same SHA
+exists) and `live` (a task graph of this row is still unfinished), and
+the frontend greys out only the rows that are `superseded` **and** not
+`live`. An older row whose work is still running is therefore readable,
+badged "older, running"; a row whose work the policy cancelled is
+superseded and not live, so it reads as history.
 
 The full matrix response shape:
 
@@ -191,7 +195,10 @@ they name was deleted — a run outlives the environment it ran on, so an
 old run page stays readable. Reading is like the matrix itself, which is
 site-wide: any signed-in user may open any task, run, log or artifact.
 Only the writes are restricted — reporting to a task (the environment's
-owner or an administrator) and dispatching onto an environment. Reading
+owner or an administrator) and dispatching onto an environment — with one
+exception: **cancelling** is open to any signed-in user (see below), because
+it stops work that has produced no result yet and rewrites nothing that
+has. Reading
 is where the ownership model does not apply, so the pages stay useful
 for a colleague asking why a case failed. Artifacts belong to the attempt that
 produced them: a unit run's results files attach to the unit run, a
@@ -274,6 +281,41 @@ Two zips bundle artifacts, and neither is ever an empty archive:
 - A request whose bundle has no files at all is a `404`
   (`{"error":"no artifacts"}`) — an empty zip would look like a
   successful download.
+
+### Cancelling running work
+
+`POST /api/tasks/{id}/cancel` stops the unfinished work of one task and of
+everything below it, and answers
+`{"taskId": 64, "cancelled": 2, "aborted": 1, "summary": "cancelled by alice"}`:
+
+- the id is any node of a graph, so the same endpoint stops **one stage**
+  (a leaf, e.g. a single regression case), a **whole container** — the
+  regression stage takes every case under it that has not finished, the
+  running ones included — or the **entire graph**, when the id is the
+  graph's root. Three entry points in the UI call it: the run page and the
+  task page's step panel (stop this node), and the task page's header
+  button (stop the whole graph).
+- only unfinished work goes. A node that already reached an outcome keeps
+  its status, its counts, its log and its artifacts — cancelling stops
+  what is still running, it never rewrites what already ran. The nodes it
+  drops, and the runs of the attempts in flight, become `cancelled` with
+  the caller's summary (`cancelled by <username>`).
+- the work waiting on a cancelled node cannot run any more, so it is
+  marked `skipped` with the reason (`upstream task build was cancelled`)
+  rather than left queued for ever. `cancelled` counts in the `skipped`
+  tally of the roll-up, and a container with a cancelled child reads
+  `cancelled` too.
+- `cancelled` counts the nodes dropped and `aborted` how many of them this
+  server was executing and had to interrupt; a second call for the same
+  target — or one for a task that has already finished — is a `409`
+  (`{"error":"nothing to cancel: this task has no unfinished work"}`)
+  rather than a success that stopped nothing. An unknown id is a `404`.
+
+Any signed-in user may cancel: this is the one write in the API that is not
+gated on owning an environment, because it can only end work whose result
+does not exist yet. See
+[Runner strategy](#/docs/runner-strategy) for how a node a worker is
+executing right now is ended.
 
 ## Script execution (interactive)
 
@@ -365,21 +407,30 @@ POST /api/jobs/manual-yaml
 ```
 
 The ref is resolved (the same `git ls-remote` as the manual dispatch),
-the commit recorded **deduplicated like a webhook push**, the
-md-builder.yaml at that commit read and parsed, and one graph per
-matching environment created:
+the commit recorded **under the site's repeated-commit policy exactly
+like a webhook push**, the md-builder.yaml at that commit read and
+parsed, and one graph per matching environment created:
 
 ```
 {
   "commitId": 7, "commitSha": "abc123…", "commitCreated": true,
-  "jobsCreated": 2, "entriesSkipped": 0
+  "jobsCreated": 2, "entriesSkipped": 0, "graphsCancelled": 0
 }
 ```
 
-- Graphs are marked `trigger: 2` (manual yaml). Re-triggering the same
-  ref requeues the **same** graphs (keyed by commit+environment) with
-  fresh snapshots — yaml or environment-tag changes are picked up, and
-  no extra matrix row appears.
+- Graphs are marked `trigger: 2` (manual yaml). Under the default
+  `requeue` policy, re-triggering the same ref requeues the **same**
+  graphs (keyed by commit+environment) with fresh snapshots — yaml or
+  environment-tag changes are picked up, and no extra matrix row
+  appears. Under `fork`/`fork_cancel` the dispatch lands on a row of its
+  own; see [Site configuration → Repeated
+  commits](#/docs/site-configuration).
+- `graphsCancelled` is non-zero only under `fork_cancel`: the number of
+  graphs of the **earlier** recordings of that revision this dispatch
+  dropped — only those that had unfinished work to give up, so a graph
+  that had finished, or that an earlier recording had already dropped, is
+  not counted. A dispatch that created no graph cancels nothing, so a
+  failing fetch never kills a run.
 - There is no environment list in the request: each yaml entry is matched
   by tags against **every enabled environment on the site**, whoever
   registered it — the same matching a webhook push does, so a run may
@@ -454,8 +505,8 @@ administrators are created there too, with `adduser -admin`.
 | PUT    | `/api/environments/{id}/enabled`| Enable/disable (`{"enabled": bool}`)          |
 | POST   | `/api/environments/{id}/exec`   | Run a shell command (`{"command": string}`)   |
 | POST   | `/api/environments/{id}/script` | Run a script (`{"language", "script"}`)       |
-| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`, `webhookToken` — administrators only) |
-| PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local; the `gitlab*` fields are administrator-only) |
+| GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`, `commitOverlapPolicy`, `webhookToken` — administrators only) |
+| PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local; `commitOverlapPolicy`: `requeue` \| `fork` \| `fork_cancel`, any signed-in user; the `gitlab*` fields are administrator-only) |
 | POST   | `/api/site-config/webhook-token`| Rotate the webhook secret and return the configuration (administrators only) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
 | GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
@@ -474,6 +525,7 @@ administrators are created there too, with `adduser -admin`.
 | GET    | `/api/tasks/{id}/log?after=<seq>&attempt=<n>` | The task's log chunks after the given sequence (incremental, live-following) |
 | GET    | `/api/tasks/{id}/log/download?attempt=<n>` | The attempt's full log as a `text/plain` file attachment (`Content-Disposition`) |
 | GET    | `/api/tasks/{id}/artifacts/zip` | The subtree's latest artifacts as one zip, descendants under a directory named after them (`404` when there are none) |
+| POST   | `/api/tasks/{id}/cancel`        | Cancel the task's unfinished work and everything below it (one stage, a container's cases, or the whole graph; `409` when there is nothing left) |
 | POST   | `/api/webhooks/gitlab`          | GitLab webhook receiver (no session: authenticated by the `X-Gitlab-Token` header, see [Webhooks](#/docs/webhooks)) |
 
 The environment list is **not** owner-scoped: dispatch matches a yaml entry
@@ -521,6 +573,18 @@ no way to clear it, only to rotate it with
 whole configuration). The webhook endpoint compares `X-Gitlab-Token` against
 it in constant time and answers `401` on a mismatch, before parsing the body.
 See [Site configuration → Webhook secret](#/docs/site-configuration).
+
+`commitOverlapPolicy` is what the site does when the same revision is
+dispatched again: `requeue` (the default, and what an unknown value falls
+back to), `fork` or `fork_cancel` (see
+[Site configuration → Repeated commits](#/docs/site-configuration)). It is
+readable and writable by **any signed-in user**, like `codeRepo` and
+`timezone` — not administrator-only like the tokens and the GitLab
+sign-in fields — because the policy decides the fate of everybody's
+dispatches, and a run it drops is somebody's run. An update that omits
+the field keeps the stored policy, so saving the repository form never
+rewrites it; any other value is a `400` naming what is accepted, and
+nothing is written.
 
 The GitLab sign-in configuration lives on the same endpoint but is
 administrator-only: `gitlabUrl`, `gitlabClientId`, `gitlabClientSecret` and

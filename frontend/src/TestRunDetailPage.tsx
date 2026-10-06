@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { LoaderCircle, Maximize2 } from 'lucide-react'
 import {
+  cancelTask,
   getTestArtifact,
   getTestRun,
   isTerminalStatus,
@@ -17,6 +18,7 @@ import MessageDialog from './MessageDialog'
 import ArtifactPreviewDialog from './ArtifactPreviewDialog'
 import TaskLogView from './TaskLogView'
 import { StatusText } from './StatusViews'
+import { statusView } from './status'
 import { formatTime } from './timezone'
 import { Breadcrumbs } from './Breadcrumbs'
 import PlotSection from './plot/PlotSection'
@@ -40,6 +42,11 @@ export default function TestRunDetailPage({ onError }: Props) {
   const [run, setRun] = useState<TestRunDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // Cancelling this attempt's stage, and what went wrong when it did not
+  // happen. Kept apart from `error`, which is the page failing to load: a
+  // refusal (409) must not replace the run being read with an error view.
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -73,6 +80,25 @@ export default function TestRunDetailPage({ onError }: Props) {
   // the store never reopens one — a re-run opens a new attempt, and so a new
   // run with a page of its own.)
   const live = run !== null && !isTerminalStatus(run.status)
+  // Cancelling this stage. A run is one attempt of one task, so the store's
+  // cancellation of that task is what stops it — the stage is a leaf of the
+  // graph, and the work waiting on it is skipped (see cancelTask on the server
+  // side). The run is read again right after, so the page shows what the store
+  // did rather than what the press assumed; a refusal (409: the stage finished
+  // first) is said out loud instead of looking like a press that did nothing.
+  const cancel = async () => {
+    if (run === null || run.taskId <= 0) return
+    setCancelling(true)
+    setCancelError('')
+    try {
+      await cancelTask(run.taskId)
+      setRun(await getTestRun(runId))
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : 'Failed to cancel')
+    } finally {
+      setCancelling(false)
+    }
+  }
   useEffect(() => {
     if (!live) return
     // The interval is cleared on navigation/unmount, but a request already on
@@ -120,27 +146,14 @@ export default function TestRunDetailPage({ onError }: Props) {
   }
 
   const failed = run.status === 'failed'
-  const timedOut = run.status === 'timeout'
   const skipped = run.status === 'skipped'
   const inFlight = run.status === 'pending' || run.status === 'running'
-  const statusCls = failed
-    ? 'text-danger'
-    : timedOut
-      ? 'text-timeout'
-      : skipped
-        ? 'text-warn'
-        : inFlight
-          ? 'text-run'
-          : 'text-success'
-  const statusText = failed
-    ? '✗ failed'
-    : timedOut
-      ? '⏱ timed out'
-      : skipped
-        ? '⤼ skipped'
-        : inFlight
-          ? '⏳ ' + run.status
-          : '✓ passed'
+  // The status' wording and color come from the shared table (status.ts), so
+  // this page, the task graph and the dashboard cannot drift apart. An open
+  // attempt reads as the state it is in ("⏳ running"), not as a verdict.
+  const view = statusView(run.status)
+  const statusCls = view.textCls
+  const statusText = view.live ? '⏳ ' + run.status : view.text
 
   return (
     <div>
@@ -208,6 +221,31 @@ export default function TestRunDetailPage({ onError }: Props) {
       )}
 
       {run.summary && <pre className="dash-run-summary">{run.summary}</pre>}
+
+      {/* The stage is still in flight: it can be stopped from here. */}
+      {live && run.taskId > 0 && (
+        <p style={{ marginBottom: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn btn-danger btn-sm"
+            disabled={cancelling}
+            onClick={() => {
+              const name = run.taskName ? `"${run.taskName}"` : 'this stage'
+              if (
+                window.confirm(
+                  `Cancel ${name}? The stage is stopped and marked cancelled, and the stages ` +
+                    'waiting on it are skipped — what has already finished keeps its results.',
+                )
+              ) {
+                void cancel()
+              }
+            }}
+          >
+            {cancelling ? 'Cancelling…' : 'Cancel this stage'}
+          </button>
+        </p>
+      )}
+      {cancelError && <div className="alert alert-danger">{cancelError}</div>}
 
       {/* The task page is where the graph, the sibling stages and — for a
           regression stage — the cases with their own runs live. */}

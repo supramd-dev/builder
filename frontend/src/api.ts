@@ -273,6 +273,14 @@ export async function execScript(
   })
 }
 
+// CommitOverlapPolicy is what a repeated commit does to the work already
+// dispatched for it: "requeue" (the default) restamps the existing commit row
+// and re-arms its graph, "fork" gives the new event a row and a graph of its
+// own and leaves the earlier one running, "fork_cancel" does the same and
+// cancels the earlier one's unfinished work. The values are the server's
+// (store.CommitOverlap*).
+export type CommitOverlapPolicy = 'requeue' | 'fork' | 'fork_cancel'
+
 export interface SiteConfig {
   codeRepo: string
   accessTokenSet: boolean
@@ -286,6 +294,12 @@ export interface SiteConfig {
   // for everybody else.
   webhookToken: string
   updatedAt: string
+
+  // What a second event for a revision that is already on the dashboard does
+  // to the work already dispatched for it (see CommitOverlapPolicy). The
+  // server always reports one of the three values: a configuration written
+  // before the option existed reports the default, "requeue".
+  commitOverlapPolicy: CommitOverlapPolicy
 
   // The GitLab sign-in integration. Whether it is on and whether a client
   // secret is stored are plain booleans, so everyone sees them (the login
@@ -316,6 +330,10 @@ export interface SiteConfigUpdate {
   secretToken?: string
   clearAccessToken?: boolean
   clearSecretToken?: boolean
+  // Absent = keep the stored policy. The other tabs never send it, so an
+  // update from one of them leaves the policy in force (the server treats an
+  // absent field as "say nothing about it").
+  commitOverlapPolicy?: CommitOverlapPolicy
   gitlabUrl?: string
   gitlabClientId?: string
   gitlabClientSecret?: string
@@ -392,9 +410,14 @@ export interface DashboardCommit {
   // (absent on rows recorded before the column existed).
   event?: string
   pushedAt: string
-  // true when a newer attempt of the same SHA exists (manual re-dispatch):
-  // the row is kept for history but rendered dimmed.
+  // true when a newer row of the same SHA exists (a manual re-dispatch, or a
+  // webhook event under the fork policies): the row is kept, and rendered
+  // dimmed once it has stopped moving.
   superseded?: boolean
+  // true when a task graph of this row is still unfinished. It is what the
+  // dimming waits for: under the fork policies an older row keeps running, and
+  // work in flight must not look like dead history.
+  live?: boolean
   // Why this commit produced no task graph — the webhook's dispatchError,
   // recorded at dispatch time (the yaml could not be read or parsed, no entry
   // matched an environment, no code repo configured). Absent when a graph was
@@ -414,7 +437,10 @@ export interface RunCell {
   // upstream task failed, and its summary carries the reason. "timeout" is
   // one too: the stage ran and its command outlived the timeout
   // md-builder.yaml gave it, so the cause, not just the outcome, is on show.
-  status: 'passed' | 'failed' | 'timeout' | 'running' | 'pending' | 'skipped'
+  // "cancelled" is the site's repeated-commit policy dropping the stage: it
+  // is not a verdict on the code but on the dispatch, and its summary says
+  // which dispatch replaced it.
+  status: 'passed' | 'failed' | 'timeout' | 'running' | 'pending' | 'skipped' | 'cancelled'
   total: number
   passed: number
   failed: number
@@ -574,8 +600,9 @@ export interface Run {
   kind: TaskKind
   // "pending"/"running" are live states: the attempt is open until the stage
   // reports its outcome. "timeout" is the outcome of a stage whose command
-  // outlived its timeout.
-  status: 'passed' | 'failed' | 'timeout' | 'skipped' | 'pending' | 'running'
+  // outlived its timeout. "cancelled" is the attempt of a stage a newer
+  // dispatch of its commit dropped (the fork_cancel policy).
+  status: 'passed' | 'failed' | 'timeout' | 'skipped' | 'pending' | 'running' | 'cancelled'
   // The task's summary line: the failure text, the skip reason, or what the
   // stage printed for MD-BUILDER-SUMMARY.
   summary: string
@@ -659,7 +686,16 @@ export function runArtifactsZipUrl(runId: number): string {
 // latest attempt's (a virtual node's is rolled up from its children).
 // "timeout" is a failure whose cause is the stage's own timeout — the runner
 // records it, and a container whose failures are all timeouts takes it too.
-export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'timeout' | 'skipped'
+// "cancelled" is the repeated-commit policy dropping unfinished work; a
+// container whose children include a cancelled one takes it as well.
+export type TaskStatus =
+  | 'pending'
+  | 'running'
+  | 'passed'
+  | 'failed'
+  | 'timeout'
+  | 'skipped'
+  | 'cancelled'
 
 // isTerminalStatus reports whether a status is final, i.e. can no longer
 // change: everything else (the two in-flight ones, and anything this build
@@ -671,7 +707,13 @@ export type TaskStatus = 'pending' | 'running' | 'passed' | 'failed' | 'timeout'
 // statuses would stop dead — with no request left to notice the change — on
 // a status it does not recognise.
 export function isTerminalStatus(status: string): boolean {
-  return status === 'passed' || status === 'failed' || status === 'timeout' || status === 'skipped'
+  return (
+    status === 'passed' ||
+    status === 'failed' ||
+    status === 'timeout' ||
+    status === 'skipped' ||
+    status === 'cancelled'
+  )
 }
 
 // TaskKind is a node's role in the graph: the virtual root per (commit,
@@ -782,6 +824,30 @@ export async function getTask(id: number): Promise<TaskDetail> {
 export async function getTaskRuns(id: number): Promise<Run[]> {
   const res = await api<{ runs: Run[] }>(`/api/tasks/${id}/runs`)
   return res.runs ?? []
+}
+
+// CancelResult is what stopping work answers with: the task that was asked
+// about, how many nodes were dropped (never 0 — a cancellation with nothing to
+// stop is a 409, see cancelTask), how many of them this server was executing and
+// had to abort, and the summary the cancelled nodes and runs now carry.
+export interface CancelResult {
+  taskId: number
+  cancelled: number
+  aborted: number
+  summary: string
+}
+
+// cancelTask stops the unfinished work of a task and of everything below it: a
+// stage on its own, a whole container's worth of tests (the regression container
+// takes every case under it that has not finished, running ones included), or
+// the entire graph when the id is that graph's root. The stages waiting on a
+// cancelled node are skipped rather than left queued.
+//
+// Any signed-in user may call it, and only unfinished work goes: what already
+// ran keeps its results. A task with nothing left to cancel fails with a 409
+// (ApiError) instead of reporting an empty success.
+export async function cancelTask(id: number): Promise<CancelResult> {
+  return api<CancelResult>(`/api/tasks/${id}/cancel`, { method: 'POST' })
 }
 
 // LogChunk is one piece of a task's log as it is read: the text, and the byte

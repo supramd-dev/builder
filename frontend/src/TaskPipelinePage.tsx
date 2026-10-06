@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { LoaderCircle } from 'lucide-react'
-import { getTask, isTerminalStatus, taskArtifactsZipUrl, type TaskDetail, type TaskNode } from './api'
+import {
+  cancelTask,
+  getTask,
+  isTerminalStatus,
+  taskArtifactsZipUrl,
+  type TaskDetail,
+  type TaskNode,
+} from './api'
 import { StatusText, commitUrl } from './StatusViews'
+import { statusGlyph, statusView } from './status'
 import { Breadcrumbs } from './Breadcrumbs'
 import TaskLogView from './TaskLogView'
 import {
@@ -57,6 +65,10 @@ export default function TaskPipelinePage() {
   // The current poll, for the wake-on-return effect below: the loop itself is
   // owned by the effect that fetches the graph.
   const pollRef = useRef<(() => void) | null>(null)
+  // Cancelling a node or the whole graph, and what went wrong when it did not
+  // happen. Kept apart from `error`, which is the page failing to load.
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState('')
 
   // select is the only way the panel changes node, so the mirror cannot drift.
   const select = (id: number | null) => {
@@ -169,6 +181,26 @@ export default function TaskPipelinePage() {
     }
   }, [])
 
+  // Cancelling is one request per press: the graph-wide one in the header (the
+  // root's subtree is the whole graph) and the per-node one in the panel (a
+  // container takes every unfinished case under it, a stage only itself). The
+  // graph is re-read as soon as the request lands, so the page shows what the
+  // store did rather than what the button assumed; a refusal — 409, the work
+  // finished first, or there was none left — is said out loud instead of
+  // leaving a press that looks like it did nothing.
+  const cancel = async (id: number) => {
+    setCancelling(true)
+    setCancelError('')
+    try {
+      await cancelTask(id)
+      pollRef.current?.()
+    } catch (err) {
+      setCancelError(err instanceof Error ? err.message : 'Failed to cancel')
+    } finally {
+      setCancelling(false)
+    }
+  }
+
   if (error) {
     return (
       <div>
@@ -204,7 +236,13 @@ export default function TaskPipelinePage() {
 
   return (
     <div>
-      <TaskHeader task={root} />
+      <TaskHeader
+        task={root}
+        live={live}
+        cancelling={cancelling}
+        onCancel={() => cancel(root.id)}
+      />
+      {cancelError && <div className="alert alert-danger">{cancelError}</div>}
       {subs.length > 0 ? (
         <>
           <GraphCanvas
@@ -224,6 +262,8 @@ export default function TaskPipelinePage() {
             live={live}
             selected={selected}
             onSelect={openNode}
+            cancelling={cancelling}
+            onCancel={cancel}
           />
         </>
       ) : (
@@ -238,7 +278,17 @@ export default function TaskPipelinePage() {
 
 // TaskHeader renders the title (task number, commit, environment) and the
 // summary line (author, ref, tags, status).
-function TaskHeader({ task }: { task: TaskDetail }) {
+function TaskHeader({
+  task,
+  live,
+  cancelling,
+  onCancel,
+}: {
+  task: TaskDetail
+  live: boolean
+  cancelling: boolean
+  onCancel: () => void
+}) {
   return (
     <div>
       <Breadcrumbs
@@ -294,6 +344,33 @@ function TaskHeader({ task }: { task: TaskDetail }) {
       {(task.status === 'passed' || task.status === 'failed' || task.status === 'timeout') && (
         <p style={{ marginBottom: '0.5rem' }}>
           <a href={taskArtifactsZipUrl(task.id)}>Download the graph's artifacts (zip)</a>
+        </p>
+      )}
+      {/* The graph-wide cancel, for as long as the graph has anything left to
+          stop: it is the whole root's subtree, i.e. every unfinished stage of
+          this commit on this environment. Ask first — this is the one action on
+          the page that throws work away, and the tests it stops are running on
+          real machines. */}
+      {live && (
+        <p style={{ marginBottom: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn btn-danger btn-sm"
+            disabled={cancelling}
+            onClick={() => {
+              if (
+                window.confirm(
+                  'Cancel every unfinished stage of this graph? The stages still queued or ' +
+                    'running are stopped and marked cancelled; what has already finished keeps ' +
+                    'its results.',
+                )
+              ) {
+                onCancel()
+              }
+            }}
+          >
+            {cancelling ? 'Cancelling…' : 'Cancel all'}
+          </button>
         </p>
       )}
     </div>
@@ -372,7 +449,7 @@ function GraphCanvas({
                   {status === 'running' ? (
                     <LoaderCircle size={13} className="spin" />
                   ) : (
-                    nodeGlyph(status)
+                    statusGlyph(status)
                   )}
                 </span>
                 <span className="graph-node-name">{node.name}</span>
@@ -398,12 +475,16 @@ function PipelineSection({
   live,
   selected,
   onSelect,
+  cancelling,
+  onCancel,
 }: {
   subs: TaskNode[]
   retired: TaskNode[]
   live: boolean
   selected: number | null
   onSelect: (node: TaskNode) => void
+  cancelling: boolean
+  onCancel: (id: number) => void
 }) {
   const all = [...subs, ...retired]
   const node = all.find((n) => n.id === selected)
@@ -411,7 +492,15 @@ function PipelineSection({
     <section>
       <h3 className="task-section-title">Pipeline</h3>
       <StepList nodes={subs} selected={selected} onSelect={onSelect} />
-      {node && <StepPanel node={node} nodes={all} live={live} />}
+      {node && (
+        <StepPanel
+          node={node}
+          nodes={all}
+          live={live}
+          cancelling={cancelling}
+          onCancel={onCancel}
+        />
+      )}
       {retired.length > 0 && (
         <>
           <h4 className="task-steps-title">
@@ -452,11 +541,11 @@ function StepList({
             onClick={() => onSelect(node)}
             title={node.error || node.summary || node.name}
           >
-            <span className={'task-step-status ' + statusTextClass(node.status)}>
+            <span className={'task-step-status ' + statusView(node.status).textCls}>
               {node.status === 'running' ? (
                 <LoaderCircle size={13} className="spin" />
               ) : (
-                nodeGlyph(node.status)
+                statusGlyph(node.status)
               )}
             </span>
             <span className="task-step-name">{node.name}</span>
@@ -483,16 +572,23 @@ function StepPanel({
   node,
   nodes,
   live,
+  cancelling,
+  onCancel,
 }: {
   node: TaskNode
   nodes: TaskNode[]
   live: boolean
+  cancelling: boolean
+  onCancel: (id: number) => void
 }) {
+  // A retired node is history: it is never scheduled again, so there is nothing
+  // left to cancel in it.
+  const cancellable = !node.retired && !isTerminalStatus(node.status)
   return (
     <div className="pipeline-log">
       <div className="pipeline-log-head">
-        <span className={'pipeline-log-status ' + statusTextClass(node.status)}>
-          {nodeGlyph(node.status)}
+        <span className={'pipeline-log-status ' + statusView(node.status).textCls}>
+          {statusGlyph(node.status)}
         </span>
         <span className="pipeline-log-name">{node.name}</span>
         <span className="text-muted pipeline-log-kind">{node.kind}</span>
@@ -522,6 +618,30 @@ function StepPanel({
               Task details →
             </Link>
           )
+        )}
+        {/* Stopping this node: the stage alone, or — for the regression
+            container — every case under it that has not finished, the running
+            ones included. Only what is still unfinished goes; the confirm says
+            so before anything is stopped. */}
+        {cancellable && (
+          <button
+            type="button"
+            className="btn btn-danger btn-sm"
+            disabled={cancelling}
+            onClick={() => {
+              const what = node.virtual
+                ? `Cancel "${node.name}" and every case under it that has not finished? ` +
+                  'They are stopped and marked cancelled; what has already finished keeps ' +
+                  'its results.'
+                : `Cancel "${node.name}"? It is stopped and marked cancelled, and the stages ` +
+                  'waiting on it are skipped — what has already finished keeps its results.'
+              if (window.confirm(what)) {
+                onCancel(node.id)
+              }
+            }}
+          >
+            Cancel
+          </button>
         )}
       </div>
       {node.summary && <p className="text-muted">{node.summary}</p>}
@@ -578,34 +698,3 @@ function graphLive(task: TaskDetail): boolean {
   )
 }
 
-function nodeGlyph(status: string): string {
-  switch (status) {
-    case 'passed':
-      return '✓'
-    case 'failed':
-      return '✗'
-    case 'timeout':
-      return '⏱'
-    case 'skipped':
-      return '⤼'
-    default:
-      return '·'
-  }
-}
-
-function statusTextClass(status: string): string {
-  switch (status) {
-    case 'passed':
-      return 'text-success'
-    case 'failed':
-      return 'text-danger'
-    case 'timeout':
-      return 'text-timeout'
-    case 'skipped':
-      return 'text-warn'
-    case 'running':
-      return 'text-run'
-    default:
-      return 'text-muted'
-  }
-}

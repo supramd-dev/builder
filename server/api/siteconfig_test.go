@@ -148,6 +148,91 @@ func TestSiteConfigAPIFlow(t *testing.T) {
 	}
 }
 
+// TestSiteConfigOverlapPolicy covers the repeated-commit option over the API:
+// every logged-in user reads and writes it (it is not part of the
+// administrators-only GitLab block), an unknown value is refused rather than
+// stored, and — the important part — a request that says nothing about it (the
+// repository tab, the display tab) leaves the stored policy alone instead of
+// resetting it to the default.
+func TestSiteConfigOverlapPolicy(t *testing.T) {
+	apiServer, _ := newTestServer(t)
+	seedUser(t, apiServer.Store, "carol", "carol@example.com", "s3cret")
+
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "carol", "s3cret")
+
+	authed := func(method, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, "/api/site-config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	policyOf := func(rec *httptest.ResponseRecorder) string {
+		t.Helper()
+		var cfg map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+			t.Fatalf("decode %s: %v", rec.Body.String(), err)
+		}
+		got, _ := cfg["commitOverlapPolicy"].(string)
+		return got
+	}
+	const repo = `"codeRepo":"https://gitlab.com/group/code"`
+
+	// A configuration that was never asked reports the default.
+	if got := policyOf(authed(http.MethodGet, "")); got != store.CommitOverlapRequeue {
+		t.Fatalf("default policy: want %q, got %q", store.CommitOverlapRequeue, got)
+	}
+
+	// An unknown value is a 400, and nothing is stored.
+	rec := authed(http.MethodPut, `{`+repo+`,"commitOverlapPolicy":"cancel-everything"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown policy: expected 400, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if got := policyOf(authed(http.MethodGet, "")); got != store.CommitOverlapRequeue {
+		t.Fatalf("a refused policy was stored: %q", got)
+	}
+
+	// Each policy round-trips, for a non-administrator.
+	for _, p := range []string{store.CommitOverlapFork, store.CommitOverlapForkCancel, store.CommitOverlapRequeue} {
+		rec = authed(http.MethodPut, fmt.Sprintf(`{%s,"commitOverlapPolicy":%q}`, repo, p))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("set %q: expected 200, got %d, body %s", p, rec.Code, rec.Body.String())
+		}
+		if got := policyOf(rec); got != p {
+			t.Fatalf("set %q: echoed %q", p, got)
+		}
+		if got := policyOf(authed(http.MethodGet, "")); got != p {
+			t.Fatalf("policy %q was not persisted: got %q", p, got)
+		}
+	}
+
+	// A request that does not mention the policy keeps it: the repository tab
+	// sends only the repository and the timezone.
+	rec = authed(http.MethodPut, `{`+repo+`,"timezone":"Asia/Shanghai"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("repository-only update: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	if got := policyOf(rec); got != store.CommitOverlapRequeue {
+		t.Fatalf("the repository-only update reset the policy to %q", got)
+	}
+	// Set it once more, then update the repository: it must survive.
+	if rec = authed(http.MethodPut, fmt.Sprintf(`{%s,"commitOverlapPolicy":%q}`, repo, store.CommitOverlapForkCancel)); rec.Code != http.StatusOK {
+		t.Fatalf("set fork_cancel: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = authed(http.MethodPut, `{`+repo+`,"timezone":"UTC"}`)
+	if got := policyOf(rec); got != store.CommitOverlapForkCancel {
+		t.Fatalf("an unrelated update changed the policy to %q", got)
+	}
+	if got, err := apiServer.Store.GetSiteConfig(); err != nil {
+		t.Fatal(err)
+	} else if got.DuplicateCommitPolicy != store.CommitOverlapForkCancel {
+		t.Fatalf("stored policy after an unrelated update: %q", got.DuplicateCommitPolicy)
+	}
+}
+
 func TestSiteConfigAccessToken(t *testing.T) {
 	apiServer, _ := newTestServer(t)
 	seedUser(t, apiServer.Store, "carol", "carol@example.com", "s3cret")

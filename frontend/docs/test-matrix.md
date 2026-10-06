@@ -690,6 +690,19 @@ Each matched entry becomes a task graph (see
    files and records its own run; the matrix cell shows the container's
    rollup across cases.
 
+A graph can also stop short of an outcome for a reason that is not about
+the code: when a newer dispatch of the same revision drops it under the
+site's `fork_cancel` policy, the stages it had not finished read
+**cancelled** — they were never judged, and the cell, the graph and the
+run page say so rather than showing a failure (see
+[Site configuration → Repeated commits](#/docs/site-configuration)).
+The same is true of work stopped by hand from the run page or the task
+page: the stage that was cancelled reads cancelled, and the stages that
+were waiting on it — which can never run now — read **skipped**, with a
+summary naming the cancelled task (`upstream task build was cancelled`).
+Like `skipped`, cancelled counts as *not passed* in the roll-up, so a
+graph with a cancelled stage still settles to an outcome.
+
 ## Custom summaries
 
 A stage command may print a summary line on stdout:

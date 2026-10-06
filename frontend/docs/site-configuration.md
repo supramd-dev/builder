@@ -88,6 +88,59 @@ a regular user opening the tab sees the webhook URL and a note to ask an
 administrator for the token. See
 [User accounts](#/docs/site-configuration) for the two roles.
 
+## Repeated commits
+
+The **Settings → Dispatch** tab decides what happens when a revision reaches
+md-builder more than once. That is normal in a GitLab project: a branch is
+pushed and then opened as a merge request, a tag is pushed for a commit that
+was already built, the same ref is dispatched twice by hand. Both events carry
+the same commit SHA and both dispatch the md-builder.yaml matrix at it — the
+question is what the second one does to the task the first one started.
+
+| Mode | What the second dispatch does |
+| --- | --- |
+| **Requeue the existing task** (default) | The revision keeps one row on the dashboard and one task graph per environment. The second event restarts that graph from the beginning: a stage that was still running is closed as *skipped*, with the summary *superseded by a new dispatch of this task*, and its attempt stays as history. Nothing is duplicated. |
+| **Run the new event as its own task** | The event gets its own row and its own task graph, and both run independently — the earlier task is left exactly as it was. The same revision can therefore be tested twice at the same time, on the same environment. |
+| **Run the new event as its own task and cancel the older one** | The same as above, and the unfinished work of the earlier recordings is dropped: a stage that is still running is aborted on the environment. Work that had already finished keeps its result. |
+
+Use the first mode to see the newest state of a revision once; the second when
+you want to compare two runs of the same code, or when a long run should not be
+interrupted by a cosmetic re-push; the third when only the newest run matters
+and an environment should not stay busy with a superseded one.
+
+The choice applies to the events that dispatch the md-builder.yaml matrix:
+webhook pushes, tag pushes and merge requests, and the manual yaml dispatch
+(**Run → Dispatch ref**). A manual test command always gets a task of its own,
+whatever this says — it carries its own commands, so there is no earlier
+dispatch for it to join.
+
+A cancelled task is not a failed one. The status is **cancelled**, its summary
+says *cancelled by a newer dispatch of this commit*, and nothing about it is a
+verdict on the code: the dashboard keeps its row, marks it **older**, and dims
+it only once nothing in it can change any more — under the second and third
+modes an older row keeps running, so it stays as bright as the newest one while
+it does. Finished work is never rewritten: a stage that had already passed
+keeps its result and its log.
+
+Cancelling is a decision about that run, not a seal on the row: while the mode
+that dropped the work is in force the row is never dispatched again — the newer
+event has a row of its own, which is what "run this revision again" means here
+— but a row that does get dispatched a second time (the site is put back on
+**requeue**, so a further push of that revision deduplicates onto it) runs its
+whole graph afresh, on new attempts, with the cancelled attempt kept as
+history.
+
+The same **cancelled** status is what a run stopped by hand gets — from the
+run page or the task page, whatever this setting says (see
+[Runner strategy](#/docs/runner-strategy)). The summary differs, because the
+cause does: *cancelled by &lt;username&gt;* rather than *by a newer dispatch of
+this commit*, and a stage that was still running is aborted on the
+environment. The work waiting on a stopped stage reads **skipped**, since it
+can never run now.
+
+Any logged-in user may change this setting, like the Repository tab: it decides
+how the site dispatches, not who may do what.
+
 ## Display timezone
 
 The **Settings → Display** tab sets the timezone every timestamp is

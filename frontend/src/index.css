@@ -239,6 +239,12 @@ a.nav-link, a.brand, a.btn {
   color: var(--timeout) !important;
 }
 
+/* Cancelled work: muted, like the dashboard's stage cells — the policy
+   dropped the run, the code was never judged. */
+.text-cancel {
+  color: var(--muted) !important;
+}
+
 .text-run {
   color: var(--link) !important;
 }
@@ -901,14 +907,16 @@ div.dash-commit-cell {
   color: var(--muted);
 }
 
-/* Commit rows superseded by a newer attempt of the same SHA (manual
-   re-dispatch): kept for history, dimmed to recede behind live rows. */
+/* Commit rows an older row of the same SHA (a manual re-dispatch, or a webhook
+   event under the fork policies): kept for history, dimmed to recede behind
+   the newest row — but only once nothing in them can change (the server's
+   `live` flag), since under the fork policies an older row keeps running. */
 .dash-matrix tbody tr.dash-row-superseded td {
   color: var(--muted);
   opacity: 0.55;
 }
 
-/* The "superseded" tag in a dimmed row's commit cell. */
+/* The "older" tag in a dimmed row's commit cell. */
 .dash-superseded {
   margin-left: 0.35rem;
   padding: 0 0.3rem;
@@ -986,6 +994,13 @@ a.dash-st:hover {
 
 .dash-st-skip {
   color: var(--warn);
+}
+
+/* A stage the repeated-commit policy dropped: not a verdict on the code, so
+   it stays muted rather than taking the failure color. */
+.dash-st-cancel {
+  color: var(--muted);
+  font-style: italic;
 }
 
 .dash-st-run {

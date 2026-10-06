@@ -59,6 +59,15 @@ type Service struct {
 	// nothing here, and readers there see the stored parts instead.
 	liveMu sync.Mutex
 	live   map[liveLogKey]*LogWriter
+
+	// cancels holds the cancel func of every task this process is executing
+	// right now, so the runner can abort a stage it is running when a site
+	// policy drops its node (a newer dispatch of the same commit, see
+	// CancelTask). It is process-local: a deployment whose workers run on
+	// another process leaves the cancellation to the store's status, and the
+	// stage stops at its next report instead.
+	cancelMu sync.Mutex
+	cancels  map[int64]context.CancelFunc
 }
 
 // liveLogKey identifies one stage's log: a task's attempt, for which only one
@@ -182,7 +191,52 @@ func (s *Service) loop(ctx context.Context) {
 // its dependency failed or was skipped. Every stage of a graph is a node here,
 // so no stage can be left queued with no way forward.
 func (s *Service) runClaimed(ctx context.Context, task *store.Task) {
+	// A child context so this stage can be aborted on its own: cancelling it
+	// closes the attempt's SSH session under whatever it is running (see
+	// CancelTask). The parent's cancellation still propagates — a shutdown
+	// stops every stage.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s.trackCancel(task.ID, cancel)
+	defer s.untrackCancel(task.ID)
 	if err := s.ExecuteTask(ctx, task); err != nil {
 		log.Printf("runner: task %d: execute: %v", task.ID, err)
 	}
+}
+
+// trackCancel registers the cancel func of a task this process is executing, so
+// CancelTask can reach it.
+func (s *Service) trackCancel(taskID int64, cancel context.CancelFunc) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	if s.cancels == nil {
+		s.cancels = make(map[int64]context.CancelFunc)
+	}
+	s.cancels[taskID] = cancel
+}
+
+// untrackCancel drops a task's registration once its stage is over. One attempt
+// of a node runs at a time (only a pending node is claimed), so the entry being
+// dropped is always this execution's own.
+func (s *Service) untrackCancel(taskID int64) {
+	s.cancelMu.Lock()
+	defer s.cancelMu.Unlock()
+	delete(s.cancels, taskID)
+}
+
+// CancelTask aborts the stage this process is running for a task, closing its
+// SSH session (the attempt is logged as such and its node's status is the
+// store's business, not the runner's). It reports whether a stage of this task
+// was running here at all: a task that is queued, finished, or being executed
+// by another process has nothing for this process to abort, and the store's
+// cancellation is what ends it.
+func (s *Service) CancelTask(taskID int64) bool {
+	s.cancelMu.Lock()
+	cancel := s.cancels[taskID]
+	s.cancelMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }

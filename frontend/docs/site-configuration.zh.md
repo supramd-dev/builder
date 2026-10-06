@@ -73,6 +73,49 @@ build:
 看到 webhook URL 和一句提示(请管理员提供密钥)。两种角色见
 [用户账号](#/docs/site-configuration)。
 
+## 重复 commit
+
+**Settings → Dispatch** 标签页决定同一个 revision 多次到达 md-builder 时
+的处理方式。这在 GitLab 项目里很常见:先 push 一个分支,再为它开 merge
+request;给一个已经构建过的 commit 打 tag;或者手工对同一个 ref 触发两次。
+这些事件携带同一个 commit SHA,也都会派发该 SHA 上的 md-builder.yaml 矩阵
+—— 问题在于第二次派发要对第一次启动的任务做什么。
+
+| 模式 | 第二次派发做什么 |
+| --- | --- |
+| **Requeue the existing task**(默认) | 该 revision 在仪表板上保留一行,每个环境保留一张任务图。第二次事件让这张图从头重跑:仍在运行的 stage 会以 *skipped* 结束,摘要为 *superseded by a new dispatch of this task*,其 attempt 作为历史保留下来。不会产生重复。 |
+| **Run the new event as its own task** | 新事件有自己的行和自己的任务图,两者独立运行 —— 先前的任务原样不动。因此同一个 revision 可以在同一个环境上同时测两次。 |
+| **Run the new event as its own task and cancel the older one** | 同上,并且把先前那些记录尚未完成的工作丢弃:仍在运行的 stage 会在环境上被中断。已经完成的工作保留其结果。 |
+
+想只看某个 revision 的最新状态时用第一种;想对比同一份代码的两次运行,或者
+不希望一次长时间的运行被一次无关紧要的重新 push 打断时用第二种;只关心最新
+一次运行、不希望环境被已经被取代的任务占着时用第三种。
+
+该选项作用于会派发 md-builder.yaml 矩阵的事件:webhook 的 push、tag push、
+merge request,以及手工 yaml 派发(**Run → Dispatch ref**)。手工测试命令
+无论此项如何设置都会得到自己的任务 —— 它自带命令,没有可加入的先前派发。
+
+被取消的任务不是失败的任务。它的状态是 **cancelled**,摘要为 *cancelled by
+a newer dispatch of this commit*,其中没有任何关于代码的判定:仪表板保留它的
+行,标上 **older**,并且只有当它再也不会变化时才把它置灰 —— 在第二、第三种
+模式下,较早的行仍在运行,运行期间与最新的行同样明亮。已完成的工作永远不会
+被改写:已经通过的 stage 保留其结果与日志。
+
+取消针对的是那一次运行,而不是给这一行封上结论:只要丢弃它的模式仍在生效,
+这一行就不会再被派发(新的事件有属于它自己的行,这正是此处"再跑一次这个
+版本"的含义);但一旦某一行真的被再次派发 —— 站点改回 **requeue**,同一版本
+的后续推送于是重新落到该行 —— 整张图都会以新的尝试重新跑一遍,被取消的那次
+尝试作为历史保留。
+
+从运行详情页或任务页**手动停止**的运行得到的是同一个 **cancelled** 状态,
+与此处的设置无关(见 [Runner 策略](#/docs/runner-strategy))。摘要不同,
+因为起因不同:*cancelled by <用户名>* 而不是 *by a newer dispatch of this
+commit*,并且仍在运行的 stage 会在环境上被中止。等待被停止 stage 的工作读作
+**skipped**,因为它永远不会再运行。
+
+与 Repository 标签页一样,任何已登录用户都可以修改这项设置:它决定站点如何
+派发,而不是谁有权限做什么。
+
 ## 显示时区
 
 **Settings → Display** 标签页设置所有时间戳(仪表板、任务与运行页面)

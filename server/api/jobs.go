@@ -277,8 +277,9 @@ type manualYAMLInput struct {
 }
 
 // triggerManualYAML handles POST /api/jobs/manual-yaml — resolve the ref,
-// record the commit (deduplicated like a webhook push) and dispatch the
-// yaml matrix at it: clone, yaml parse, environment matching, graphs.
+// record the commit under the site's repeated-commit policy (deduplicated like
+// a webhook push by default) and dispatch the yaml matrix at it: clone, yaml
+// parse, environment matching, graphs.
 func (s *Server) triggerManualYAML(w http.ResponseWriter, r *http.Request, user *store.User) {
 	if s.Runner == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "task dispatch is not configured"})
@@ -297,6 +298,9 @@ func (s *Server) triggerManualYAML(w http.ResponseWriter, r *http.Request, user 
 		"commitCreated":  res.CommitCreated,
 		"jobsCreated":    res.TasksCreated,
 		"entriesSkipped": res.EntriesSkipped,
+		// Non-zero only under the fork-cancel policy: the graphs of the earlier
+		// recordings of this ref that this dispatch dropped.
+		"graphsCancelled": res.Cancelled,
 	}
 	if res.Err != nil {
 		resp["dispatchError"] = res.Err.Error()

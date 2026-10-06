@@ -12,9 +12,11 @@ import (
 // object_kind; manual triggers record their own kind. The event lives on the
 // commit (not the task): it is a property of the code revision entering the
 // matrix, while the task's Trigger column records the dispatch mechanism
-// (webhook / manual / manual-yaml). Deduplicated rows keep the event of the
-// FIRST recording (a tag push of an already-pushed SHA requeues the existing
-// row instead of duplicating it).
+// (webhook / manual / manual-yaml). A deduplicated row is RESTAMPED: the
+// later recording refreshes the row's event, ref and message in place (see
+// restampCommit), so an already-pushed SHA re-recorded by an MR or a tag push
+// requeues the existing row under the newer event instead of duplicating it.
+// Fields the later event does not carry are left as they were.
 const (
 	CommitEventPush         = "push"
 	CommitEventTagPush      = "tag_push"
@@ -58,6 +60,35 @@ const maxDispatchErrorLen = 2000
 // CreateCommit inserts a commit record.
 func (s *Store) CreateCommit(c *Commit) error {
 	return s.DB.Create(c).Error
+}
+
+// RecordCommit records an inbound event's commit under the site's
+// repeated-commit policy. Requeue (the default, and what an unknown policy
+// falls back to) deduplicates on (repo, sha) and restamps the stored row, so
+// the revision keeps one row — see GetOrCreateCommit. The fork policies always
+// insert a fresh row, so the event gets a matrix row and a task graph of its
+// own and the earlier one is left exactly as it was; the caller dispatches that
+// row, and — for CommitOverlapForkCancel — cancels the earlier rows' unfinished
+// work afterwards.
+func (s *Store) RecordCommit(c *Commit, policy string) (created bool, err error) {
+	switch policy {
+	case CommitOverlapFork, CommitOverlapForkCancel:
+		if err := s.CreateCommit(c); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return s.GetOrCreateCommit(c)
+}
+
+// PriorCommits returns the commit rows of earlier recordings of one revision
+// (repo + sha), newest first, excluding the row given by exceptID — the
+// candidates a fork-cancel policy cancels once the new row has its graph.
+func (s *Store) PriorCommits(repo, sha string, exceptID int64) ([]Commit, error) {
+	var commits []Commit
+	err := s.DB.Where("repo = ? AND sha = ? AND id <> ?", repo, sha, exceptID).
+		Order("id DESC").Find(&commits).Error
+	return commits, err
 }
 
 // GetOrCreateCommit returns the commit for (repo, sha), inserting a new row
