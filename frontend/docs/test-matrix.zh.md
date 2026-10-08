@@ -57,6 +57,12 @@ matrix:
       description: "运行单元测试"
       timeout: 600
       artifacts: "build/test_detail.xml"  # googletest 结果文件
+    performance:
+      # 性能测试:形状与 unit 完全相同 —— 但它的工件文件是测量数据,
+      # 不是判定,而且可以只在夜间执行。
+      command: "python3 bench.py --json bench.json"
+      artifacts: "bench.json"
+      window: "22:00-06:00"         # 只在这个时间段内启动
     regression:
       description: "运行回归测试"        # 整个回归阶段的标签
       use: [heat, poisson]          # 在此条目上运行哪些预设(留空 = 全部)
@@ -85,13 +91,21 @@ matrix:
 | matrix[].env                 | 否       | 为所有阶段导出的额外环境变量 —— 字面量值。                          |
 | matrix[].variables           | 否       | 该条目各阶段的额外变量,合并到 defaults.variables 之上 —— 模板值(见[变量](#变量))。 |
 | matrix[].build               | 否       | 构建阶段(见下)。                                                   |
-| matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 description、workdir、timeout、artifacts。 |
+| matrix[].unit                | 否       | 单元测试阶段:至少有 command;可选 description、workdir、timeout、artifacts、window。 |
+| matrix[].performance         | 否       | 性能测试阶段:至少有 command;可选 description、workdir、timeout、artifacts、window。 |
 | matrix[].regression          | 否       | 回归测试选择:use / disable 引用预设;可选整个阶段的 description。  |
 | unit.command                 | 是(每阶段) | shell 命令,或命令列表(见命令列表)。                       |
 | unit.description             | 否       | 阶段的人类可读标签:显示在其运行详情页,且每次触发运行时都会存入数据库(描述可能随 yaml 变更)。 |
 | unit.workdir                 | 否       | 命令的运行目录(见工作目录)。                                       |
 | unit.artifacts                | 否       | 工件文件路径(或路径列表),runner 会在阶段结束后取回(见工件文件)。 |
 | unit.timeout                 | 否       | 覆盖默认值的阶段超时。                                              |
+| performance.command          | 是(每阶段) | 运行性能测试的 shell 命令(或命令列表),形式同 unit.command。 |
+| performance.description      | 否       | 阶段的人类可读标签,显示在其运行详情页。                          |
+| performance.workdir          | 否       | 命令的运行目录(见工作目录)。                                     |
+| performance.artifacts        | 否       | 测量文件路径(或列表):取回后存为 **series 工件** —— 永不解析、永不计数(见性能工件)。 |
+| performance.timeout          | 否       | 覆盖默认值的阶段超时 —— 性能测试常常是一个条目里最耗时的阶段。  |
+| build.window / unit.window / performance.window / regression.window | 否 | 该阶段允许**启动**的每日时间段,例如 `"22:00-06:00"`(见[调度时间段](#调度时间段))。 |
+| presets.\<name\>.window    | 否       | 同上,作用于单个回归用例;条目级 regression.window 是它所选用例的默认值。 |
 | regression.description       | 否       | 整个回归阶段(容器节点)的人类可读标签;每个用例另带自己预设的 description。 |
 
 构建阶段是一条 shell 命令 —— 或者像测试阶段一样是命令列表(没有内置的
@@ -393,6 +407,62 @@ matrix:
 源外构建只是 workdir 加一条以 `"$MD_CODE_DIR"` 为参数的配置命令
 (见上面的 build 示例)。
 
+## 调度时间段
+
+阶段可以声明**什么时候才允许启动**:
+
+```yaml
+build:       { command: "make -j8", window: "20:00-20:30" }
+unit:        { command: "ctest -L unit" }              # 任意时间
+performance: { command: "./bench", window: "22:00-06:00" }
+regression:
+  window: "23:00-05:00"                                # 其用例的默认值
+  use: [heat, poisson]
+presets:
+  poisson: { command: "./poisson", window: "01:00-03:00" }  # 用例自己的优先
+```
+
+这个功能是为对负载敏感的性能测试而加的:共享集群上的性能数据只有在
+没有别的东西同时在跑时才有意义,所以它该在半夜跑,而同一个提交的单
+元测试现在就可以跑。
+
+时间段做了什么、以及没做什么:
+
+- 它只约束**启动**。时间段之外节点一直停留在 **pending**:不是失败,
+  不是跳过,也不算迟到。调度器只是不去认领它,因此也不会占住 worker。
+- **已在运行的阶段永远不会被打断。**`"22:00-06:00"` 的意思是「在
+  22:00 到 06:00 之间启动」,而不是「只在这段时间内运行」—— 跑到天亮
+  的性能测试会正常跑完。
+- 下游阶段自然等待:等待一个被时间段限制的 build 的阶段,和等待一个
+  仍在编译的 build 完全一样。
+- 时间段按**站点时钟**解读 —— *Settings* 里的时区;未设置时用服务器
+  本地时区(见[站点配置](#/docs/site-configuration))。数据库行依旧存
+  UTC 时间戳,只有时间段的「现在」是本地时间。
+- 时间段对**所有**派发生效:webhook 推送、手动 yaml 触发、手动表单都
+  一样。时间段是阶段的属性,不是触发方式的属性,没有任何路径可以绕
+  过它。(手动表单本身没有 window 字段 —— 它直接填写原始命令,因此它
+  的阶段在依赖完成后就会运行。)
+
+### 写法
+
+两个 `HH:MM` 时刻,中间一个短横线,24 小时制:
+
+| 写法 | 含义 |
+|--------|---------|
+| *(不写)* | 任意时间 —— 依赖满足后立刻被认领。 |
+| `"08:00-18:00"` | 在 08:00 到 18:00 之间启动。 |
+| `"22:00-06:00"` | 跨过午夜:22:00 之后启动,**或** 06:00 之前启动。 |
+| `"00:00-24:00"` | 全天 —— 与不写等价,只是写清楚了。 |
+
+起点包含在内,终点不包含(`"22:00-06:00"` 在 05:59 开放,在 06:00
+关闭)。没有星期几,也没有 cron:时间段就是每天的一个区间,更复杂的
+调度逻辑应该写在命令里。
+
+yaml 在读取时就会校验:写错的时刻(`"22:00"`)、零长度区间
+(`"22:00-22:00"`,永远不会开放)、一位数小时(`"6:00-7:00"`)或乱写
+(`"nighttime"`)都会让派发失败并指出出错字段,而不是悄悄让阶段变成
+随时可跑。
+
 ## 工件文件
 
 阶段命令(unit 或回归预设)可以产出结构化的结果文件 —— 默认是 googletest
@@ -444,6 +514,25 @@ build:
 构建留下的任意文件都可以 —— 日志、`compile_commands.json`、体积报
 告。与测试阶段相同,路径相对于 build 的 workdir,每个文件取回时以
 8 MiB 为上限。
+
+### 性能工件
+
+**performance** 阶段支持与 unit 相同的 `artifacts` 字段,但语义与
+build 阶段一致:文件**原样**存为 **series 工件**、永不解析 —— 结论只
+由命令退出码决定。性能测试给出的是测量值,不是通过/失败;从性能测试
+取回的形似结果的文件不会把格子翻成失败(而性能测试**确实**发现性能
+回退时可以非零退出,那会像任何阶段的退出码一样让运行失败)。
+
+```yaml
+performance:
+  command: "./bench --json bench.json"
+  artifacts: ["bench.json", "bench.log"]
+```
+
+每个文件都是独立的工件,可以像其他工件一样在运行详情页下载。它们的
+历史数据预期在 *Performance* 页面展示 —— 每台测试机器一张图,画出某个
+指标随所测提交的演化。那套采集**尚未实现**:该页面目前说明的是计划,
+并画一张标注为示例的占位图,里面没有任何真实测量值。
 
 ### 绘图工件(`*.plot.json` / `*.plotly.json`)
 
@@ -572,8 +661,10 @@ zip 会得到 `404`,而不是一个空归档。
 ## 校验规则
 
 - `version` 必须为 3;`matrix` 不能为空。
-- 每个条目需要非空的 `tags` 以及 `unit` / `regression`(或其预设展开)
-  中的至少一个,且带有 `command`。
+- 每个条目需要非空的 `tags` 以及 `unit` / `performance` /
+  `regression`(或其预设展开)中的至少一个,且带有 `command`。
+- 每个 `window` 必须是 `"HH:MM-HH:MM"` 形式、时刻为两位数、区间非空且
+  起点在终点之前(跨午夜可以)—— 见[写法](#写法)。
 - 条目之间不允许重复的标签组合。
 - `build.command` 必填(条目自己的或 `defaults.build` 的)。
 - 未知字段会被拒绝(例如已移除的 `build.generator` / `cmake_flags` /
@@ -609,7 +700,10 @@ zip 会得到 `404`,而不是一个空归档。
    摘要里、日志中有一行,仪表板如实呈现。
 4. **unit**:阶段命令在其工作目录中、受超时约束地运行;完整输出流入
    任务日志,结果被存为该次尝试的测试运行。
-5. **regression:每个选中的预设一个任务** —— 每个用例命令在构建之后
+5. **performance**:形状与 unit 一致,但它的工件文件存为 series 数据而
+   不是解析计数;`window` 可以把节点一直压到时间段开放(见
+   [调度时间段](#调度时间段))。
+6. **regression:每个选中的预设一个任务** —— 每个用例命令在构建之后
    运行(导出 MD_CASE),收集自己的结果文件并记录自己那条运行;矩阵格
    展示容器对所有用例的汇总。
 

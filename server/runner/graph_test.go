@@ -458,3 +458,122 @@ func TestScriptSecretTokenExport(t *testing.T) {
 		t.Errorf("secret export should be shell-quoted, want %q in:\n%s", want, script)
 	}
 }
+
+// The performance stage sits next to unit: it waits for the build, then runs
+// its own command. Its node key is the kind, so a re-dispatch re-arms the same
+// node instead of adding a second benchmark.
+func TestBuildTaskGraphPerformance(t *testing.T) {
+	entry := sampleEntry()
+	entry.Performance = &EnvConfig{
+		Command:   CommandList{"./bench --json bench.json"},
+		Workdir:   "build",
+		Timeout:   1800,
+		Artifacts: ArtifactPaths{"bench.json"},
+		Window:    "22:00-06:00",
+	}
+	entry.Regression = nil
+	tasks, err := BuildTaskGraph(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// clone, build, unit, performance.
+	if len(tasks) != 4 {
+		t.Fatalf("want 4 nodes (clone, build, unit, performance), got %d", len(tasks))
+	}
+	perf := tasks[3]
+	if perf.Kind != store.TaskKindPerformance || perf.NodeKey != store.TaskKindPerformance {
+		t.Errorf("performance node: kind %q key %q", perf.Kind, perf.NodeKey)
+	}
+	if perf.Name != "performance tests" {
+		t.Errorf("performance node name: %q", perf.Name)
+	}
+	// It depends on build (index 1), not on unit or a container.
+	if len(perf.Deps) != 1 || perf.Deps[0] != store.TaskSubPlaceholderBase+1 {
+		t.Errorf("performance deps: %v", perf.Deps)
+	}
+	// The window travels on the node: that is what the scheduler reads.
+	if perf.Window != "22:00-06:00" {
+		t.Errorf("performance window: %q", perf.Window)
+	}
+	var cfg StageConfig
+	if err := json.Unmarshal([]byte(perf.Config), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Command.String() != "./bench --json bench.json" || cfg.Workdir != "build" || cfg.Timeout != 1800 {
+		t.Errorf("performance snapshot wrong: %+v", cfg)
+	}
+	if len(cfg.Artifacts) != 1 || cfg.Artifacts[0] != "bench.json" {
+		t.Errorf("performance artifacts: %v", cfg.Artifacts)
+	}
+}
+
+// A performance-only entry with no build waits for the clone instead.
+func TestBuildTaskGraphPerformanceWithoutBuild(t *testing.T) {
+	entry := sampleEntry()
+	entry.Build = BuildConfig{}
+	entry.Unit = nil
+	entry.Regression = nil
+	entry.Performance = &EnvConfig{Command: CommandList{"./bench"}}
+	tasks, err := BuildTaskGraph(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("want clone + performance, got %d nodes", len(tasks))
+	}
+	if tasks[1].Kind != store.TaskKindPerformance {
+		t.Fatalf("node 1 kind: %q", tasks[1].Kind)
+	}
+	if len(tasks[1].Deps) != 1 || tasks[1].Deps[0] != store.TaskSubPlaceholderBase+0 {
+		t.Errorf("performance should depend on clone: %v", tasks[1].Deps)
+	}
+}
+
+// Each stage keeps its own window, and the virtual regression container shows
+// the entry's shared regression window — a container never runs, but the
+// pipeline should display the time the fan-out is held for.
+func TestBuildTaskGraphWindows(t *testing.T) {
+	entry := sampleEntry()
+	entry.Build.Window = "20:00-20:30"
+	entry.Unit.Window = "21:00-21:30"
+	entry.Performance = &EnvConfig{Command: CommandList{"./bench"}, Window: "22:00-06:00"}
+	entry.Regression[0].Window = "23:00-05:00"
+	entry.Regression[1].Window = "23:00-05:00"
+	tasks, err := BuildTaskGraph(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// clone, build, unit, performance, stage, 2 cases.
+	if len(tasks) != 7 {
+		t.Fatalf("want 7 nodes, got %d", len(tasks))
+	}
+	want := map[int]string{
+		0: "",            // clone is never windowed
+		1: "20:00-20:30", // build
+		2: "21:00-21:30", // unit
+		3: "22:00-06:00", // performance
+		4: "23:00-05:00", // the shared window on the container
+	}
+	for i, window := range want {
+		if tasks[i].Window != window {
+			t.Errorf("node %d (%s) window = %q, want %q", i, tasks[i].Kind, tasks[i].Window, window)
+		}
+	}
+	if tasks[5].Window != "23:00-05:00" || tasks[6].Window != "23:00-05:00" {
+		t.Errorf("case windows: %q %q", tasks[5].Window, tasks[6].Window)
+	}
+
+	// Cases on different windows have no shared value to show on the
+	// container, so it carries none rather than a misleading one.
+	entry.Regression[1].Window = "01:00-03:00"
+	tasks, err = BuildTaskGraph(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tasks[4].Window; got != "" {
+		t.Errorf("mixed case windows should leave the container unwindowed, got %q", got)
+	}
+	if tasks[5].Window != "23:00-05:00" || tasks[6].Window != "01:00-03:00" {
+		t.Errorf("case windows: %q %q", tasks[5].Window, tasks[6].Window)
+	}
+}

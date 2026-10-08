@@ -61,6 +61,12 @@ matrix:
       description: "Run unit tests"
       timeout: 600
       artifacts: "build/test_detail.xml"  # googletest XML file
+    performance:
+      # A benchmark, shaped exactly like unit — but its artifact files are
+      # measurements, not verdicts, and it may be held to the night.
+      command: "python3 bench.py --json bench.json"
+      artifacts: "bench.json"
+      window: "22:00-06:00"         # start only inside this interval
     regression:
       description: "Run regression tests"   # label of the stage as a whole
       use: [heat, poisson]          # which presets run here (empty = all)
@@ -89,13 +95,21 @@ matrix:
 | matrix[].env                 | no       | Extra environment variables exported for all stages — literal values. |
 | matrix[].variables           | no       | Extra variables for this entry's stages, merged over defaults.variables — template values (see [Variables](#variables)). |
 | matrix[].build               | no       | Build stage (see below).                                            |
-| matrix[].unit                | no       | Unit test stage: at least command; optional description, workdir, timeout, artifacts. |
+| matrix[].unit                | no       | Unit test stage: at least command; optional description, workdir, timeout, artifacts, window. |
+| matrix[].performance         | no       | Performance test stage: at least command; optional description, workdir, timeout, artifacts, window. |
 | matrix[].regression          | no       | Regression selection: use and/or disable referencing presets; optional description of the stage as a whole. |
 | unit.command                 | yes (per stage) | Shell command, or a list of commands (see Command lists).    |
 | unit.description             | no       | Human-readable label of the stage, shown on its run detail page and stored with every triggered run. |
 | unit.workdir                 | no       | Directory the command runs in (see Working directories).            |
 | unit.artifacts               | no       | Artifact file path (or list) the runner fetches back (see Artifact files). |
 | unit.timeout                 | no       | Stage timeout overriding defaults.                                  |
+| performance.command          | yes (per stage) | Shell command(s) running the benchmark, same forms as unit.command. |
+| performance.description      | no       | Human-readable label of the stage, shown on its run detail page.    |
+| performance.workdir          | no       | Directory the command runs in (see Working directories).            |
+| performance.artifacts        | no       | Measurement file path (or list) fetched back and stored as **series data** — never parsed, never counted (see Performance artifacts). |
+| performance.timeout          | no       | Stage timeout overriding defaults — a benchmark is often the longest stage of an entry. |
+| build.window / unit.window / performance.window / regression.window | no | Daily interval this stage may **start** in, e.g. `"22:00-06:00"` (see [Scheduling windows](#scheduling-windows)). |
+| presets.\<name\>.window    | no       | Same, for one regression case; an entry-level regression.window is the default for the cases it selects. |
 | regression.description       | no       | Human-readable label of the regression stage as a whole (the container node); each case carries its preset's own description. |
 
 The build stage is one shell command — or a list of them, like the
@@ -436,6 +450,66 @@ directory a stage command runs in:
 An out-of-source build is just a `workdir` plus a command that
 configures against `"$MD_CODE_DIR"` (see the build example above).
 
+## Scheduling windows
+
+A stage may declare **when it is allowed to start**:
+
+```yaml
+build:       { command: "make -j8", window: "20:00-20:30" }
+unit:        { command: "ctest -L unit" }              # any time
+performance: { command: "./bench", window: "22:00-06:00" }
+regression:
+  window: "23:00-05:00"                                # default for its cases
+  use: [heat, poisson]
+presets:
+  poisson: { command: "./poisson", window: "01:00-03:00" }  # a case's own wins
+```
+
+The feature exists for the load-sensitive benchmark: a performance run on
+a shared cluster measures the code only if nothing else is running, so it
+belongs at night while the same commit's unit tests can go now.
+
+What a window does — and what it does not:
+
+- It restricts **starting**, nothing else. Outside the interval the node
+  stays **pending**: not failed, not skipped, not late. The scheduler
+  simply does not claim it, so no worker is held either.
+- **A running stage is never interrupted.** `"22:00-06:00"` means "starts
+  between 22:00 and 06:00", not "runs only then" — a benchmark that
+  overruns into the morning finishes.
+- Dependents wait naturally: a stage claiming a windowed build waits for
+  that build, exactly as it waits for one still compiling.
+- The interval is read on the **site clock** — the timezone in
+  *Settings*, or the server's local zone when none is set (see
+  [Site configuration](#/docs/site-configuration)). Rows keep their UTC
+  timestamps; only the window's "now" is local.
+- Windows apply to **every** dispatch: a webhook push, a manual yaml
+  trigger and the manual form alike. A window is a property of the stage,
+  not of the trigger, and nothing bypasses it. (The manual form itself has
+  no window field — it types raw commands, so its stages run as soon as
+  their dependencies are done.)
+
+### Spelling
+
+Two times `HH:MM` around a dash, read in 24-hour time:
+
+| Window | Meaning |
+|--------|---------|
+| *(omitted)* | Any time — the stage is claimed as soon as its dependencies allow. |
+| `"08:00-18:00"` | Starts between 08:00 and 18:00. |
+| `"22:00-06:00"` | Wraps over midnight: starts at 22:00 or later, **or** before 06:00. |
+| `"00:00-24:00"` | The whole day — the same as omitting it, spelled out. |
+
+The start is included, the end excluded (`"22:00-06:00"` is open at 05:59
+and closed at 06:00). There are no weekdays and no cron: a window is a
+daily interval, and anything more elaborate belongs in the command.
+
+The yaml is validated when it is read: a bad clock (`"22:00"`), a
+zero-length interval (`"22:00-22:00"`, which would never open), a
+one-digit hour (`"6:00-7:00"`) or junk (`"nighttime"`) fails the dispatch
+with the offending field named, rather than quietly leaving the stage
+runnable at any hour.
+
 ## Artifact files
 
 A stage command (unit or a regression preset) may produce structured
@@ -493,6 +567,29 @@ build:
 Any file the build leaves behind works — logs, `compile_commands.json`,
 size reports. As with the test stages, paths are relative to the build's
 workdir and each file is capped at 8 MiB at fetch time.
+
+### Performance artifacts
+
+The **performance** stage accepts the same `artifacts` field as unit, with
+the build stage's semantics: the files are stored **verbatim** as
+**series** artifacts and never parsed — the verdict is the command's exit
+code alone. A benchmark reports a measurement, not a pass or a fail; a
+results-looking file fetched from a benchmark cannot flip the cell to
+failed (and a benchmark that *does* detect a regression exits non-zero,
+which fails the run as any stage's exit code would).
+
+```yaml
+performance:
+  command: "./bench --json bench.json"
+  artifacts: ["bench.json", "bench.log"]
+```
+
+Each file is its own artifact, downloadable from the run's detail page
+like any other. The *Performance* page is where their history is meant to
+be read — one chart per test machine, a metric over the commits it was
+measured on. That collection is **not built yet**: the page documents the
+plan and draws a sample chart marked as such, so nothing there is a real
+measurement.
 
 ### Plot artifacts (`*.plot.json` / `*.plotly.json`)
 
@@ -643,7 +740,11 @@ a `404`, a backend failure a `502`.
 
 - `version` must be 3; `matrix` must be non-empty.
 - Each entry needs non-empty `tags` and at least one of `unit` /
-  `regression` (or its presets expansion), with a `command`.
+  `performance` / `regression` (or its presets expansion), with a
+  `command`.
+- Every `window` must be `"HH:MM-HH:MM"` with two-digit clocks, a
+  non-empty interval and a start before its end (wrap over midnight is
+  fine) — see [Spelling](#spelling).
 - Duplicate tag sets across entries are rejected.
 - `build.command` is required (the entry's own or `defaults.build`).
 - Unknown fields are rejected (e.g. the removed `build.generator` /
@@ -685,7 +786,11 @@ Each matched entry becomes a task graph (see
 4. **unit**: the stage command runs in its working directory under its
    timeout; the full output streams into the task log and the outcome
    is stored as the attempt's test run.
-5. **regression: one task per selected preset** — each case command
+5. **performance**: the same shape as unit, but its artifact files are
+   kept as series data rather than parsed for counts, and a `window` may
+   hold the node until the interval opens (see
+   [Scheduling windows](#scheduling-windows)).
+6. **regression: one task per selected preset** — each case command
    runs after the build (exporting MD_CASE), collects its own artifact
    files and records its own run; the matrix cell shows the container's
    rollup across cases.

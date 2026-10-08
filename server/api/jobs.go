@@ -172,18 +172,21 @@ func (s *Server) triggerJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // manualTestInput is the body of POST /api/jobs/manual: one repository
-// (empty = site config default), an optional ref (empty = HEAD), the three
-// stage commands (an empty stage is skipped; at least one is required) and
-// the environments to run on.
+// (empty = site config default), an optional ref (empty = HEAD), the stage
+// commands (an empty stage is skipped; at least one is required) and the
+// environments to run on. No scheduling window: this form types the commands
+// by hand, and a window belongs to the md-builder.yaml stage it restricts.
 type manualTestInput struct {
-	Repo                string               `json:"repo"`
-	Ref                 string               `json:"ref"`
-	BuildCommand        string               `json:"buildCommand"`
-	UnitCommand         string               `json:"unitCommand"`
-	UnitArtifacts       runner.ArtifactPaths `json:"unitArtifacts"` // optional artifact path(s) the unit command produces
-	RegressionCommand   string               `json:"regressionCommand"`
-	RegressionArtifacts runner.ArtifactPaths `json:"regressionArtifacts"` // optional artifact path(s) the regression command produces
-	EnvironmentIDs      []int64              `json:"environmentIds"`
+	Repo                 string               `json:"repo"`
+	Ref                  string               `json:"ref"`
+	BuildCommand         string               `json:"buildCommand"`
+	UnitCommand          string               `json:"unitCommand"`
+	UnitArtifacts        runner.ArtifactPaths `json:"unitArtifacts"` // optional artifact path(s) the unit command produces
+	PerformanceCommand   string               `json:"performanceCommand"`
+	PerformanceArtifacts runner.ArtifactPaths `json:"performanceArtifacts"` // optional artifact path(s) the performance command produces
+	RegressionCommand    string               `json:"regressionCommand"`
+	RegressionArtifacts  runner.ArtifactPaths `json:"regressionArtifacts"` // optional artifact path(s) the regression command produces
+	EnvironmentIDs       []int64              `json:"environmentIds"`
 }
 
 // manualTestRoot is one created graph of the manual trigger response.
@@ -211,6 +214,7 @@ func (s *Server) triggerManual(w http.ResponseWriter, r *http.Request, user *sto
 	}
 	if strings.TrimSpace(in.BuildCommand) == "" &&
 		strings.TrimSpace(in.UnitCommand) == "" &&
+		strings.TrimSpace(in.PerformanceCommand) == "" &&
 		strings.TrimSpace(in.RegressionCommand) == "" {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "at least one stage command is required"})
 		return
@@ -240,15 +244,17 @@ func (s *Server) triggerManual(w http.ResponseWriter, r *http.Request, user *sto
 	}
 
 	roots, err := s.Runner.DispatchManual(runner.ManualDispatch{
-		Repo:                in.Repo,
-		Ref:                 in.Ref,
-		BuildCommand:        in.BuildCommand,
-		UnitCommand:         in.UnitCommand,
-		UnitArtifacts:       in.UnitArtifacts,
-		RegressionCommand:   in.RegressionCommand,
-		RegressionArtifacts: in.RegressionArtifacts,
-		EnvironmentIDs:      in.EnvironmentIDs,
-		Username:            user.Username,
+		Repo:                 in.Repo,
+		Ref:                  in.Ref,
+		BuildCommand:         in.BuildCommand,
+		UnitCommand:          in.UnitCommand,
+		UnitArtifacts:        in.UnitArtifacts,
+		PerformanceCommand:   in.PerformanceCommand,
+		PerformanceArtifacts: in.PerformanceArtifacts,
+		RegressionCommand:    in.RegressionCommand,
+		RegressionArtifacts:  in.RegressionArtifacts,
+		EnvironmentIDs:       in.EnvironmentIDs,
+		Username:             user.Username,
 	})
 	// The graphs are built one environment at a time and the ones already
 	// built survive a failure further down the list (see DispatchManual), so

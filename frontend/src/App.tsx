@@ -14,6 +14,8 @@ import { applySiteTimezone, subscribeTimezone } from './timezone'
 //
 //   #/                      dashboard (default)
 //   #/environments          runner environments
+//   #/performance           performance history (placeholder: one chart per
+//                           test machine)
 //   #/run                   run command
 //   #/settings              site settings
 //   #/docs                  documentation
@@ -38,6 +40,7 @@ const RunPage = lazy(() => import('./RunPage'))
 const SettingsPage = lazy(() => import('./SettingsPage'))
 const DocsPage = lazy(() => import('./DocsPage'))
 const HealthPage = lazy(() => import('./HealthPage'))
+const PerformancePage = lazy(() => import('./PerformancePage'))
 
 function App() {
   const [me, setMe] = useState<Me | null>(null)
@@ -183,6 +186,14 @@ function PageRoutes({ me, onMeChange }: { me: Me; onMeChange: (me: Me) => void }
         }
       />
       <Route
+        path="/performance"
+        element={
+          <Suspense fallback={<p className="text-muted">Loading…</p>}>
+            <PerformancePage onError={console.warn} />
+          </Suspense>
+        }
+      />
+      <Route
         path="/settings"
         element={
           <Suspense fallback={<p className="text-muted">Loading…</p>}>
@@ -250,6 +261,7 @@ function NavBar({ me, onLogout }: { me: Me | null; onLogout: () => void }) {
       {me && (
         <nav className="navbar-nav">
           {navLink('/', 'Dashboard')}
+          {navLink('/performance', 'Performance')}
           {navLink('/environments', 'Runner Envs')}
           {navLink('/run', 'Run command')}
           {navLink('/settings', 'Settings')}

@@ -467,6 +467,12 @@ export interface ManualTestInput {
   buildCommand?: string
   unitCommand?: string
   unitArtifacts?: string | string[]
+  // The performance stage: a benchmark command and the measurement files it
+  // leaves behind (stored as series artifacts). The manual form types raw
+  // commands, so these nodes carry no scheduling window — they start as soon
+  // as their clone and build are done.
+  performanceCommand?: string
+  performanceArtifacts?: string | string[]
   regressionCommand?: string
   regressionArtifacts?: string | string[]
   environmentIds: number[]
@@ -537,9 +543,9 @@ export async function getDashboard(
 // --- Full dashboard (all stages per commit × environment) ---
 
 // FullStage is one stage cell of the full matrix: a recorded run
-// (build/unit/regression) or a live task state (runId 0).
+// (build/unit/performance/regression) or a live task state (runId 0).
 export interface FullStage {
-  kind: 'build' | 'unit' | 'regression'
+  kind: 'build' | 'unit' | 'performance' | 'regression'
   runId: number
   taskId?: number
   status: string
@@ -551,7 +557,8 @@ export interface FullStage {
 
 export interface FullRow {
   commit: DashboardCommit
-  // environment id → stages in display order (build, unit, regression)
+  // environment id → stages in display order (build, unit, performance,
+  // regression)
   stages: Record<string, FullStage[]>
   // environment id → root task id (the dependency graph link)
   taskIds: Record<string, number>
@@ -717,13 +724,14 @@ export function isTerminalStatus(status: string): boolean {
 }
 
 // TaskKind is a node's role in the graph: the virtual root per (commit,
-// environment), the three real stages, the virtual regression container and
-// the real case tasks under it.
+// environment), the real stages (clone, build, unit, performance), the virtual
+// regression container and the real case tasks under it.
 export type TaskKind =
   | 'root'
   | 'clone'
   | 'build'
   | 'unit'
+  | 'performance'
   | 'regression'
   | 'regression_case'
 
@@ -737,7 +745,7 @@ export interface TaskNode {
   parentId?: number
   kind: TaskKind
   // nodeKey is the node's identity inside its graph, stable across
-  // dispatches: "build", "unit", "regression:<case>".
+  // dispatches: "build", "unit", "performance", "regression:<case>".
   nodeKey: string
   name: string
   description?: string
@@ -748,6 +756,10 @@ export interface TaskNode {
   status: TaskStatus
   summary?: string
   error?: string
+  // window is the stage's daily schedulable interval ("22:00-06:00"), in the
+  // site timezone; absent = the stage may start any time. A pending node with
+  // a window may simply be waiting for tonight.
+  window?: string
   dependsOn: number[]
   total: number
   passed: number
@@ -796,6 +808,8 @@ export interface TaskDetail {
   status: TaskStatus
   summary?: string
   error?: string
+  // window: this node's scheduling window (absent = any time).
+  window?: string
   total: number
   passed: number
   failed: number

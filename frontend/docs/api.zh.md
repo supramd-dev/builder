@@ -8,8 +8,8 @@
 顶部页签提供四种视图:
 
 - **All(全量)** —— 完整管线矩阵(`GET /api/dashboard/full`):每个
-  单元格按展示顺序显示该 (commit, 环境) 下的三个阶段(构建、单元
-  测试、回归),各自带状态与详情链接。
+  单元格按展示顺序显示该 (commit, 环境) 下的四个阶段(构建、单元
+  测试、性能测试、回归),各自带状态与详情链接。
 - **Build(构建)** —— 代码在每个环境上能否编译(点击查看构建日志)。
 - **Unit tests(单元)/ Regression tests(回归)** —— 逐用例矩阵。
 
@@ -34,7 +34,7 @@
 让用例的历史在一次重新派发后仍然保留,而不是被最后一个上报的用例改写。
 
 每个 commit 行还带 **graph** 链接:该 commit 任务管线
-(clone → build → 单元/回归)的依赖图,GitHub Actions 风格 —— 点击阶段
+(clone → build → 单元/性能/回归)的依赖图,GitHub Actions 风格 —— 点击阶段
 节点跳转到运行详情或实时任务日志(见 [Runner 与任务](#/docs/runner-strategy))。
 
 当某个 commit **完全没有图**、原因是派发失败时 —— `md-builder.yaml`
@@ -65,6 +65,7 @@
         "1": [
           {"kind": "build", "runId": 7, "taskId": 43, "status": "passed"},
           {"kind": "unit", "taskId": 44, "status": "running"},
+          {"kind": "performance", "taskId": 46, "status": "pending"},
           {"kind": "regression", "taskId": 45, "status": "pending",
            "summary": "0/4 cases passed; 4 queued"}
         ]
@@ -128,7 +129,8 @@ ID,用于图链接;`triggers` 映射到该 root 的触发方式(0 = webhook,
 
 `GET /api/test-runs/{id}` 是**某个任务某一次尝试**的详情视图:运行本身
 —— `id`、`taskId`、`attempt`、`kind`(阶段类别,`build` / `unit` /
-`regression`;用例的运行沿用阶段类别,这样所有用例才落在同一回归列里)、
+`performance` / `regression`;用例的运行沿用阶段类别,这样所有用例才
+落在同一回归列里)、
 `status`、`summary`、各项计数、`durationMillis`、`environmentId`、
 `commitId`、`startedAt`、`finishedAt` —— 加上它所属任务的身份
 (`taskName`、`taskDescription`、`taskKey`、`taskKind`、`rootTaskId`
@@ -184,7 +186,10 @@ Artifact 归属产出它的那次尝试:单元测试运行的结果文件挂在�
 
 - `subTasks` —— 当前图的节点:`id`、`parentId`(嵌套关系,即界面绘制的
   那棵树)、`kind`、`nodeKey`(重新派发时用于匹配的稳定身份)、`name`、
-  `description`、`virtual`、`status`、`summary`、`error`、`dependsOn`
+  `description`、`virtual`、`status`、`summary`、`error`、`window`
+  (该阶段的调度时间段,站点时区下的 `"22:00-06:00"`;不返回 = 任意
+  时间 —— 时间段未开放时节点一直停留在 pending,见
+  [测试矩阵 → 调度时间段](#/docs/test-matrix))、`dependsOn`
   (调度 DAG,永远是列表,不会是 null)、各项计数、`attempts`、`runId`
   (最新一次尝试的运行,即详情链接;容器没有)以及时间戳。
 - `retiredTasks` —— 早期派发定义过、后来的派发丢弃掉的节点。它们被保留
@@ -294,14 +299,18 @@ POST /api/jobs/manual
   "buildCommand": "cmake . && cmake --build . -j8",   // 可选;留空 = 无构建阶段
   "unitCommand": "ctest -L unit",                     // 可选:阶段跳过
   "unitArtifacts": "build/test_detail.xml",           // 可选:工件文件
+  "performanceCommand": "python3 bench.py",           // 可选:阶段跳过
+  "performanceArtifacts": "bench.json",               // 可选:series 数据
   "regressionCommand": "python3 run.py",              // 可选:阶段跳过
   "regressionArtifacts": "reg/results.json",          // 可选:工件文件
   "environmentIds": [1, 2]
 }
 ```
 
-`unitArtifacts` / `regressionArtifacts` 接受单个路径或路径列表 —— 一次
-运行可以产出多个工件文件。
+`unitArtifacts` / `performanceArtifacts` / `regressionArtifacts` 接受
+单个路径或路径列表 —— 一次运行可以产出多个工件文件。
+`performanceArtifacts` 的文件存为 series 数据(不解析计数);表单直接
+填写原始命令,因此这些节点不带调度时间段。
 
 - 至少需要一个阶段命令和一个环境。
 - ref 会用站点的 Project Access Token 解析为具体提交(远程 ref 列举,
@@ -427,7 +436,7 @@ POST /api/setup
 | PUT    | `/api/site-config`              | 更新站点配置(access token:留空保留,`clearAccessToken` 删除;`timezone`:IANA 名称,空 = 浏览器本地;`commitOverlapPolicy`:`requeue` \| `fork` \| `fork_cancel`,任意已登录用户;`gitlab*` 字段仅管理员) |
 | POST   | `/api/site-config/webhook-token`| 轮换 webhook 密钥并返回配置(仅管理员) |
 | GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
-| GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
+| GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/性能/回归阶段,以及任务图链接 |
 | POST   | `/api/test-runs`                | 关闭任务的当前尝试:按 `taskId` 报告结果(任务所在环境的 owner 或管理员) |
 | GET    | `/api/test-runs/{id}`           | 某个任务的某次尝试:计数、任务身份、全部尝试、artifact |
 | GET    | `/api/test-runs/{id}/artifacts/zip` | 该次尝试自己的工件打成 zip(没有工件时 `404`) |

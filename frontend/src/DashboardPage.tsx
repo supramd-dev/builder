@@ -22,8 +22,9 @@ interface Props {
 
 // DashboardPage renders the test result matrix, one row per commit: the
 // commit column (linked short sha, author, push date, message) followed by
-// one column per environment. The full view gives each environment four
-// sub-columns (build, unit, reg, graph); the single kinds show one stage.
+// one column per environment. The full view gives each environment five
+// sub-columns (build, unit, perf, reg, graph); the single kinds show one
+// stage.
 export default function DashboardPage({ onError }: Props) {
   // Stage cells navigate with plain router navigation (run detail when a
   // run is recorded, the task graph while the pipeline is live).
@@ -151,9 +152,9 @@ export default function DashboardPage({ onError }: Props) {
 
       <p className="text-muted">
         One row per recent git push; one column per environment with its
-        build, unit and regression stages. Click a stage for details, the
-        commit for the repository, or a graph link for the pipeline (graph
-        and live logs on one page).
+        build, unit, performance and regression stages. Click a stage for
+        details, the commit for the repository, or a graph link for the
+        pipeline (graph and live logs on one page).
       </p>
 
       {error && <div className="alert alert-danger">{error}</div>}
@@ -285,7 +286,7 @@ function MatrixTable({
             {environments.map((env) => (
               <th
                 key={env.id}
-                colSpan={isFull ? 4 : 1}
+                colSpan={isFull ? 5 : 1}
                 className={'dash-env-head' + (env.enabled ? '' : ' dash-row-disabled')}
                 // The matrix is site-wide, so the column names whose machine
                 // it is: a push is dispatched to whichever environment's tags
@@ -301,13 +302,15 @@ function MatrixTable({
               </th>
             ))}
           </tr>
-          {/* Row 2 (full view only): the build / unit / reg / graph labels. */}
+          {/* Row 2 (full view only): the build / unit / perf / reg / graph
+              labels. */}
           {isFull && (
             <tr className="dash-subhead">
               {environments.map((env) => (
                 <Fragment key={env.id}>
                   <th className="dash-stage-head dash-env-start">build</th>
                   <th className="dash-stage-head">unit test</th>
+                  <th className="dash-stage-head">perf test</th>
                   <th className="dash-stage-head">reg test</th>
                   <th className="dash-stage-head">graph</th>
                 </Fragment>
@@ -349,6 +352,14 @@ function MatrixTable({
                       <td className="dash-cell">
                         <SingleCell
                           cell={stageToRunCell(cell.stages.find((s) => s.kind === 'unit'))}
+                          onOpenRun={onOpenRun}
+                          onOpenTask={onOpenTask}
+                          fallbackTaskId={cell.taskId}
+                        />
+                      </td>
+                      <td className="dash-cell">
+                        <SingleCell
+                          cell={stageToRunCell(cell.stages.find((s) => s.kind === 'performance'))}
                           onOpenRun={onOpenRun}
                           onOpenTask={onOpenTask}
                           fallbackTaskId={cell.taskId}

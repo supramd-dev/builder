@@ -25,11 +25,13 @@ import (
 // stages a spec finishes.
 
 // stageSpec describes one stage node of a graph to dispatch: its description
-// (the md-builder.yaml label) and the attempt result to report, if any. A nil
-// res leaves the node queued — the state a freshly dispatched graph is in.
+// (the md-builder.yaml label), its scheduling window ("" = any time), and the
+// attempt result to report, if any. A nil res leaves the node queued — the
+// state a freshly dispatched graph is in.
 type stageSpec struct {
-	desc string
-	res  *store.AttemptResult
+	desc   string
+	window string
+	res    *store.AttemptResult
 }
 
 // caseSpec is one regression case node: its preset name plus its outcome.
@@ -46,6 +48,7 @@ type graphSpec struct {
 	clone *stageSpec
 	build *stageSpec
 	unit  *stageSpec
+	perf  *stageSpec
 	cases []caseSpec
 }
 
@@ -89,11 +92,14 @@ func dispatchTestGraph(t *testing.T, s *store.Store, env *store.TestEnvironment,
 		Task: &store.Task{Kind: store.TaskKindClone, NodeKey: store.TaskKindClone,
 			Name: "clone repositories", Config: "{}"},
 	}}
+	if spec.clone != nil {
+		nodes[0].Task.Window = spec.clone.window
+	}
 	testDep := int64(0) // index of the clone node
 	if spec.build != nil {
 		nodes = append(nodes, store.TaskNode{
 			Task: &store.Task{Kind: store.TaskKindBuild, NodeKey: store.TaskKindBuild,
-				Name: "build", Description: spec.build.desc, Config: "{}"},
+				Name: "build", Description: spec.build.desc, Config: "{}", Window: spec.build.window},
 			Deps: []int64{store.TaskSubPlaceholderBase + testDep},
 		})
 		testDep = int64(len(nodes) - 1)
@@ -101,7 +107,14 @@ func dispatchTestGraph(t *testing.T, s *store.Store, env *store.TestEnvironment,
 	if spec.unit != nil {
 		nodes = append(nodes, store.TaskNode{
 			Task: &store.Task{Kind: store.TaskKindUnit, NodeKey: store.TaskKindUnit,
-				Name: "unit tests", Description: spec.unit.desc, Config: "{}"},
+				Name: "unit tests", Description: spec.unit.desc, Config: "{}", Window: spec.unit.window},
+			Deps: []int64{store.TaskSubPlaceholderBase + testDep},
+		})
+	}
+	if spec.perf != nil {
+		nodes = append(nodes, store.TaskNode{
+			Task: &store.Task{Kind: store.TaskKindPerformance, NodeKey: store.TaskKindPerformance,
+				Name: "performance tests", Description: spec.perf.desc, Config: "{}", Window: spec.perf.window},
 			Deps: []int64{store.TaskSubPlaceholderBase + testDep},
 		})
 	}
@@ -142,6 +155,7 @@ func dispatchTestGraph(t *testing.T, s *store.Store, env *store.TestEnvironment,
 	finish(spec.clone, store.TaskKindClone)
 	finish(spec.build, store.TaskKindBuild)
 	finish(spec.unit, store.TaskKindUnit)
+	finish(spec.perf, store.TaskKindPerformance)
 	for i := range spec.cases {
 		c := &spec.cases[i]
 		finish(&stageSpec{res: c.res}, regressionCaseKey(c.name))
@@ -844,7 +858,7 @@ func TestReportRunOwnership(t *testing.T) {
 }
 
 // TestDashboardFullMatrix checks GET /api/dashboard/full: one row per commit,
-// per environment the build/unit/regression stages in display order, and the
+// per environment the build/unit/performance/regression stages in display order, and the
 // task graph link.
 func TestDashboardFullMatrix(t *testing.T) {
 	env := newDashboardEnv(t)

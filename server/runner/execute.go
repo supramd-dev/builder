@@ -44,6 +44,8 @@ func (s *Service) ExecuteTask(ctx context.Context, task *store.Task) error {
 		s.executeBuild(ctx, task)
 	case store.TaskKindUnit:
 		s.executeUnit(ctx, task)
+	case store.TaskKindPerformance:
+		s.executePerformance(ctx, task)
 	case store.TaskKindRegressionCase:
 		s.executeCase(ctx, task)
 	default:
@@ -274,6 +276,22 @@ func (s *Service) executeBuild(ctx context.Context, task *store.Task) {
 // its workdir, fetch the configured artifact files back (aggregate counts +
 // raw artifacts), then record the TestRun for the dashboard.
 func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
+	s.executeStage(ctx, task, store.ArtifactKindResults)
+}
+
+// executePerformance implements the performance sub-task. It runs exactly
+// like a unit stage — same config snapshot, same script, same log — and
+// differs in one thing: its artifact files are stored as series data rather
+// than parsed for googletest counts. A benchmark's output is a measurement,
+// not a verdict, so the stage passes or fails on its exit code alone.
+func (s *Service) executePerformance(ctx context.Context, task *store.Task) {
+	s.executeStage(ctx, task, store.ArtifactKindSeries)
+}
+
+// executeStage runs a StageConfig stage (unit, performance) and records its
+// run. artifactKind is how the stage's artifact files are stored: results are
+// parsed for counts, series/files are kept verbatim.
+func (s *Service) executeStage(ctx context.Context, task *store.Task, artifactKind string) {
 	rc, ok := s.loadRootContext(task)
 	if !ok {
 		return
@@ -296,7 +314,7 @@ func (s *Service) executeUnit(ctx context.Context, task *store.Task) {
 	h := envToSSHHost(rc.env)
 	res := s.SSH.RunScript(ctx, h, "bash -s", script, slackTimeout(stage.Timeout, stageTimeoutSlack), logw, logw)
 
-	counts, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, store.ArtifactKindResults, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
+	counts, artifacts := s.fetchStageArtifacts(ctx, h, rc, task, artifactKind, stage.Workdir, stage.Artifacts, logw, res.ExitCode)
 
 	logw.Flush() // store the output before the run row that reports the outcome
 
@@ -411,7 +429,7 @@ func (s *Service) fetchStageArtifacts(ctx context.Context, h SSHHost, rc *rootCo
 				Content: content,
 			})
 			if kind != store.ArtifactKindResults {
-				break // file artifacts are stored verbatim; no counts parsing
+				continue // file/series artifacts are stored verbatim; no counts parsing
 			}
 			if total, failed, skipped, ok := ExtractGTestCounts([]byte(content)); ok {
 				counts.total += total

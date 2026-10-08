@@ -9,9 +9,9 @@ matrix: one **row per recent git push** (default 10, capped at 50 via
 greyed out). Four views are available via the tabs at the top:
 
 - **All** — the full pipeline matrix (`GET /api/dashboard/full`): each
-  cell shows the three stages in display order (build, unit tests,
-  regression) for that (commit, environment), each with its own status
-  and detail link.
+  cell shows the four stages in display order (build, unit tests,
+  performance test, regression) for that (commit, environment), each with
+  its own status and detail link.
 - **Build** — whether the code compiles per environment (click through
   for the build log).
 - **Unit tests** / **Regression tests** — the per-case matrices.
@@ -43,7 +43,7 @@ log, attempt and artifacts. That is what makes a case's history survive a
 re-dispatch instead of being rewritten by whichever case reported last.
 
 Every commit row also carries a **graph** link: the dependency graph of
-that commit's task pipeline (clone → build → unit/regression),
+that commit's task pipeline (clone → build → unit/performance/regression),
 GitHub-Actions style — clicking a stage node jumps to its run detail or
 the live task log (see [Runner and tasks](#/docs/runner-strategy)).
 
@@ -79,6 +79,7 @@ The full matrix response shape:
         "1": [
           {"kind": "build", "runId": 7, "taskId": 43, "status": "passed"},
           {"kind": "unit", "taskId": 44, "status": "running"},
+          {"kind": "performance", "taskId": 46, "status": "pending"},
           {"kind": "regression", "taskId": 45, "status": "pending",
            "summary": "0/4 cases passed; 4 queued"}
         ]
@@ -155,8 +156,9 @@ attempt the report closes**:
 
 `GET /api/test-runs/{id}` is the detail view of **one attempt of one
 task**: the run itself — `id`, `taskId`, `attempt`, `kind` (the stage
-kind, `build` / `unit` / `regression`; a case's run carries the stage's
-kind, which is what puts every case in the one regression column),
+kind, `build` / `unit` / `performance` / `regression`; a case's run
+carries the stage's kind, which is what puts every case in the one
+regression column),
 `status`, `summary`, the
 counts, `durationMillis`, `environmentId`, `commitId`, `startedAt`,
 `finishedAt` — plus the identity of the task it belongs to (`taskName`,
@@ -221,9 +223,13 @@ A **root** answers with the graph instead of attempts:
 - `subTasks` — the nodes of the current graph: `id`, `parentId` (the
   nesting: the tree the UI draws), `kind`, `nodeKey` (the stable identity
   a re-dispatch matches on), `name`, `description`, `virtual`, `status`,
-  `summary`, `error`, `dependsOn` (the scheduling DAG, always a list,
-  never null), the counts, `attempts`, `runId` (the latest attempt's run,
-  the detail link; absent for a container) and timestamps.
+  `summary`, `error`, `window` (the stage's scheduling window,
+  `"22:00-06:00"` in site time; absent = any time — the node stays
+  pending while the window is closed, see
+  [Test matrix → Scheduling windows](#/docs/test-matrix)), `dependsOn`
+  (the scheduling DAG, always a list, never null), the counts,
+  `attempts`, `runId` (the latest attempt's run, the detail link; absent
+  for a container) and timestamps.
 - `retiredTasks` — the nodes an earlier dispatch defined and a later one
   dropped. They are kept, never rescheduled and excluded from the rollup:
   when a case disappears from `md-builder.yaml` its history does not
@@ -357,14 +363,19 @@ POST /api/jobs/manual
   "buildCommand": "cmake . && cmake --build . -j8",   // optional; empty = no build stage
   "unitCommand": "ctest -L unit",                     // optional: stage skipped
   "unitArtifacts": "build/test_detail.xml",           // optional: artifact file(s)
+  "performanceCommand": "python3 bench.py",           // optional: stage skipped
+  "performanceArtifacts": "bench.json",               // optional: series data
   "regressionCommand": "python3 run.py",              // optional: stage skipped
   "regressionArtifacts": "reg/results.json",          // optional: artifact file(s)
   "environmentIds": [1, 2]
 }
 ```
 
-The `unitArtifacts` / `regressionArtifacts` fields accept a single path
-or a list of paths — a run can produce several artifact files.
+The `unitArtifacts` / `performanceArtifacts` / `regressionArtifacts`
+fields accept a single path or a list of paths — a run can produce several
+artifact files. `performanceArtifacts` files are stored as series data
+(never parsed for counts); the form types raw commands, so these nodes
+carry no scheduling window.
 
 - At least one stage command and one environment are required.
 - The ref is resolved to a concrete commit (a remote ref listing, the
@@ -509,7 +520,7 @@ administrators are created there too, with `adduser -admin`.
 | PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local; `commitOverlapPolicy`: `requeue` \| `fork` \| `fork_cancel`, any signed-in user; the `gitlab*` fields are administrator-only) |
 | POST   | `/api/site-config/webhook-token`| Rotate the webhook secret and return the configuration (administrators only) |
 | GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
-| GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
+| GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/performance/regression stages plus the task-graph link |
 | POST   | `/api/test-runs`                | Close a task's current attempt: report a result against `taskId` (owner or administrator of the task's environment) |
 | GET    | `/api/test-runs/{id}`           | One attempt of one task: counts, the task's identity, every attempt, artifacts |
 | GET    | `/api/test-runs/{id}/artifacts/zip` | That attempt's own artifacts as a zip (`404` when there are none) |

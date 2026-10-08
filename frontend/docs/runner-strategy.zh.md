@@ -72,21 +72,23 @@ root (test <sha> on <environment>)   # 虚拟:代表整条管线
  ├─ clone repositories               # 服务器克隆,经 SSH 上传 tar
  ├─ build                            # 构建命令,在其 workdir 中
  ├─ unit tests                       # 每阶段命令,独立超时
+ ├─ performance tests                # 每阶段命令,独立超时 —— 可选
  └─ regression       (虚拟)          # 阶段容器:汇总其用例
      ├─ regression: heat             # 每个选中的预设一个子任务
      └─ regression: poisson
 ```
 
 - 每个节点都是 `tasks` 表中的一行;`kind` 列区分 root / clone / build /
-  unit / regression(容器)/ regression_case(列表是开放的 —— 未来的
-  类别,例如性能测试,只需增加一个常量和一个执行器)。
+  unit / performance / regression(容器)/ regression_case。
 - 存储了两种关系,含义并不相同。`parent_id` 是**树**:节点嵌套在哪里,
   这既是图页面绘制的内容,也是汇总时遍历的结构。`depends_on` 是
   **调度 DAG**:一个 JSON 任务 ID 数组,其中的任务都结束后该节点才
   就绪。容器永远不会成为依赖(它的状态是推导出来的,指向它的边永远
   不会就绪),root 同样不会:`UpsertTaskGraph` 会拒绝这两种情况。实际
-  上图里用例依赖 build(条目没有构建阶段时依赖 clone),其余节点依赖
-  它前面的那个节点。
+  上图里用例依赖 build(条目没有构建阶段时依赖 clone)。unit、
+  performance 与各回归用例是**兄弟**:它们都只依赖 build(或 clone),
+  因此在 build 通过后被并行认领。再增加一种类别 —— 另一个测试阶段、
+  另一个容器 —— 只需要一个常量和一个执行器。
 - 回归阶段在构图时展开:条目选中的每个预设(`regression.use` 减去
   `disable`;见[测试矩阵](#/docs/test-matrix))都成为名为
   `regression: <预设>` 的**独立真实任务**,嵌在虚拟容器之下,依赖
@@ -120,6 +122,13 @@ root (test <sha> on <environment>)   # 虚拟:代表整条管线
   (派发仍会记录任务)。
 - 服务器崩溃后遗留的 `running` 任务在启动时被重置为 pending 并重新
   执行。
+- yaml 里声明了**调度时间段**的节点,在就绪后、时间段之外仍不会被
+  认领:认领路径会跳过它,于是它一直停留在 `pending`(任务页面上显示
+  "等待其时间段"),worker 则去取下一条就绪节点,而不是在这里阻塞。
+  下游节点像等待任何未完成的节点一样等待它;已经开始运行的阶段也不会
+  因为时间段结束而被中断。时间段按站点时区解读,并且只在这一个地方
+  —— 认领 —— 生效,因此没有别的路径能提前启动阶段(见
+  [测试矩阵 → 调度时间段](#/docs/test-matrix))。
 
 ## 每个子任务
 
@@ -137,6 +146,11 @@ root (test <sha> on <environment>)   # 虚拟:代表整条管线
   任务日志;阶段可以打印一行 `MD-BUILDER-SUMMARY: <text>` 来自行声明
   一段式结论,否则存储退出码加日志尾部。结果被记为一条测试运行(见
   [仪表板与报告](#/docs/dashboard))。
+- **performance**:形状与 unit 相同(一条命令,自己的 workdir、超时和
+  工件文件),差别只有一处:它的工件文件存为 **series** 数据,而不是
+  解析计数,运行的判定只看命令退出码 —— 性能测试给出的是测量值,不是
+  通过或失败。时间段通常就是为这个阶段准备的:共享机器上的性能测试
+  测到的有多少是机器、有多少是代码,取决于机器当时在忙什么。
 - **regression: <预设>**:预设的命令在预设的工作目录中、导出 `MD_CASE`
   后运行,用例的工件文件被收集到该用例**自己的**运行上。不会写入任何
   父运行:上面的回归容器是虚拟的,它的 "N/M cases passed; failed: heat"

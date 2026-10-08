@@ -95,15 +95,15 @@ root (test <sha> on <environment>)   # virtual: the whole pipeline
  ├─ clone repositories               # server clones, uploads a tar over SSH
  ├─ build                            # the build command, in its workdir
  ├─ unit tests                       # per-stage command, own timeout
+ ├─ performance tests                # per-stage command, own timeout — optional
  └─ regression       (virtual)       # the stage container: aggregates its cases
      ├─ regression: heat             # one sub-task per selected preset
      └─ regression: poisson
 ```
 
 - Every node is a row in the same `tasks` table; the `kind` column
-  distinguishes root / clone / build / unit / regression (the container) /
-  regression_case (the list is open — future kinds, e.g. performance
-  tests, only add a constant and an executor).
+  distinguishes root / clone / build / unit / performance / regression (the
+  container) / regression_case.
 - Two relations are stored, and they mean different things. `parent_id` is
   the **tree**: where a node nests, which is what the graph page draws and
   what the rollup walks. `depends_on` is the **scheduling DAG**: a JSON
@@ -111,8 +111,11 @@ root (test <sha> on <environment>)   # virtual: the whole pipeline
   container is never a dependency (its state is derived, so an edge to it
   could never become ready) and neither is the root: `UpsertTaskGraph`
   rejects both. In practice a case depends on build (or on clone when the
-  entry has no build stage), and everything else depends on the node
-  before it.
+  entry has no build stage). Unit, performance and the regression cases
+  are **siblings**: all of them depend on the build (or the clone) and on
+  nothing else, so they are claimed in parallel once it passes. A further
+  kind — another test stage, another container — only adds a constant and
+  an executor.
 - The regression stage is expanded at graph build time: each preset the
   entry selects (`regression.use`, minus `disable`; see
   [the test matrix](#/docs/test-matrix)) becomes a **real task of its own**
@@ -176,6 +179,15 @@ root (test <sha> on <environment>)   # virtual: the whole pipeline
   records tasks).
 - Tasks left in `running` after a server crash are reset to pending at
   startup and re-executed.
+- A node whose yaml declares a **scheduling window** is ready but not
+  claimable outside it: the claim path skips it, so it stays `pending`
+  (the reader sees "waiting for its window" on the task pages) while the
+  worker takes the next ready node instead of blocking on it. Dependents
+  wait as they would for any unfinished node, and a stage that is already
+  running is never interrupted by its window closing. The window is read
+  in the site timezone and enforced only here — one place, the claim — so
+  no other path can start a stage early (see
+  [Test matrix → Scheduling windows](#/docs/test-matrix)).
 
 ## Per sub-task
 
@@ -197,6 +209,13 @@ root (test <sha> on <environment>)   # virtual: the whole pipeline
   conclusion, otherwise the exit code plus the log tail is stored. The
   outcome is recorded as a test run (see
   [Dashboard and reporting](#/docs/dashboard)).
+- **performance**: the same shape as unit (one command, its own workdir,
+  timeout and artifact files) with one difference: its artifact files are
+  stored as **series** data rather than parsed for counts, and the run's
+  verdict is the command's exit code alone — a benchmark reports a
+  measurement, not a pass or a fail. This is the stage a window is
+  usually for, since a benchmark on a shared machine measures the machine
+  as much as the code.
 - **regression: <preset>**: the preset's command runs in the preset's
   working directory with `MD_CASE` exported, and the case's artifact files
   are collected onto the case's **own** run. Nothing is written to a parent

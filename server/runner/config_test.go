@@ -508,3 +508,210 @@ matrix:
 		t.Errorf("defaults build artifacts should apply: %v", got)
 	}
 }
+
+// The performance stage parses like unit: its own command, workdir, timeout,
+// artifacts, and the scheduling window that keeps a benchmark off the
+// machines by day.
+func TestParseConfigV3Performance(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
+defaults:
+  build:
+    command: "make"
+  timeout: 7200
+  performance:
+    window: "22:00-06:00"
+matrix:
+  - tags: [cpu]
+    unit:
+      command: "ctest"
+    performance:
+      command: "python3 bench.py"
+      workdir: "build"
+      artifacts: "bench.json"
+  - tags: [gpu]
+    unit:
+      command: "ctest"
+    performance:
+      command: "python3 bench_cuda.py"
+      window: "01:00-03:00"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entries[0].Performance == nil {
+		t.Fatal("entry 0 has no performance stage")
+	}
+	perf := entries[0].Performance
+	if perf.Command.String() != "python3 bench.py" || perf.Workdir != "build" {
+		t.Errorf("entry 0 performance = %+v", perf)
+	}
+	if len(perf.Artifacts) != 1 || perf.Artifacts[0] != "bench.json" {
+		t.Errorf("entry 0 performance artifacts = %v", perf.Artifacts)
+	}
+	// defaults.performance supplies the window and defaults.timeout the
+	// timeout (a stage's timeout resolves through the top-level default, the
+	// same as unit's); the entry kept its own command, workdir and artifacts.
+	if perf.Timeout != 7200 || perf.Window != "22:00-06:00" {
+		t.Errorf("defaults should fill timeout and window: %+v", perf)
+	}
+	// The entry's own window wins over the default one.
+	if got := entries[1].Performance.Window; got != "01:00-03:00" {
+		t.Errorf("entry 1 window = %q, want its own 01:00-03:00", got)
+	}
+	if got := entries[1].Performance.Timeout; got != 7200 {
+		t.Errorf("entry 1 timeout = %d, want the defaults' 7200", got)
+	}
+}
+
+// A performance-only entry is a stage in its own right: it no longer needs a
+// unit or a regression stanza to be dispatched.
+func TestParseConfigV3PerformanceAlone(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
+defaults:
+  build:
+    command: "make"
+matrix:
+  - tags: [cpu]
+    performance:
+      command: "./bench"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Performance == nil || entries[0].Unit != nil {
+		t.Fatalf("want one performance-only entry, got %+v", entries)
+	}
+}
+
+// A performance stanza is a stage: without a command it is a mistake, not an
+// entry that silently runs nothing.
+func TestParseConfigV3PerformanceNeedsCommand(t *testing.T) {
+	_, err := ParseConfig([]byte(`version: 3
+defaults:
+  build:
+    command: "make"
+matrix:
+  - tags: [cpu]
+    performance:
+      timeout: 60
+`))
+	if err == nil || !strings.Contains(err.Error(), "performance without a command") {
+		t.Errorf("performance without a command should error: %v", err)
+	}
+}
+
+// With no unit, no performance and a regression selecting nothing, the entry
+// has nothing to run.
+func TestParseConfigV3NoStagesAtAll(t *testing.T) {
+	_, err := ParseConfig([]byte(`version: 3
+defaults:
+  build:
+    command: "make"
+matrix:
+  - tags: [cpu]
+    build: {}
+`))
+	if err == nil || !strings.Contains(err.Error(), "defines none of unit, performance or regression") {
+		t.Errorf("an entry with no test stage should error: %v", err)
+	}
+}
+
+// Windows are validated when the yaml is read: a typo must fail the dispatch
+// rather than quietly drop the restriction (the scheduler runs a window it
+// cannot parse, so nothing else would catch it).
+func TestParseConfigV3WindowValidation(t *testing.T) {
+	body := func(window string) []byte {
+		return []byte(`version: 3
+defaults:
+  build:
+    command: "make"
+matrix:
+  - tags: [cpu]
+    unit:
+      command: "ctest"
+      window: "` + window + `"
+`)
+	}
+	if _, err := ParseConfig(body("22:00-06:00")); err != nil {
+		t.Fatalf("a valid window should parse: %v", err)
+	}
+	for _, bad := range []string{"22:00", "22:00-22:00", "25:00-06:00", "nighttime"} {
+		_, err := ParseConfig(body(bad))
+		if err == nil {
+			t.Errorf("window %q should be refused at parse time", bad)
+			continue
+		}
+		if !strings.Contains(err.Error(), "matrix entry 1: unit.window") {
+			t.Errorf("window %q: the error should name the field, got %v", bad, err)
+		}
+	}
+}
+
+// Each stage of an entry carries its own window: build and unit from their
+// own stanzas, a regression case from its preset, else from the entry's
+// regression.window.
+func TestParseConfigV3WindowResolution(t *testing.T) {
+	entries, err := ParseConfig([]byte(`version: 3
+defaults:
+  build:
+    command: "make"
+presets:
+  heat:
+    command: "./heat"
+  poisson:
+    command: "./poisson"
+    window: "23:00-05:00"
+matrix:
+  - tags: [cpu]
+    build:
+      window: "21:00-21:30"
+    unit:
+      command: "ctest"
+    regression:
+      window: "22:00-06:00"
+      use: [heat, poisson]
+  - tags: [gpu]
+    regression:
+      use: [heat]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entries[0].Build.Window; got != "21:00-21:30" {
+		t.Errorf("build window = %q", got)
+	}
+	if got := entries[0].Unit.Window; got != "" {
+		t.Errorf("unit has no window of its own, got %q", got)
+	}
+	reg := entries[0].Regression
+	if reg[0].Name != "heat" || reg[0].Window != "22:00-06:00" {
+		t.Errorf("the entry's regression.window should be the default for its cases: %+v", reg[0])
+	}
+	if reg[1].Name != "poisson" || reg[1].Window != "23:00-05:00" {
+		t.Errorf("a preset's own window should win for that case: %+v", reg[1])
+	}
+	// An entry with no regression.window leaves its cases unwindowed.
+	if got := entries[1].Regression[0].Window; got != "" {
+		t.Errorf("entry 1 case window = %q, want none", got)
+	}
+}
+
+// A preset's window is validated like any other (it is an EnvConfig).
+func TestParseConfigV3PresetWindowValidation(t *testing.T) {
+	_, err := ParseConfig([]byte(`version: 3
+defaults:
+  build:
+    command: "make"
+presets:
+  heat:
+    command: "./heat"
+    window: "22:00-22:00"
+matrix:
+  - tags: [cpu]
+    regression:
+      use: [heat]
+`))
+	if err == nil || !strings.Contains(err.Error(), "preset heat.window") {
+		t.Errorf("a bad preset window should error with its position: %v", err)
+	}
+}

@@ -23,7 +23,7 @@ import (
 // dashboardStageKinds are the matrix columns of one (commit, environment)
 // cell, in display order. clone has no column of its own (a clone failure
 // shows up as every later stage being skipped).
-var dashboardStageKinds = []string{store.RunKindBuild, store.RunKindUnit, store.RunKindRegression}
+var dashboardStageKinds = []string{store.RunKindBuild, store.RunKindUnit, store.RunKindPerformance, store.RunKindRegression}
 
 // stageTaskKind maps a dashboard column (a run kind) to the kind of the task
 // node that carries it. The regression column is the virtual stage container:
@@ -35,6 +35,8 @@ func stageTaskKind(kind string) string {
 		return store.TaskKindBuild
 	case store.RunKindUnit:
 		return store.TaskKindUnit
+	case store.RunKindPerformance:
+		return store.TaskKindPerformance
 	case store.RunKindRegression:
 		return store.TaskKindRegressionStage
 	}
@@ -205,7 +207,7 @@ type dashboardJSON struct {
 
 // handleDashboard routes GET /api/dashboard/{kind}. kind: regression|unit|build
 // (single-kind matrices) or "full" (every commit row carries, per environment,
-// the build/unit/regression stages plus the task graph link).
+// the build/unit/performance/regression stages plus the task graph link).
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	rest := strings.TrimPrefix(r.URL.Path, "/api/dashboard/")
@@ -338,11 +340,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 }
 
 // fullStageJSON is one stage cell of the full matrix: the recorded test run
-// (build/unit/regression) for that (commit, environment), or the live task
-// state (runId 0, taskId set) when the run has not landed yet. A null entry
-// means the commit has no graph on that environment.
+// (build/unit/performance/regression) for that (commit, environment), or the
+// live task state (runId 0, taskId set) when the run has not landed yet. A
+// null entry means the commit has no graph on that environment.
 type fullStageJSON struct {
-	Kind       string `json:"kind"` // build | unit | regression
+	Kind       string `json:"kind"` // build | unit | performance | regression
 	RunID      int64  `json:"runId"`
 	TaskID     int64  `json:"taskId,omitempty"`
 	Status     string `json:"status"`
@@ -353,8 +355,8 @@ type fullStageJSON struct {
 }
 
 // fullRowJSON is one row of the full matrix: the commit, per environment the
-// pipeline stages in display order (build, unit, regression) and the task
-// graph link (to the dependency-graph page).
+// pipeline stages in display order (build, unit, performance, regression) and
+// the task graph link (to the dependency-graph page).
 type fullRowJSON struct {
 	Commit   commitJSON                `json:"commit"`
 	Stages   map[int64][]fullStageJSON `json:"stages"`             // environment id → stages
@@ -372,7 +374,7 @@ type fullDashboardJSON struct {
 
 // dashboardFull serves GET /api/dashboard/full: every commit row carries, for
 // every environment, the state of each pipeline stage — the recorded runs of
-// build/unit/regression, or the live task state while the graph runs.
+// build/unit/performance/regression, or the live task state while the graph runs.
 func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})

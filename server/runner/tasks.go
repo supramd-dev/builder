@@ -31,15 +31,17 @@ type DispatchResult struct {
 // stage commands (an empty stage is skipped), to run on the given
 // environments.
 type ManualDispatch struct {
-	Repo                string
-	Ref                 string
-	BuildCommand        string
-	UnitCommand         string
-	UnitArtifacts       ArtifactPaths // optional artifact paths for the unit command
-	RegressionCommand   string
-	RegressionArtifacts ArtifactPaths // optional artifact paths for the regression command
-	EnvironmentIDs      []int64
-	Username            string
+	Repo                 string
+	Ref                  string
+	BuildCommand         string
+	UnitCommand          string
+	UnitArtifacts        ArtifactPaths // optional artifact paths for the unit command
+	PerformanceCommand   string
+	PerformanceArtifacts ArtifactPaths // optional artifact paths for the performance command
+	RegressionCommand    string
+	RegressionArtifacts  ArtifactPaths // optional artifact paths for the regression command
+	EnvironmentIDs       []int64
+	Username             string
 }
 
 // DispatchForCommit creates or requeues the task graphs for the given
@@ -308,6 +310,13 @@ func (s *Service) createManualGraph(commit *store.Commit, env *store.TestEnviron
 			Artifacts: in.UnitArtifacts.Clean(),
 		}
 	}
+	if cmd := strings.TrimSpace(in.PerformanceCommand); cmd != "" {
+		entry.Performance = &EnvConfig{
+			Command:   CommandList{cmd},
+			Timeout:   DefaultTimeoutSeconds,
+			Artifacts: in.PerformanceArtifacts.Clean(),
+		}
+	}
 	if cmd := strings.TrimSpace(in.RegressionCommand); cmd != "" {
 		entry.Regression = []RegressionCase{{
 			Name:      "regression",
@@ -366,6 +375,7 @@ func (s *Service) persistGraph(commit *store.Commit, entry *MergedEntry, env *st
 				Name:        g.Name,
 				Description: g.Description,
 				Config:      g.Config,
+				Window:      g.Window,
 			},
 			Deps:      g.Deps,
 			ParentKey: g.ParentKey,
