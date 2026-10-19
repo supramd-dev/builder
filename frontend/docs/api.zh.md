@@ -3,8 +3,11 @@
 ## 测试仪表板
 
 仪表板(登录后的第一个页面)呈现 build.golang.org 风格的矩阵:**每个
-最近的 git 推送一行**(默认 10 行,`?commits=` 上限 50,最新在前),
-**每个测试环境一列**(站点级 —— 所有用户配置的环境;停用的置灰)。
+git 推送一行**,最新在前,**每个测试环境一列**(站点级 —— 所有用户
+配置的环境;停用的置灰)。历史是**分页**的:默认每页 200 行,矩阵上方
+的分页条负责翻页,并写明当前是哪一段("201–400 / 1,234")。每页条数
+可选(100 / 200 / 500 / 1000),对应 `?commits=`;`?page=` 是页码
+(从 1 开始)。请求超出末页时返回最后一页,而不是一个空矩阵。
 顶部页签提供四种视图:
 
 - **All(全量)** —— 完整管线矩阵(`GET /api/dashboard/full`):每个
@@ -473,8 +476,8 @@ POST /api/setup
 | GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`accessTokenSet`、`timezone`、`commitOverlapPolicy`、`webhookToken` 仅管理员) |
 | PUT    | `/api/site-config`              | 更新站点配置(access token:留空保留,`clearAccessToken` 删除;`timezone`:IANA 名称,空 = 浏览器本地;`commitOverlapPolicy`:`requeue` \| `fork` \| `fork_cancel`,任意已登录用户;`gitlab*` 字段仅管理员) |
 | POST   | `/api/site-config/webhook-token`| 轮换 webhook 密钥并返回配置(仅管理员) |
-| GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
-| GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/性能/回归阶段,以及任务图链接 |
+| GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build`;分页参数 `?page=`(从 1 开始)与 `?commits=`(每页条数,1–1000,默认 200) |
+| GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/性能/回归阶段,以及任务图链接;分页方式相同 |
 | POST   | `/api/test-runs`                | 关闭任务的当前尝试:按 `taskId` 报告结果(任务所在环境的 owner 或管理员) |
 | GET    | `/api/test-runs/{id}`           | 某个任务的某次尝试:计数、任务身份、全部尝试、artifact |
 | GET    | `/api/test-runs/{id}/artifacts/zip` | 该次尝试自己的工件打成 zip(没有工件时 `404`) |

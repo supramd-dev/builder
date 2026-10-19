@@ -3,16 +3,19 @@ import { useNavigate } from 'react-router'
 import { Network, TriangleAlert } from 'lucide-react'
 import TimeAgo from 'react-timeago'
 import {
+  DEFAULT_DASHBOARD_PAGE_SIZE,
   getDashboard,
   getFullDashboard,
   type Dashboard,
   type DashboardCommit,
   type DashboardKind,
+  type DashboardPage,
   type FullDashboard,
   type FullStage,
   type RunCell,
 } from './api'
 import MessageDialog from './MessageDialog'
+import { pageInfo, rangeLabel } from './pagination'
 import { StageStatus, commitUrl, truncate } from './StatusViews'
 import { formatTime } from './timezone'
 
@@ -36,6 +39,11 @@ export default function DashboardPage({ onError }: Props) {
   const [kind, setKind] = useState<DashboardKind>('full')
   const [dash, setDash] = useState<Dashboard | null>(null)
   const [full, setFull] = useState<FullDashboard | null>(null)
+  // Which page of the commit history the matrix shows, and how many commits a
+  // page holds. The history is unbounded, so the matrix cannot be: 200 rows is
+  // the default page, and the pager walks the rest.
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(DEFAULT_DASHBOARD_PAGE_SIZE)
   const [error, setError] = useState('')
   const [loadedKind, setLoadedKind] = useState<DashboardKind | null>(null)
   // A commit whose dispatch failed has no graph to link to — the graph cell
@@ -63,20 +71,30 @@ export default function DashboardPage({ onError }: Props) {
   // since nothing re-fetches on its own.
   const reqSeq = useRef(0)
 
+  // Whichever payload the selected tab has: both shapes carry page/pageSize/
+  // total, so the pager reads its numbers from here rather than from the two
+  // separately.
+  const pageData: DashboardPage | null = full ?? dash
+
   const refresh = useCallback(
-    async (k: DashboardKind) => {
+    async (k: DashboardKind, p: number, size: number) => {
       const seq = ++reqSeq.current
       try {
         if (k === 'full') {
-          const d = await getFullDashboard()
+          const d = await getFullDashboard(size, p)
           if (seq !== reqSeq.current) return // a newer tab answered first
           setFull(d)
           setDash(null)
+          // The server clamps a page past the end to the last one; adopt the
+          // page it served so prev/next and the range label agree with the
+          // rows on screen.
+          setPage(d.page)
         } else {
-          const d = await getDashboard(k)
+          const d = await getDashboard(k, size, p)
           if (seq !== reqSeq.current) return
           setDash(d)
           setFull(null)
+          setPage(d.page)
         }
         setLoadedKind(k)
         setError('')
@@ -96,8 +114,36 @@ export default function DashboardPage({ onError }: Props) {
   )
 
   useEffect(() => {
-    refresh(kind)
-  }, [kind, refresh])
+    refresh(kind, page, pageSize)
+  }, [kind, page, pageSize, refresh])
+
+  const changePageSize = useCallback((size: number) => {
+    setPageSize(size)
+    setPage(1) // page 3 of 100-row pages is not page 3 of 500-row pages
+  }, [])
+
+  // A tab is a different matrix over the same history: stay on the newest
+  // page rather than at an offset that means nothing there.
+  const selectTab = useCallback((k: DashboardKind) => {
+    setKind(k)
+    setPage(1)
+  }, [])
+
+  // The pager sits above the matrix and, once there is more than one page,
+  // below it as well: a full page of 200 rows is taller than the screen, and
+  // reaching the next page should not mean scrolling back up.
+  const pager = pageData ? (
+    <DashPager
+      page={pageData.page}
+      pageSize={pageData.pageSize}
+      total={pageData.total}
+      onPage={setPage}
+      onPageSize={changePageSize}
+    />
+  ) : null
+  const total = pageData?.total ?? 0
+  const showPager = effectiveKind === kind && total > 0
+  const showBottomPager = showPager && total > (pageData?.pageSize ?? 0)
 
   const tab = (k: DashboardKind, label: string) => (
     <button
@@ -105,7 +151,7 @@ export default function DashboardPage({ onError }: Props) {
       className={'btn btn-sm dash-tab' + (kind === k ? ' dash-tab-active' : '')}
       role="tab"
       aria-selected={kind === k}
-      onClick={() => setKind(k)}
+      onClick={() => selectTab(k)}
     >
       {label}
     </button>
@@ -151,14 +197,16 @@ export default function DashboardPage({ onError }: Props) {
       </div>
 
       <p className="text-muted">
-        One row per recent git push; one column per environment with its
-        build, unit, performance and regression stages. Click a stage for
-        details, the commit for the repository, or a graph link for the
-        pipeline (graph and live logs on one page).
+        One row per git push, newest first and paged; one column per
+        environment with its build, unit, performance and regression stages.
+        Click a stage for details, the commit for the repository, or a graph
+        link for the pipeline (graph and live logs on one page).
       </p>
 
       {error && <div className="alert alert-danger">{error}</div>}
       {effectiveKind !== kind && <p className="text-muted">Loading…</p>}
+
+      {showPager && pager}
 
       {effectiveKind === kind && kind === 'full' && full && (
         <MatrixTable
@@ -193,6 +241,7 @@ export default function DashboardPage({ onError }: Props) {
           onShowDispatchNote={setDispatchNote}
         />
       )}
+      {showBottomPager && pager}
       {dispatchNote && (
         <MessageDialog
           title={dispatchNote.title}
@@ -200,6 +249,69 @@ export default function DashboardPage({ onError }: Props) {
           onClose={() => setDispatchNote(null)}
         />
       )}
+    </div>
+  )
+}
+
+// Page sizes the pager offers. The server caps ?commits= at 1000; 200 is the
+// default because a page that tall is still scrollable while covering well
+// over a week of a busy repository.
+const DASHBOARD_PAGE_SIZES = [100, 200, 500, 1000]
+
+// DashPager is the matrix's page control: which slice of the commit history is
+// on screen, prev/next, and the page size. It sits above the matrix because a
+// page of 200 rows is tall — reaching the next page must not mean scrolling to
+// the bottom first.
+function DashPager({
+  page,
+  pageSize,
+  total,
+  onPage,
+  onPageSize,
+}: {
+  page: number
+  pageSize: number
+  total: number
+  onPage: (page: number) => void
+  onPageSize: (size: number) => void
+}) {
+  const info = pageInfo(total, pageSize, page)
+  return (
+    <div className="dash-pager">
+      <span className="text-muted">{rangeLabel(info)} commits</span>
+      <button
+        type="button"
+        className="btn btn-sm"
+        disabled={info.page <= 1}
+        onClick={() => onPage(info.page - 1)}
+      >
+        Prev
+      </button>
+      <span className="dash-pager-pages">
+        page {info.page} / {info.pages}
+      </span>
+      <button
+        type="button"
+        className="btn btn-sm"
+        disabled={info.page >= info.pages}
+        onClick={() => onPage(info.page + 1)}
+      >
+        Next
+      </button>
+      <label className="dash-page-size">
+        per page
+        <select
+          value={pageSize}
+          aria-label="commits per page"
+          onChange={(e) => onPageSize(Number(e.target.value))}
+        >
+          {DASHBOARD_PAGE_SIZES.map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+      </label>
     </div>
   )
 }

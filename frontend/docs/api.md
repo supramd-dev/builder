@@ -3,10 +3,15 @@
 ## The test dashboard
 
 The dashboard (first tab after login) shows a build.golang.org-style
-matrix: one **row per recent git push** (default 10, capped at 50 via
-`?commits=`, newest first), one **column per test environment**
-(site-wide — all environments configured by any user; disabled ones are
-greyed out). Four views are available via the tabs at the top:
+matrix: one **row per git push**, newest first, one **column per test
+environment** (site-wide — all environments configured by any user;
+disabled ones are greyed out). The history is **paged**: 200 rows per
+page by default, with a pager above the matrix that moves between pages
+and says which slice is on screen ("201–400 of 1,234"). The page size is
+pickable (100 / 200 / 500 / 1000) and is what `?commits=` sets; `?page=`
+is the 1-based page number. A page past the end serves the last page
+instead of an empty matrix. Four views are available via the tabs at the
+top:
 
 - **All** — the full pipeline matrix (`GET /api/dashboard/full`): each
   cell shows the four stages in display order (build, unit tests,
@@ -562,8 +567,8 @@ administrators are created there too, with `adduser -admin`.
 | GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`, `commitOverlapPolicy`, `webhookToken` — administrators only) |
 | PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local; `commitOverlapPolicy`: `requeue` \| `fork` \| `fork_cancel`, any signed-in user; the `gitlab*` fields are administrator-only) |
 | POST   | `/api/site-config/webhook-token`| Rotate the webhook secret and return the configuration (administrators only) |
-| GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
-| GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/performance/regression stages plus the task-graph link |
+| GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build`; paged with `?page=` (1-based) and `?commits=` (page size, 1–1000, default 200) |
+| GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/performance/regression stages plus the task-graph link; paged the same way |
 | POST   | `/api/test-runs`                | Close a task's current attempt: report a result against `taskId` (owner or administrator of the task's environment) |
 | GET    | `/api/test-runs/{id}`           | One attempt of one task: counts, the task's identity, every attempt, artifacts |
 | GET    | `/api/test-runs/{id}/artifacts/zip` | That attempt's own artifacts as a zip (`404` when there are none) |

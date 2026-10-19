@@ -646,8 +646,8 @@ site_configs                    独立单行
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| GET | `/api/dashboard/{kind}` | 登录 | `kind` ∈ `regression`/`unit`/`build`；`?commits=1..50` |
-| GET | `/api/dashboard/full` | 登录 | 每个提交行、每个环境带 build/unit/performance/regression 四个阶段与任务图链接 |
+| GET | `/api/dashboard/{kind}` | 登录 | `kind` ∈ `regression`/`unit`/`build`；分页：`?page=`（从 1 开始）+ `?commits=`（每页条数，1–1000，默认 200），响应带 `page`/`pageSize`/`total` |
+| GET | `/api/dashboard/full` | 登录 | 每个提交行、每个环境带 build/unit/performance/regression 四个阶段与任务图链接；分页参数相同 |
 | POST | `/api/test-runs` | 环境属主或管理员 | **外部上报结果**：内置 runner 之外的程序也可以回报（虚拟任务拒绝） |
 | GET | `/api/test-runs/{id}` | 登录 | 一次尝试的详情（用例列表、解析出的计数、工件） |
 | GET | `/api/test-runs/{id}/artifacts/zip` | 登录 | 这次尝试的全部工件打包 |
@@ -728,8 +728,8 @@ site_configs                    独立单行
 - 测试是 `node --test`（`npm test`），**没有测试框架**：node 自己剥掉类型直接
   加载 `.ts` 模块。因此可测的东西必须待在 `.ts` 里——**`.tsx` 组件跑不了**，
   这是"把纯逻辑从组件里抽出来"的主要动机（`windows.ts`、`status.ts`、
-  `artifacts.ts`、`overlap.ts`、`plot/figure.ts`、`gtest.ts`、`performance.ts`
-  都是这么来的）。
+  `artifacts.ts`、`overlap.ts`、`plot/figure.ts`、`gtest.ts`、`performance.ts`、
+  `pagination.ts` 都是这么来的）。
 - 构建产物由 Go 进程托管（§2.2），前端不需要知道自己的部署路径。
 
 ### 6.2 应用外壳与路由
@@ -762,7 +762,7 @@ site_configs                    独立单行
 
 | 页面 | 主要接口 | 刷新方式 |
 |---|---|---|
-| `DashboardPage` | `GET /api/dashboard/{kind}`、`/full` | 按需重取（切换 kind / 操作后） |
+| `DashboardPage` | `GET /api/dashboard/{kind}`、`/full`（带 `page`/`commits`） | 按需重取（切换 kind / 翻页 / 改每页条数后） |
 | `TaskPipelinePage` | `GET /api/tasks/{id}`、`/runs` | 轮询：图还活着 3s，否则 15s |
 | `TaskLogView`（组件） | `GET /api/tasks/{id}/log`（字节游标） | 2s 轮询，`lastSeq` 作游标 |
 | `TestRunDetailPage` | `GET /api/test-runs/{id}`、工件预览 | 3s |
@@ -786,6 +786,7 @@ site_configs                    独立单行
 | `src/windows.ts` | 调度时间段的前端镜像：解析、判断开闭、生成 `22:00–06:00` 这样的标签与说明；时钟按站点时区算 |
 | `src/overlap.ts` | 重复提交策略的文案与选项 |
 | `src/gtest.ts` | gtest 风格输出的前端解析（与后端的 `runner/gtest.go` 对应） |
+| `src/pagination.ts` | 分页算术：把请求的页码夹到 `[1, 页数]`、算出当前页的"第几条到第几条 / 共几条"。服务端也会夹，两边保持一致，所以"第 9 / 7 页"这种自相矛盾的显示不会出现 |
 | `src/artifacts.ts` | 工件类型的判断与预览能力（能不能预览、按什么方式预览） |
 | `src/markdown.tsx` | Markdown 渲染（文档页与工件预览共用） |
 | `src/performance.ts` | 性能页的**纯**图模型：从 `points` 归纳出指标下拉项（带单位与"越高越好/越低越好"）、按 case + 指标 + 机器切成 trace、算坐标轴标题与悬停文案、格式化数值。组件里只剩渲染 |

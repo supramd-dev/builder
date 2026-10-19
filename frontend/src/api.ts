@@ -522,22 +522,41 @@ export interface DashboardRow {
   cells: (RunCell | null)[]
 }
 
-export interface Dashboard {
+// Dashboard paging: the matrix shows one page of the commit history (newest
+// first). page is the page actually served — the server clamps a page past the
+// end to the last one — pageSize the page size used, and total how many commits
+// the repo filter matches, so the pager can say "1–200 of 1234".
+export interface DashboardPage {
+  page: number
+  pageSize: number
+  total: number
+}
+
+export interface Dashboard extends DashboardPage {
   kind: DashboardKind
   repoFilter?: string
   // Web URL of the filtered repository, when derivable — the header repo
   // links there.
   repoUrl?: string
   environments: DashboardEnvironment[]
-  rows: DashboardRow[] // one row per commit, newest first
+  rows: DashboardRow[] // one page of commits, newest first
 }
+
+// DEFAULT_DASHBOARD_PAGE_SIZE is the server's default page size too: asking
+// for this many rows is what "the first page" means.
+export const DEFAULT_DASHBOARD_PAGE_SIZE = 200
+
+// MAX_DASHBOARD_PAGE_SIZE mirrors the ?commits= cap the API enforces.
+export const MAX_DASHBOARD_PAGE_SIZE = 1000
 
 export async function getDashboard(
   kind: DashboardKind,
-  commits = 10,
+  commits = DEFAULT_DASHBOARD_PAGE_SIZE,
+  page = 1,
 ): Promise<Dashboard> {
   // The full kind has its own wire shape (see getFullDashboard).
-  return api<Dashboard>(`/api/dashboard/${kind}?commits=${commits}`)
+  const q = new URLSearchParams({ commits: String(commits), page: String(page) })
+  return api<Dashboard>(`/api/dashboard/${kind}?${q}`)
 }
 
 // --- Full dashboard (all stages per commit × environment) ---
@@ -566,7 +585,7 @@ export interface FullRow {
   triggers?: Record<string, number>
 }
 
-export interface FullDashboard {
+export interface FullDashboard extends DashboardPage {
   repoFilter?: string
   repoUrl?: string
   environments: DashboardEnvironment[]
@@ -574,9 +593,11 @@ export interface FullDashboard {
 }
 
 export async function getFullDashboard(
-  commits = 10,
+  commits = DEFAULT_DASHBOARD_PAGE_SIZE,
+  page = 1,
 ): Promise<FullDashboard> {
-  return api<FullDashboard>(`/api/dashboard/full?commits=${commits}`)
+  const q = new URLSearchParams({ commits: String(commits), page: String(page) })
+  return api<FullDashboard>(`/api/dashboard/full?${q}`)
 }
 
 // TestArtifactRef references one stored result/log/series/file artifact of a

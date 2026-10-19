@@ -1670,3 +1670,141 @@ func keysOf(m map[string]string) []string {
 	}
 	return names
 }
+
+// --- paging ---
+
+// dashboardJSONFor fetches one matrix page and decodes it, failing the test on
+// any non-200.
+func dashboardJSONFor(t *testing.T, env dashboardTestEnv, path string) dashboardJSON {
+	t.Helper()
+	rec := env.authed(http.MethodGet, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s: expected 200, got %d: %s", path, rec.Code, rec.Body.String())
+	}
+	var dash dashboardJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatalf("%s: decode: %v", path, err)
+	}
+	return dash
+}
+
+// fullDashboardJSONFor is dashboardJSONFor for the full matrix.
+func fullDashboardJSONFor(t *testing.T, env dashboardTestEnv, path string) fullDashboardJSON {
+	t.Helper()
+	rec := env.authed(http.MethodGet, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s: expected 200, got %d: %s", path, rec.Code, rec.Body.String())
+	}
+	var dash fullDashboardJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatalf("%s: decode: %v", path, err)
+	}
+	return dash
+}
+
+// TestDashboardPaging covers the paged commit history: the page numbers a
+// pager needs (page/pageSize/total), consecutive pages continuing the same
+// newest-first order without a gap or a repeat, the default page size, the
+// clamp of a page past the end, and the rejection of nonsense parameters.
+func TestDashboardPaging(t *testing.T) {
+	env := newDashboardEnv(t)
+
+	// Five rows on top of the seeded four, a minute apart in the far future:
+	// the matrix is newest-first, so these are pages 1 and 2.
+	base := time.Date(2030, 1, 1, 10, 0, 0, 0, time.UTC)
+	for i := 1; i <= 5; i++ {
+		if err := env.server.Store.CreateCommit(&store.Commit{
+			Repo: "group/md-code", SHA: fmt.Sprintf("pg%d", i), Ref: "main",
+			Author: "alice", Message: "paged row", PushedAt: base.Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatalf("create commit pg%d: %v", i, err)
+		}
+	}
+
+	// The default is one big page of 200: the seeded history fits in it.
+	def := dashboardJSONFor(t, env, "/api/dashboard/regression")
+	if def.Page != 1 || def.PageSize != defaultCommits || def.Total != 9 {
+		t.Fatalf("default: page %d, size %d, total %d; want 1/%d/9",
+			def.Page, def.PageSize, def.Total, defaultCommits)
+	}
+	if len(def.Rows) != 9 {
+		t.Fatalf("default: expected all 9 rows, got %d", len(def.Rows))
+	}
+
+	first := dashboardJSONFor(t, env, "/api/dashboard/regression?commits=2")
+	if first.Page != 1 || first.PageSize != 2 || first.Total != 9 {
+		t.Fatalf("page 1: page %d, size %d, total %d; want 1/2/9", first.Page, first.PageSize, first.Total)
+	}
+	if len(first.Rows) != 2 || first.Rows[0].Commit.SHA != "pg5" || first.Rows[1].Commit.SHA != "pg4" {
+		t.Fatalf("page 1 rows = %+v, want pg5, pg4", first.Rows)
+	}
+
+	// Page 2 continues the order instead of repeating it.
+	second := dashboardJSONFor(t, env, "/api/dashboard/regression?commits=2&page=2")
+	if len(second.Rows) != 2 || second.Rows[0].Commit.SHA != "pg3" || second.Rows[1].Commit.SHA != "pg2" {
+		t.Fatalf("page 2 rows = %+v, want pg3, pg2", second.Rows)
+	}
+
+	// Past the end: the last page is served (5 pages of 2 for 9 rows), not an
+	// empty matrix — a stale bookmark must not read as "no pushes yet".
+	last := dashboardJSONFor(t, env, "/api/dashboard/regression?commits=2&page=99")
+	if last.Page != 5 {
+		t.Fatalf("page 99: served page %d, want the clamped last page 5", last.Page)
+	}
+	if len(last.Rows) != 1 || last.Rows[0].Commit.SHA != "1111111" {
+		t.Fatalf("last page rows = %+v, want the oldest commit 1111111", last.Rows)
+	}
+
+	// The full matrix pages the same way.
+	full := fullDashboardJSONFor(t, env, "/api/dashboard/full?commits=2&page=2")
+	if full.Page != 2 || full.PageSize != 2 || full.Total != 9 {
+		t.Fatalf("full page 2: page %d, size %d, total %d; want 2/2/9", full.Page, full.PageSize, full.Total)
+	}
+	if len(full.Rows) != 2 || full.Rows[0].Commit.SHA != "pg3" {
+		t.Fatalf("full page 2 rows = %+v, want pg3 first", full.Rows)
+	}
+
+	// A negative or zero offset has one meaning (the first page), so it is
+	// not silently accepted: the caller is told the parameters are wrong.
+	for _, path := range []string{
+		"/api/dashboard/regression?commits=0",
+		"/api/dashboard/regression?commits=1001",
+		"/api/dashboard/regression?commits=abc",
+		"/api/dashboard/regression?page=0",
+		"/api/dashboard/regression?page=-3",
+		"/api/dashboard/full?page=x",
+	} {
+		if rec := env.authed(http.MethodGet, path, ""); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: expected 400, got %d", path, rec.Code)
+		}
+	}
+}
+
+// TestDashboardSupersededAcrossPages covers why the "older row of this
+// revision" question is answered by the store and not per page: with a page
+// size of two, the two rows of a duplicated revision land on different pages,
+// and the older one still has to dim.
+func TestDashboardSupersededAcrossPages(t *testing.T) {
+	env := newDashboardEnv(t)
+
+	base := time.Date(2030, 1, 1, 10, 0, 0, 0, time.UTC)
+	for _, c := range []*store.Commit{
+		{Repo: "group/md-code", SHA: "dup", Message: "newer dispatch", PushedAt: base.Add(10 * time.Minute)},
+		{Repo: "group/md-code", SHA: "filler1", PushedAt: base.Add(5 * time.Minute)},
+		{Repo: "group/md-code", SHA: "filler2", PushedAt: base.Add(4 * time.Minute)},
+		{Repo: "group/md-code", SHA: "dup", Message: "older dispatch", PushedAt: base.Add(3 * time.Minute)},
+	} {
+		if err := env.server.Store.CreateCommit(c); err != nil {
+			t.Fatalf("create commit %s: %v", c.SHA, err)
+		}
+	}
+
+	first := fullDashboardJSONFor(t, env, "/api/dashboard/full?commits=2")
+	if len(first.Rows) != 2 || first.Rows[0].Commit.SHA != "dup" || first.Rows[0].Commit.Superseded {
+		t.Fatalf("page 1: expected the newest dup row, not superseded, got %+v", first.Rows)
+	}
+	second := fullDashboardJSONFor(t, env, "/api/dashboard/full?commits=2&page=2")
+	if len(second.Rows) != 2 || second.Rows[1].Commit.SHA != "dup" || !second.Rows[1].Commit.Superseded {
+		t.Fatalf("page 2: expected the older dup row, superseded, got %+v", second.Rows)
+	}
+}
