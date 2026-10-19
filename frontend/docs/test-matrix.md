@@ -106,7 +106,7 @@ matrix:
 | performance.command          | yes (per stage) | Shell command(s) running the benchmark, same forms as unit.command. |
 | performance.description      | no       | Human-readable label of the stage, shown on its run detail page.    |
 | performance.workdir          | no       | Directory the command runs in (see Working directories).            |
-| performance.artifacts        | no       | Measurement file path (or list) fetched back and stored as **series data** — never parsed, never counted (see Performance artifacts). |
+| performance.artifacts        | no       | Measurement file path (or list) fetched back and stored as **series artifacts**; the Performance page plots the ones carrying a report `schema`, and none of them affects pass/fail (see Performance artifacts). |
 | performance.timeout          | no       | Stage timeout overriding defaults — a benchmark is often the longest stage of an entry. |
 | build.window / unit.window / performance.window / regression.window | no | Daily interval this stage may **start** in, e.g. `"22:00-06:00"` (see [Scheduling windows](#scheduling-windows)). |
 | presets.\<name\>.window    | no       | Same, for one regression case; an entry-level regression.window is the default for the cases it selects. |
@@ -572,24 +572,87 @@ workdir and each file is capped at 8 MiB at fetch time.
 
 The **performance** stage accepts the same `artifacts` field as unit, with
 the build stage's semantics: the files are stored **verbatim** as
-**series** artifacts and never parsed — the verdict is the command's exit
-code alone. A benchmark reports a measurement, not a pass or a fail; a
-results-looking file fetched from a benchmark cannot flip the cell to
-failed (and a benchmark that *does* detect a regression exits non-zero,
-which fails the run as any stage's exit code would).
+**series** artifacts. The runner does not read them — the verdict is the
+command's exit code alone. A benchmark reports a measurement, not a pass
+or a fail; a results-looking file fetched from a benchmark cannot flip the
+cell to failed (a benchmark that *does* detect a regression exits
+non-zero, which fails the run as any stage's exit code would).
+
+The *Performance* page does not plot every series file, only the
+**reports** among them: JSON documents in the format below. A report names
+the benchmark's cases and metrics; the server (`server/performance`) reads
+the reports of every run in the window, aggregates them, and serves the
+history; the page draws one scatter per case — the metric over the
+commits it was measured on. A series file that is not a report (a log, a
+plot figure) is ignored.
+
+#### The report format
+
+```json
+{
+  "schema": 1,
+  "date": "2026-09-01T08:12:44+08:00",
+  "cases": [
+    {
+      "name": "nvt-1000",
+      "metrics": {
+        "throughput": { "value": 1523.4, "unit": "step/s" },
+        "wall_time":  { "value": 12.4,  "unit": "s", "better": "lower" }
+      }
+    }
+  ]
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `schema` | yes | Format version, currently `1`. It is also what marks the file as a report: JSON without it is not read at all. |
+| `date` | yes | When the measurement was taken, RFC 3339 with an offset. It is the chart's x axis — it comes from the benchmark, so reruns of the same commit stay distinguishable. |
+| `cases[].name` | yes | The case's stable name; unique within the file. |
+| `metrics` | yes | Non-empty object: metric name → measurement. The name is the metric's identity across commits, so keep it stable. |
+| `metrics.*.value` | yes | A finite number. |
+| `metrics.*.unit` | yes | The unit the value is in — the chart's y axis label. A plain count is `"1"` (SI), a ratio `"ratio"`, a percentage `"%"`. |
+| `metrics.*.better` | no | `"higher"` (the default) or `"lower"`. It labels the axis only; values are never inverted. |
+| unknown fields | — | Ignored, so a newer benchmark can add its own without breaking older pages. |
+
+Every metric must be an object: a bare number would carry no unit, and a
+chart cannot label an axis whose unit nobody wrote down. Limits: at most
+200 cases, 50 metrics per case, and 128/64/32 characters for a case name,
+metric name and unit.
+
+A file is read as a report when it is a JSON object carrying a `schema`
+key. If it claims to be a report and is malformed — no `date`, a metric
+without a unit, a duplicate case name — the page lists it under
+"artifacts could not be read as a report" with the reason, rather than
+hiding it. JSON without a `schema` key is not a report and is ignored
+silently.
+
+The file name is free — list it under `artifacts:` like any other:
 
 ```yaml
 performance:
-  command: "./bench --json bench.json"
-  artifacts: ["bench.json", "bench.log"]
+  command: "./bench --json perf.json"
+  artifacts: ["perf.json", "bench.log"]
 ```
 
-Each file is its own artifact, downloadable from the run's detail page
-like any other. The *Performance* page is where their history is meant to
-be read — one chart per test machine, a metric over the commits it was
-measured on. That collection is **not built yet**: the page documents the
-plan and draws a sample chart marked as such, so nothing there is a real
-measurement.
+Each file is still an ordinary artifact, downloadable from the run's
+detail page, and each run still passes or fails on the command's exit
+code.
+
+#### What the Performance page plots
+
+- **One chart per case** — different cases are different experiments, and
+  their values would not share a y axis.
+- **One colour (trace) per test environment**, one marker per commit.
+- **x is the report's `date`**, y the metric's value; the y axis carries
+  the unit and the direction (`higher is better` / `lower is better`).
+- A commit measured more than once (a retry, a manual re-run) is one
+  marker at the **median** of its measurements, with the sample count in
+  the hover. The median rather than the mean: a rerun that differs usually
+  means the machine was busy, not that the code changed.
+- The page reads the last 180 days by default; the window, the machine
+  and the metric are selector options. A site that configures its code
+  repository shows only that repository's history.
 
 ### Plot artifacts (`*.plot.json` / `*.plotly.json`)
 
@@ -787,7 +850,9 @@ Each matched entry becomes a task graph (see
    timeout; the full output streams into the task log and the outcome
    is stored as the attempt's test run.
 5. **performance**: the same shape as unit, but its artifact files are
-   kept as series data rather than parsed for counts, and a `window` may
+   kept as series artifacts rather than parsed for counts — the ones
+   carrying a report `schema` are what the Performance page plots (see
+   [Performance artifacts](#performance-artifacts)) — and a `window` may
    hold the node until the interval opens (see
    [Scheduling windows](#scheduling-windows)).
 6. **regression: one task per selected preset** — each case command

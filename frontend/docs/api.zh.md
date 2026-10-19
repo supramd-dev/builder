@@ -264,6 +264,44 @@ Artifact 归属产出它的那次尝试:单元测试运行的结果文件挂在�
 因为它只能结束尚无结果的工作。某个 worker 正在执行的节点是如何被结束的,
 见 [Runner 策略](#/docs/runner-strategy)。
 
+## 性能历史
+
+`GET /api/performance` 读取 `performance:` 阶段存下的性能报告(JSON 格式见
+[测试矩阵 → 性能工件](#/docs/test-matrix)),返回 *Performance* 页面所画的
+历史数据。查询参数:
+
+- `days` —— 往前读多少天,`1`–`3650`(默认 `180`)。窗口以提交到达站点
+  的时间(`commits.pushed_at`)为准,而不是报告自身的 `date`。
+- `environment` —— 只看某一个环境的 id(默认:全部环境)。
+
+返回的点已经做完聚合:同一提交被测量多次时只有**一个**点,取**中位数**,
+`samples` 说明它代表多少次测量。响应形如:
+
+```json
+{
+  "since": "2026-04-19T00:00:00Z",
+  "generatedAt": "2026-10-16T02:00:00Z",
+  "truncated": false,
+  "environments": [{"id": 1, "name": "cpu-node-1"}],
+  "cases": [{"name": "nvt-1000",
+             "metrics": [{"name": "throughput", "unit": "step/s", "better": "higher"}]}],
+  "points": [{"case": "nvt-1000", "metric": "throughput",
+              "unit": "step/s", "better": "higher",
+              "environmentId": 1, "environment": "cpu-node-1",
+              "at": "2026-09-01T00:12:44Z", "commitId": 12, "sha": "abc123…",
+              "samples": 3, "value": 1523.4}],
+  "ignored": [{"artifactId": 8, "runId": 43, "name": "perf.json",
+               "reason": "date is required"}]
+}
+```
+
+`at` 是报告里的 `date`(测量的时刻),不是提交推送的时间。`truncated` 表示
+单次请求撞到了上限(2000 个工件,保留最新的)。`ignored` 列出那些自称是
+报告、却读不成的工件(格式错误、`schema` 版本不认识、超过 1 MiB、或从对象
+存储读失败),并给出原因;没有 `schema` 键的 series 文件不算报告,会被静默
+跳过。站点配置了代码仓库时,只看到该仓库的历史。`days` / `environment`
+非法时返回 `400`。
+
 ## 脚本执行(交互式)
 
 除自动任务图外,环境还接受来自 **Run command** 页面的临时命令和脚本:
@@ -441,6 +479,7 @@ POST /api/setup
 | GET    | `/api/test-runs/{id}`           | 某个任务的某次尝试:计数、任务身份、全部尝试、artifact |
 | GET    | `/api/test-runs/{id}/artifacts/zip` | 该次尝试自己的工件打成 zip(没有工件时 `404`) |
 | GET    | `/api/test-artifacts/{id}`      | 单个存储 artifact 的原始内容                 |
+| GET    | `/api/performance?days=<n>&environment=<id>` | 性能历史:窗口内所有性能报告,按 case、指标、环境、提交聚合 |
 | GET    | `/api/test-artifacts/{id}/download` | 单个 artifact 以文件下载               |
 | GET    | `/api/test-artifacts/{id}/raw`  | 单个 artifact 用于查看:HTML 作为沙箱页面,文本按文本 |
 | POST   | `/api/jobs`                     | 手动重新派发某提交的任务图(webhook 方式,读取 YAML) |

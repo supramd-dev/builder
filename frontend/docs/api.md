@@ -323,6 +323,49 @@ does not exist yet. See
 [Runner strategy](#/docs/runner-strategy) for how a node a worker is
 executing right now is ended.
 
+## Performance history
+
+`GET /api/performance` reads the benchmark reports a `performance:` stage
+stored (the JSON format is in
+[Test matrix → Performance artifacts](#/docs/test-matrix)) and returns the
+history the *Performance* page plots. Query parameters:
+
+- `days` — how far back to read, `1`–`3650` (default `180`). The window
+  starts at the commit's arrival (`commits.pushed_at`), not at the
+  report's own `date`.
+- `environment` — one environment id (default: every environment).
+
+The points are already aggregated: a commit measured more than once is one
+point at the **median**, with `samples` saying how many measurements it
+stands for. The response:
+
+```json
+{
+  "since": "2026-04-19T00:00:00Z",
+  "generatedAt": "2026-10-16T02:00:00Z",
+  "truncated": false,
+  "environments": [{"id": 1, "name": "cpu-node-1"}],
+  "cases": [{"name": "nvt-1000",
+             "metrics": [{"name": "throughput", "unit": "step/s", "better": "higher"}]}],
+  "points": [{"case": "nvt-1000", "metric": "throughput",
+              "unit": "step/s", "better": "higher",
+              "environmentId": 1, "environment": "cpu-node-1",
+              "at": "2026-09-01T00:12:44Z", "commitId": 12, "sha": "abc123…",
+              "samples": 3, "value": 1523.4}],
+  "ignored": [{"artifactId": 8, "runId": 43, "name": "perf.json",
+               "reason": "date is required"}]
+}
+```
+
+`at` is the report's `date` — when the benchmark measured — not when the
+commit was pushed. `truncated` says a single request hit its limit (2000
+artifacts, newest kept). `ignored` lists the artifacts that claim to be
+reports but could not be read (malformed, an unknown `schema`, larger than
+1 MiB, or unreadable from object storage) with the reason; a series file
+without a `schema` key is not a report and is skipped without a word. A
+site that configures a code repository sees only that repository's
+history. An invalid `days` or `environment` is `400`.
+
 ## Script execution (interactive)
 
 Besides the automatic task graphs, environments accept ad-hoc commands
@@ -527,6 +570,7 @@ administrators are created there too, with `adduser -admin`.
 | GET    | `/api/test-artifacts/{id}`      | One stored artifact's raw content             |
 | GET    | `/api/test-artifacts/{id}/download` | One artifact as a file download          |
 | GET    | `/api/test-artifacts/{id}/raw`  | One artifact for viewing: HTML as a sandboxed page, text as text |
+| GET    | `/api/performance?days=<n>&environment=<id>` | Benchmark history: every performance report in the window, aggregated per case, metric, environment and commit |
 | POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit (webhook-style, reads the YAML) |
 | POST   | `/api/jobs/manual`              | Dispatch a user-configured test (repo, ref, stage commands, environments; no YAML) |
 | POST   | `/api/jobs/manual-yaml`         | Dispatch the md-builder.yaml matrix at a ref (webhook flow on demand) |

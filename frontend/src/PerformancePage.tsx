@@ -1,143 +1,207 @@
-// The performance tab: where a benchmark's history is meant to be read.
+// The performance tab: how each benchmark case's result evolved over the
+// commits it was measured on.
 //
 // A `performance:` stage stores each of its artifact files as a series
-// artifact (see the runner strategy docs) — a measurement, not a verdict.
-// The plan for this page is to collect those series per test environment and
-// plot, one chart per machine, how a metric evolves over the commits it was
-// measured on. That collection endpoint does not exist yet, so the page
-// renders what it can already know — the environments a benchmark could run
-// on — with a sample chart standing in for the real one. It is deliberately
-// empty of numbers: nothing here is measured.
+// artifact (see the runner strategy docs), and a report among them says which
+// cases and metrics the benchmark measured. The server parses those reports
+// and aggregates repeated measurements of a commit into one point
+// (server/performance); this page chooses what to draw — the window, the
+// machine, the metric — and hands each case's points to Plotly. One chart per
+// case: different cases are different experiments, and overlaying them would
+// compare values with different units.
+//
+// The page reads the whole window in one request; the metric and environment
+// selectors then filter what is already loaded, so switching them does not
+// refetch.
 
 import { useEffect, useState } from 'react'
-import { listEnvironments, type TestEnvironment } from './api'
+import { Link } from 'react-router'
+import { getPerformanceHistory, type PerformanceHistory } from './api'
+import { casesWithMetric, metricOptions, tracesFor } from './performance'
+import PerformanceChart from './plot/PerformanceChart'
+
+// windows are the range selector: how far back the history is read. The
+// server takes days; 3650 is its maximum and means "everything this site has".
+const windows = [
+  { label: '30 days', days: 30 },
+  { label: '90 days', days: 90 },
+  { label: '180 days', days: 180 },
+  { label: '1 year', days: 365 },
+  { label: 'All', days: 3650 },
+]
+const defaultWindowDays = 180
 
 interface Props {
   onError: (message: string) => void
 }
 
-// SamplePlot is the stand-in for the history chart: axes, a metric that
-// rises and falls with the commits, and a "sample data" badge so a glance at
-// the page cannot mistake the line for a real measurement. Drawn as inline
-// SVG rather than with Plotly: the real chart will arrive with the data, and
-// until then there is nothing for a plotting library to do.
-function SamplePlot({ seed }: { seed: number }) {
-  // Fixed points, offset per environment so two cards do not look like one
-  // chart copied twice. The shape (a step up, a regression, a recovery) is
-  // what a real series of a benchmark looks like.
-  const values = [0.52, 0.55, 0.54, 0.71, 0.88, 0.79, 0.57, 0.51]
-  const n = values.length
-  const jitter = ((seed % 5) - 2) * 0.02
-  const points = values.map((v, i) => {
-    const x = (i / (n - 1)) * 100
-    const y = 90 - Math.min(0.95, Math.max(0.05, v + jitter)) * 80
-    return `${x.toFixed(2)},${y.toFixed(2)}`
-  })
-  return (
-    <svg
-      className="perf-plot"
-      viewBox="0 0 100 100"
-      preserveAspectRatio="none"
-      role="img"
-      aria-label="sample performance history chart, no real data"
-    >
-      {/* Axes: commits on x, metric (higher is better) on y. */}
-      <line x1="0" y1="90" x2="100" y2="90" className="perf-plot-axis" />
-      <line x1="0" y1="10" x2="0" y2="90" className="perf-plot-axis" />
-      <polyline points={points.join(' ')} className="perf-plot-line" />
-      {points.map((p, i) => {
-        const [x, y] = p.split(',')
-        return <circle key={i} cx={x} cy={y} r="1.6" className="perf-plot-dot" />
-      })}
-    </svg>
-  )
-}
-
-// PerformancePage is the tab placeholder. What it shows: one card per test
-// environment (the machines a performance stage can run on) with a sample
-// chart, and — when the site has no environment yet — what to do first.
 export default function PerformancePage({ onError }: Props) {
-  const [environments, setEnvironments] = useState<TestEnvironment[] | null>(null)
+  const [history, setHistory] = useState<PerformanceHistory | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // The window and the environment are the server's filters (they decide what
+  // is read); the metric is filtered here.
+  const [days, setDays] = useState(defaultWindowDays)
+  const [environmentId, setEnvironmentId] = useState(0)
+  const [metricName, setMetricName] = useState('')
 
   useEffect(() => {
     let cancelled = false
-    listEnvironments()
-      .then((envs) => {
-        if (!cancelled) setEnvironments(envs)
+    setLoading(true)
+    getPerformanceHistory(days, environmentId === 0 ? undefined : environmentId)
+      .then((h) => {
+        if (cancelled) return
+        setHistory(h)
+        setError('')
       })
       .catch((err: unknown) => {
         if (cancelled) return
-        const msg = err instanceof Error ? err.message : 'Failed to load environments'
+        const msg = err instanceof Error ? err.message : 'Failed to load the performance history'
         setError(msg)
         onError(msg)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
       })
     return () => {
       cancelled = true
     }
-  }, [onError])
+  }, [days, environmentId, onError])
 
-  if (error) {
-    return (
-      <div>
-        <h2 className="task-title">Performance</h2>
-        <div className="alert alert-danger">{error}</div>
-      </div>
-    )
-  }
-  if (!environments) {
-    return (
-      <div>
-        <h2 className="task-title">Performance</h2>
-        <p className="text-muted">Loading…</p>
-      </div>
-    )
-  }
-
-  // Disabled environments are machines nothing is dispatched to, so they are
-  // left out of the charts: a line that stops has no meaning here.
-  const measured = environments.filter((e) => e.enabled)
+  const options = history ? metricOptions(history) : []
+  // The first option is the default; a chosen metric that the new window no
+  // longer has falls back to it rather than rendering an empty page.
+  const metric = options.find((o) => o.name === metricName) ?? options[0]
+  const cases = history && metric ? casesWithMetric(history, metric.name) : []
 
   return (
     <div>
       <h2 className="task-title">Performance</h2>
-      <p className="text-muted" style={{ maxWidth: '70ch' }}>
-        One chart per test machine, plotting a benchmark metric over the
-        commits it was measured on. The charts below are{' '}
-        <strong>placeholders with sample data</strong> — the collection of
-        history has not been built yet. A performance stage
-        (&ldquo;<code>performance:</code>&rdquo; in md-builder.yaml) already
-        stores its artifact files as series data, which is what these charts
-        will read. Its <code>window:</code> controls when the benchmark may
-        start, so a load-sensitive run can be held to the night.
+      <p className="text-muted" style={{ maxWidth: '78ch' }}>
+        One chart per benchmark case, plotting the metric over the commits it
+        was measured on — one marker per commit, one colour per test machine.
+        The points come from the JSON reports a{' '}
+        <code>performance:</code> stage stores as artifacts; repeated runs of
+        one commit are folded into their median.
       </p>
 
-      {measured.length === 0 ? (
-        <div className="event text-muted">
-          No test environment is enabled yet, so there is no machine to
-          measure. Add one under <strong>Runner Envs</strong> first.
-        </div>
-      ) : (
-        <div className="perf-grid">
-          {measured.map((env, i) => (
-            <section className="perf-card" key={env.id}>
-              <header className="perf-card-head">
-                <h3 className="perf-card-title">{env.name}</h3>
-                <span className="perf-badge">sample data</span>
-              </header>
-              <p className="text-muted perf-card-sub">
-                {env.tags.length > 0 ? env.tags.join(', ') : 'no tags'}
-                {' · '}
-                {env.host}
-              </p>
-              <SamplePlot seed={env.id + i} />
-              <p className="text-muted perf-card-foot">
-                x: commit · y: metric · one point per measured commit
-              </p>
-            </section>
-          ))}
-        </div>
-      )}
+      {!history && loading ? (
+        <p className="text-muted">Loading…</p>
+      ) : error ? (
+        <div className="alert alert-danger">{error}</div>
+      ) : history ? (
+        <>
+          <div className="perf-controls">
+            <label>
+              Window{' '}
+              <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
+                {windows.map((w) => (
+                  <option key={w.days} value={w.days}>
+                    {w.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Machine{' '}
+              <select value={environmentId} onChange={(e) => setEnvironmentId(Number(e.target.value))}>
+                <option value={0}>All machines</option>
+                {history.environments.map((env) => (
+                  <option key={env.id} value={env.id}>
+                    {env.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Metric{' '}
+              <select
+                value={metric?.name ?? ''}
+                onChange={(e) => setMetricName(e.target.value)}
+                disabled={options.length === 0}
+              >
+                {options.map((o) => (
+                  <option key={o.name} value={o.name}>
+                    {o.name}
+                    {o.unit !== '' && o.unit !== '1' ? ` (${o.unit})` : ''}
+                    {o.better === 'lower' ? ' ↓' : ' ↑'}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {loading ? <span className="text-muted perf-loading">loading…</span> : null}
+          </div>
+
+          {history.truncated ? (
+            <div className="alert alert-warning">
+              The window holds more measurements than one request reads; the
+              latest ones are shown. Narrow the window to see a denser
+              history.
+            </div>
+          ) : null}
+
+          {options.length === 0 ? (
+            <div className="event text-muted">
+              No benchmark measurements{environmentId === 0 ? '' : ' on this machine'} in this
+              window. A <code>performance:</code> stage in md-builder.yaml runs a benchmark; its
+              artifacts must include a report file — see{' '}
+              <Link to="/docs/test-matrix">Test matrix → Performance artifacts</Link> for the
+              format.
+            </div>
+          ) : metric ? (
+            <div className="perf-grid">
+              {cases.map((c) => {
+                const traces = tracesFor(history.points, c.name, metric.name, environmentId)
+                const measured = traces.reduce((n, t) => n + t.points.length, 0)
+                return (
+                  <section className="perf-card" key={c.name}>
+                    <header className="perf-card-head">
+                      <h3 className="perf-card-title">{c.name}</h3>
+                      <span className="text-muted perf-card-count">
+                        {measured} commit{measured === 1 ? '' : 's'}
+                      </span>
+                    </header>
+                    <p className="text-muted perf-card-sub">
+                      {traces.length === 1
+                        ? traces[0].environment
+                        : `${traces.length} machines`}
+                    </p>
+                    <PerformanceChart
+                      metric={metric.name}
+                      unit={metric.unit}
+                      better={metric.better}
+                      traces={traces}
+                    />
+                  </section>
+                )
+              })}
+            </div>
+          ) : null}
+
+          {history.ignored.length > 0 ? (
+            <details className="perf-ignored">
+              <summary className="text-muted">
+                {history.ignored.length} artifact
+                {history.ignored.length === 1 ? '' : 's'} could not be read as a report
+              </summary>
+              <ul className="text-muted">
+                {history.ignored.map((ig) => (
+                  <li key={ig.artifactId}>
+                    <code>{ig.name}</code> — {ig.reason}{' '}
+                    <Link to={`/runs/${ig.runId}`}>run #{ig.runId}</Link>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+
+          <p className="text-muted perf-foot">
+            x: when the benchmark measured (the report&apos;s <code>date</code>) · y: the
+            metric · each marker is one commit; a commit measured more than
+            once is its median.
+          </p>
+        </>
+      ) : null}
     </div>
   )
 }

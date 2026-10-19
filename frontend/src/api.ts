@@ -958,3 +958,72 @@ export async function getDeepHealth(): Promise<DeepHealth> {
   return api<DeepHealth>('/api/health/deep')
 }
 
+
+// --- Performance history ---
+
+// PerformancePoint is one measurement, as the server aggregated it: the median
+// of every report of the same case and metric that one commit produced in one
+// environment. `at` is the time the benchmark itself recorded (the report's
+// date), not when the commit was pushed.
+export interface PerformancePoint {
+  case: string
+  metric: string
+  unit: string
+  better: 'higher' | 'lower'
+  environmentId: number
+  environment: string
+  at: string
+  commitId: number
+  sha: string
+  // How many measurements were folded into this point (retries of one commit).
+  samples: number
+  value: number
+}
+
+// PerformanceMetric names one metric of a case, with what a chart axis and a
+// selector need to label it.
+export interface PerformanceMetric {
+  name: string
+  unit: string
+  better: 'higher' | 'lower'
+}
+
+export interface PerformanceCase {
+  name: string
+  metrics: PerformanceMetric[]
+}
+
+// PerformanceIgnored is a file the server read and refused: it claims to be a
+// report (it has a `schema`) but is malformed, too large, or unreadable. The
+// page lists them, because a benchmark that ran and wrote a broken file is a
+// fact worth seeing.
+export interface PerformanceIgnored {
+  artifactId: number
+  runId: number
+  name: string
+  reason: string
+}
+
+// PerformanceHistory is GET /api/performance: every measurement in the window,
+// plus what the page builds its selectors from. `truncated` says older
+// measurements exist beyond the server's per-request limit.
+export interface PerformanceHistory {
+  since: string
+  generatedAt: string
+  truncated: boolean
+  environments: { id: number; name: string }[]
+  cases: PerformanceCase[]
+  points: PerformancePoint[]
+  ignored: PerformanceIgnored[]
+}
+
+// getPerformanceHistory fetches the benchmark history of the last `days` days,
+// optionally for one environment. It requires a session.
+export async function getPerformanceHistory(
+  days: number,
+  environmentId?: number,
+): Promise<PerformanceHistory> {
+  const q = new URLSearchParams({ days: String(days) })
+  if (environmentId !== undefined) q.set('environment', String(environmentId))
+  return api<PerformanceHistory>(`/api/performance?${q}`)
+}

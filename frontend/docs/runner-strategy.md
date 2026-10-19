@@ -215,7 +215,11 @@ root (test <sha> on <environment>)   # virtual: the whole pipeline
   verdict is the command's exit code alone — a benchmark reports a
   measurement, not a pass or a fail. This is the stage a window is
   usually for, since a benchmark on a shared machine measures the machine
-  as much as the code.
+  as much as the code. The runner still does not read those files; the
+  *Performance* page does, by way of the self-contained module in
+  `server/performance`: a file carrying a report `schema` (the format in
+  [Test matrix → Performance artifacts](#/docs/test-matrix)) is parsed
+  into measurements, and everything else is ignored.
 - **regression: <preset>**: the preset's command runs in the preset's
   working directory with `MD_CASE` exported, and the case's artifact files
   are collected onto the case's **own** run. Nothing is written to a parent
