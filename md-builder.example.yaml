@@ -12,10 +12,16 @@
 #   1. Every matrix entry's tags are matched against the registered test
 #      environments; one matching environment runs the entry.
 #   2. Each entry becomes a task graph:
-#        clone → build → unit (optional)
-#                       └→ regression: <preset>  (one sub-task per case)
+#        clone → build → unit            (optional)
+#                     ├→ performance     (optional, one benchmark)
+#                     └→ regression: <preset>  (one sub-task per case)
+#      Every stage after the build depends on it; unit, performance and
+#      the regression cases are independent of each other and run in
+#      parallel once the build passes.
 #      The build stage runs the build.command shell line — there is no
 #      built-in cmake support; write the invocation your project needs.
+#      A stage may carry a `window: "HH:MM-HH:MM"` (site timezone) and
+#      then starts only inside it; see the note before the matrix below.
 #   3. Every stage runs on the remote environment over SSH, inside the
 #      working directory you configure (workdir), with the environment
 #      setup script of that environment sourced first (module loads,
@@ -100,6 +106,10 @@ defaults:
 #   artifacts   (optional) artifact file(s) fetched back after the run —
 #                          a single path or a list; googletest XML/JSON by
 #                          default
+#   window      (optional) daily interval the case may START in, e.g.
+#                          "22:00-06:00" (wraps over midnight); read in
+#                          the site timezone. An entry-level
+#                          regression.window is the default for its cases
 #
 # A command may be several: a yaml list runs the entries in order and
 # stops at the first failure — the remaining commands are skipped and
@@ -129,6 +139,36 @@ presets:
     timeout: 600
     # No workdir: runs in the code root. No artifacts: pass/fail by exit
     # code plus the MD-BUILDER-SUMMARY line only.
+
+# ---------------------------------------------------------------------------
+# window (optional, per stage) — "run this stage at night"
+# ---------------------------------------------------------------------------
+# build, unit, performance and regression (and each regression case, via
+# its preset) may set:
+#
+#   window: "22:00-06:00"     # start only inside this interval
+#
+# The window restricts when the stage may START and nothing else:
+#   * outside it the node stays pending — it is not failed, skipped or
+#     counted as late; the scheduler simply does not claim it. Its
+#     dependents keep waiting for it, and the machines stay free for
+#     other work meanwhile;
+#   * a stage that has started is never interrupted by the window
+#     ending, so "22:00-06:00" means "starts between 22:00 and 06:00",
+#     not "runs only then";
+#   * the interval is read in the site timezone (Settings → Timezone),
+#     or the server's local zone when none is set;
+#   * the spelling is two times HH:MM around a dash, and it may wrap
+#     over midnight ("22:00-06:00"). Omit it (or write nothing) and the
+#     stage may start any time. A typo fails the dispatch with a parse
+#     error rather than silently dropping the restriction.
+#
+# Windows are stage properties, not trigger properties: every dispatch
+# goes through them, a webhook push and the manual form alike.
+#
+# The point of the feature is the load-sensitive benchmark: a performance
+# stage on a shared cluster should wait for the night while the unit
+# tests of the same commit run as soon as the build is done.
 
 # ---------------------------------------------------------------------------
 # matrix (required)
@@ -164,6 +204,19 @@ matrix:
       # workdir: "build"              # run the command in <code>/build
                                       # instead — e.g. for an out-of-source
                                       # cmake: `cmake "$MD_CODE_DIR" && ...`
+
+    # performance:
+    #   # Optional, and shaped exactly like unit: same command/workdir/
+    #   # timeout/artifacts fields, same place in the graph (right after
+    #   # the build). The difference is what its artifacts mean — a
+    #   # measurement rather than a verdict:
+    #   command: "python3 bench.py --json bench.json"
+    #   artifacts: "bench.json"
+    #   window: "22:00-06:00"         # a shared cluster is quiet at night
+    #   # The stage passes or fails on its exit code alone: nothing parses
+    #   # the files, they are stored as series artifacts (the Performance
+    #   # page is where their history is meant to be read). A benchmark
+    #   # that reports a slowdown by exiting non-zero still fails the run.
 
     unit:
       # Required. Runs in the code dir by default (workdir below moves
@@ -232,6 +285,23 @@ matrix:
     regression:
       # Every preset except heat (which needs a CPU-only reference run):
       disable: [heat]
+
+  # --- entry 4: a nightly benchmark on a machine of its own --------------
+  # A performance entry needs no unit test and no regression case: the
+  # benchmark IS the test. It runs after the build, and only inside its
+  # window — on a shared cluster that is the difference between measuring
+  # the code and measuring whatever else is running at the time.
+  - tags: [bench]
+    description: Nightly performance benchmark (windowed)
+
+    build:
+      command: 'cmake -B "$BUILD_ROOT" -DCMAKE_BUILD_TYPE=Release . && cmake --build "$BUILD_ROOT" -j8'
+
+    performance:
+      command: '"$BUILD_ROOT/bench" --json bench.json --repeats 5'
+      artifacts: "bench.json"        # stored as a series artifact
+      timeout: 7200
+      window: "22:00-06:00"          # starts between 22:00 and 06:00
 
 # ---------------------------------------------------------------------------
 # Notes on the environment the commands run in

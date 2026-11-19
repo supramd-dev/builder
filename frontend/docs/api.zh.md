@@ -3,13 +3,16 @@
 ## 测试仪表板
 
 仪表板(登录后的第一个页面)呈现 build.golang.org 风格的矩阵:**每个
-最近的 git 推送一行**(默认 10 行,`?commits=` 上限 50,最新在前),
-**每个测试环境一列**(站点级 —— 所有用户配置的环境;停用的置灰)。
+git 推送一行**,最新在前,**每个测试环境一列**(站点级 —— 所有用户
+配置的环境;停用的置灰)。历史是**分页**的:默认每页 200 行,矩阵上方
+的分页条负责翻页,并写明当前是哪一段("201–400 / 1,234")。每页条数
+可选(100 / 200 / 500 / 1000),对应 `?commits=`;`?page=` 是页码
+(从 1 开始)。请求超出末页时返回最后一页,而不是一个空矩阵。
 顶部页签提供四种视图:
 
 - **All(全量)** —— 完整管线矩阵(`GET /api/dashboard/full`):每个
-  单元格按展示顺序显示该 (commit, 环境) 下的三个阶段(构建、单元
-  测试、回归),各自带状态与详情链接。
+  单元格按展示顺序显示该 (commit, 环境) 下的四个阶段(构建、单元
+  测试、性能测试、回归),各自带状态与详情链接。
 - **Build(构建)** —— 代码在每个环境上能否编译(点击查看构建日志)。
 - **Unit tests(单元)/ Regression tests(回归)** —— 逐用例矩阵。
 
@@ -34,7 +37,7 @@
 让用例的历史在一次重新派发后仍然保留,而不是被最后一个上报的用例改写。
 
 每个 commit 行还带 **graph** 链接:该 commit 任务管线
-(clone → build → 单元/回归)的依赖图,GitHub Actions 风格 —— 点击阶段
+(clone → build → 单元/性能/回归)的依赖图,GitHub Actions 风格 —— 点击阶段
 节点跳转到运行详情或实时任务日志(见 [Runner 与任务](#/docs/runner-strategy))。
 
 当某个 commit **完全没有图**、原因是派发失败时 —— `md-builder.yaml`
@@ -65,6 +68,7 @@
         "1": [
           {"kind": "build", "runId": 7, "taskId": 43, "status": "passed"},
           {"kind": "unit", "taskId": 44, "status": "running"},
+          {"kind": "performance", "taskId": 46, "status": "pending"},
           {"kind": "regression", "taskId": 45, "status": "pending",
            "summary": "0/4 cases passed; 4 queued"}
         ]
@@ -128,7 +132,8 @@ ID,用于图链接;`triggers` 映射到该 root 的触发方式(0 = webhook,
 
 `GET /api/test-runs/{id}` 是**某个任务某一次尝试**的详情视图:运行本身
 —— `id`、`taskId`、`attempt`、`kind`(阶段类别,`build` / `unit` /
-`regression`;用例的运行沿用阶段类别,这样所有用例才落在同一回归列里)、
+`performance` / `regression`;用例的运行沿用阶段类别,这样所有用例才
+落在同一回归列里)、
 `status`、`summary`、各项计数、`durationMillis`、`environmentId`、
 `commitId`、`startedAt`、`finishedAt` —— 加上它所属任务的身份
 (`taskName`、`taskDescription`、`taskKey`、`taskKind`、`rootTaskId`
@@ -184,7 +189,10 @@ Artifact 归属产出它的那次尝试:单元测试运行的结果文件挂在�
 
 - `subTasks` —— 当前图的节点:`id`、`parentId`(嵌套关系,即界面绘制的
   那棵树)、`kind`、`nodeKey`(重新派发时用于匹配的稳定身份)、`name`、
-  `description`、`virtual`、`status`、`summary`、`error`、`dependsOn`
+  `description`、`virtual`、`status`、`summary`、`error`、`window`
+  (该阶段的调度时间段,站点时区下的 `"22:00-06:00"`;不返回 = 任意
+  时间 —— 时间段未开放时节点一直停留在 pending,见
+  [测试矩阵 → 调度时间段](#/docs/test-matrix))、`dependsOn`
   (调度 DAG,永远是列表,不会是 null)、各项计数、`attempts`、`runId`
   (最新一次尝试的运行,即详情链接;容器没有)以及时间戳。
 - `retiredTasks` —— 早期派发定义过、后来的派发丢弃掉的节点。它们被保留
@@ -259,6 +267,44 @@ Artifact 归属产出它的那次尝试:单元测试运行的结果文件挂在�
 因为它只能结束尚无结果的工作。某个 worker 正在执行的节点是如何被结束的,
 见 [Runner 策略](#/docs/runner-strategy)。
 
+## 性能历史
+
+`GET /api/performance` 读取 `performance:` 阶段存下的性能报告(JSON 格式见
+[测试矩阵 → 性能工件](#/docs/test-matrix)),返回 *Performance* 页面所画的
+历史数据。查询参数:
+
+- `days` —— 往前读多少天,`1`–`3650`(默认 `180`)。窗口以提交到达站点
+  的时间(`commits.pushed_at`)为准,而不是报告自身的 `date`。
+- `environment` —— 只看某一个环境的 id(默认:全部环境)。
+
+返回的点已经做完聚合:同一提交被测量多次时只有**一个**点,取**中位数**,
+`samples` 说明它代表多少次测量。响应形如:
+
+```json
+{
+  "since": "2026-04-19T00:00:00Z",
+  "generatedAt": "2026-10-16T02:00:00Z",
+  "truncated": false,
+  "environments": [{"id": 1, "name": "cpu-node-1"}],
+  "cases": [{"name": "nvt-1000",
+             "metrics": [{"name": "throughput", "unit": "step/s", "better": "higher"}]}],
+  "points": [{"case": "nvt-1000", "metric": "throughput",
+              "unit": "step/s", "better": "higher",
+              "environmentId": 1, "environment": "cpu-node-1",
+              "at": "2026-09-01T00:12:44Z", "commitId": 12, "sha": "abc123…",
+              "samples": 3, "value": 1523.4}],
+  "ignored": [{"artifactId": 8, "runId": 43, "name": "perf.json",
+               "reason": "date is required"}]
+}
+```
+
+`at` 是报告里的 `date`(测量的时刻),不是提交推送的时间。`truncated` 表示
+单次请求撞到了上限(2000 个工件,保留最新的)。`ignored` 列出那些自称是
+报告、却读不成的工件(格式错误、`schema` 版本不认识、超过 1 MiB、或从对象
+存储读失败),并给出原因;没有 `schema` 键的 series 文件不算报告,会被静默
+跳过。站点配置了代码仓库时,只看到该仓库的历史。`days` / `environment`
+非法时返回 `400`。
+
 ## 脚本执行(交互式)
 
 除自动任务图外,环境还接受来自 **Run command** 页面的临时命令和脚本:
@@ -294,14 +340,18 @@ POST /api/jobs/manual
   "buildCommand": "cmake . && cmake --build . -j8",   // 可选;留空 = 无构建阶段
   "unitCommand": "ctest -L unit",                     // 可选:阶段跳过
   "unitArtifacts": "build/test_detail.xml",           // 可选:工件文件
+  "performanceCommand": "python3 bench.py",           // 可选:阶段跳过
+  "performanceArtifacts": "bench.json",               // 可选:series 数据
   "regressionCommand": "python3 run.py",              // 可选:阶段跳过
   "regressionArtifacts": "reg/results.json",          // 可选:工件文件
   "environmentIds": [1, 2]
 }
 ```
 
-`unitArtifacts` / `regressionArtifacts` 接受单个路径或路径列表 —— 一次
-运行可以产出多个工件文件。
+`unitArtifacts` / `performanceArtifacts` / `regressionArtifacts` 接受
+单个路径或路径列表 —— 一次运行可以产出多个工件文件。
+`performanceArtifacts` 的文件存为 series 数据(不解析计数);表单直接
+填写原始命令,因此这些节点不带调度时间段。
 
 - 至少需要一个阶段命令和一个环境。
 - ref 会用站点的 Project Access Token 解析为具体提交(远程 ref 列举,
@@ -426,12 +476,13 @@ POST /api/setup
 | GET    | `/api/site-config`              | 站点仓库配置(`codeRepo`、`accessTokenSet`、`timezone`、`commitOverlapPolicy`、`webhookToken` 仅管理员) |
 | PUT    | `/api/site-config`              | 更新站点配置(access token:留空保留,`clearAccessToken` 删除;`timezone`:IANA 名称,空 = 浏览器本地;`commitOverlapPolicy`:`requeue` \| `fork` \| `fork_cancel`,任意已登录用户;`gitlab*` 字段仅管理员) |
 | POST   | `/api/site-config/webhook-token`| 轮换 webhook 密钥并返回配置(仅管理员) |
-| GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build` |
-| GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/回归阶段,以及任务图链接 |
+| GET    | `/api/dashboard/{kind}`         | 测试结果矩阵,`kind` = `regression` \| `unit` \| `build`;分页参数 `?page=`(从 1 开始)与 `?commits=`(每页条数,1–1000,默认 200) |
+| GET    | `/api/dashboard/full`           | 全量管线矩阵:每个 commit 与环境下的构建/单元/性能/回归阶段,以及任务图链接;分页方式相同 |
 | POST   | `/api/test-runs`                | 关闭任务的当前尝试:按 `taskId` 报告结果(任务所在环境的 owner 或管理员) |
 | GET    | `/api/test-runs/{id}`           | 某个任务的某次尝试:计数、任务身份、全部尝试、artifact |
 | GET    | `/api/test-runs/{id}/artifacts/zip` | 该次尝试自己的工件打成 zip(没有工件时 `404`) |
 | GET    | `/api/test-artifacts/{id}`      | 单个存储 artifact 的原始内容                 |
+| GET    | `/api/performance?days=<n>&environment=<id>` | 性能历史:窗口内所有性能报告,按 case、指标、环境、提交聚合 |
 | GET    | `/api/test-artifacts/{id}/download` | 单个 artifact 以文件下载               |
 | GET    | `/api/test-artifacts/{id}/raw`  | 单个 artifact 用于查看:HTML 作为沙箱页面,文本按文本 |
 | POST   | `/api/jobs`                     | 手动重新派发某提交的任务图(webhook 方式,读取 YAML) |

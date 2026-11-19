@@ -268,6 +268,101 @@ func TestListCommits(t *testing.T) {
 	}
 }
 
+// TestListCommitsPage covers the paging the dashboard browses with: the same
+// newest-first order as ListCommits, an offset that continues it, and a count
+// to size the pager. Two rows share a push time, so the tie-break by id is
+// what keeps consecutive pages from overlapping.
+func TestListCommitsPage(t *testing.T) {
+	s := newTestStore(t)
+
+	commits := []*Commit{
+		{Repo: "group/code", SHA: "c1", PushedAt: mustTime("2026-09-01T10:00:00Z")},
+		{Repo: "group/code", SHA: "c2", PushedAt: mustTime("2026-09-03T10:00:00Z")},
+		{Repo: "group/code", SHA: "c3", PushedAt: mustTime("2026-09-03T10:00:00Z")}, // same second as c2
+		{Repo: "group/code", SHA: "c4", PushedAt: mustTime("2026-09-02T10:00:00Z")},
+		{Repo: "group/other", SHA: "o1", PushedAt: mustTime("2026-09-05T10:00:00Z")},
+	}
+	for _, c := range commits {
+		if err := s.CreateCommit(c); err != nil {
+			t.Fatalf("create %s: %v", c.SHA, err)
+		}
+	}
+
+	if n, err := s.CountCommits(""); err != nil || n != 5 {
+		t.Fatalf("count all: %d, %v; want 5", n, err)
+	}
+	if n, err := s.CountCommits("group/code"); err != nil || n != 4 {
+		t.Fatalf("count repo: %d, %v; want 4", n, err)
+	}
+
+	// Two pages of two, walked in order: newest first, no gap, no repeat.
+	first, err := s.ListCommitsPage("group/code", 2, 0)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	second, err := s.ListCommitsPage("group/code", 2, 2)
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if got := shas(first); len(got) != 2 || got[0] != "c3" || got[1] != "c2" {
+		t.Fatalf("page 1 = %v, want [c3 c2] (newest first, id breaks the push-time tie)", got)
+	}
+	if got := shas(second); len(got) != 2 || got[0] != "c4" || got[1] != "c1" {
+		t.Fatalf("page 2 = %v, want [c4 c1]", got)
+	}
+
+	// Past the end: an empty page, not an error (the caller clamps).
+	past, err := s.ListCommitsPage("group/code", 2, 99)
+	if err != nil {
+		t.Fatalf("page past the end: %v", err)
+	}
+	if len(past) != 0 {
+		t.Fatalf("expected an empty page, got %v", shas(past))
+	}
+}
+
+// TestSupersededCommitIDs covers what the matrix dims: every row of a revision
+// but its newest one, including a pair the page order would never show
+// together (the client asks about ids, not about a page).
+func TestSupersededCommitIDs(t *testing.T) {
+	s := newTestStore(t)
+
+	// The same SHA pushed twice; the second row (later push) supersedes the
+	// first. And the same SHA in another repository, which does not.
+	first := &Commit{Repo: "group/code", SHA: "dup", PushedAt: mustTime("2026-09-01T10:00:00Z")}
+	second := &Commit{Repo: "group/code", SHA: "dup", PushedAt: mustTime("2026-09-02T10:00:00Z")}
+	alone := &Commit{Repo: "group/code", SHA: "solo", PushedAt: mustTime("2026-09-03T10:00:00Z")}
+	other := &Commit{Repo: "group/other", SHA: "dup", PushedAt: mustTime("2026-09-04T10:00:00Z")}
+	for _, c := range []*Commit{first, second, alone, other} {
+		if err := s.CreateCommit(c); err != nil {
+			t.Fatalf("create %s/%s: %v", c.Repo, c.SHA, err)
+		}
+	}
+
+	got, err := s.SupersededCommitIDs([]int64{first.ID, second.ID, alone.ID, other.ID})
+	if err != nil {
+		t.Fatalf("superseded: %v", err)
+	}
+	if !got[first.ID] {
+		t.Errorf("the older row of the same revision must be superseded")
+	}
+	for _, c := range []*Commit{second, alone, other} {
+		if got[c.ID] {
+			t.Errorf("%s/%s must not be superseded", c.Repo, c.SHA)
+		}
+	}
+
+	// A single id, and none at all: the query is skipped when the page is empty.
+	one, err := s.SupersededCommitIDs([]int64{first.ID})
+	if err != nil || !one[first.ID] {
+		t.Fatalf("single id: %v, %v", one, err)
+	}
+	none, err := s.SupersededCommitIDs(nil)
+	if err != nil || len(none) != 0 {
+		t.Fatalf("no ids: %v, %v", none, err)
+	}
+}
+
 func TestRepoPath(t *testing.T) {
 	cases := []struct {
 		in, want string

@@ -35,8 +35,14 @@ type SiteConfig struct {
 
 	// Timezone is the IANA time zone name every timestamp is displayed in
 	// (e.g. "Asia/Shanghai"). Empty means "the viewer's browser local
-	// zone". The name is validated against the time/tzdata database; it is
-	// display-only — server internals always work in UTC.
+	// zone". The name is validated against the time/tzdata database.
+	//
+	// It is also the zone a stage's scheduling window is read in (see
+	// store.ParseWindow): an operator who reads "22:00-06:00" in the UI and
+	// sees 22:00 on the dashboard is looking at the same hour the scheduler
+	// uses. With no zone configured, windows are read in the server's own
+	// local time. Rows themselves are still stored in UTC — the zone only
+	// decides which local hour a window names.
 	Timezone string
 
 	// SecretToken is a site-wide secret exported to every stage command as

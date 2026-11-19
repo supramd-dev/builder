@@ -1380,3 +1380,189 @@ func TestManualTriggerPartialDispatch(t *testing.T) {
 		t.Fatalf("root = %+v, want a manual graph on environment %d", roots[0], envOK.ID)
 	}
 }
+
+// performanceStageYAML is a graph whose benchmark is held to the night: the
+// node the runner dispatches must carry that window to the API.
+const performanceStageYAML = `version: 3
+presets:
+  main:
+    command: "python3 run.py"
+defaults:
+  build:
+    command: "cmake . && cmake --build ."
+matrix:
+  - tags: [cpu]
+    unit:
+      command: "ctest -L unit"
+    performance:
+      command: "python3 bench.py"
+      window: "22:00-06:00"
+    regression:
+      use: [main]
+`
+
+// TestWebhookDispatchPerformanceStage: a yaml performance stanza dispatches a
+// performance node after the build, and the task detail and the dashboard
+// matrix both carry the stage and its scheduling window.
+func TestWebhookDispatchPerformanceStage(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, performanceStageYAML)
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	seedDispatchEnv(t, s, "cpu-perf", "cpu", true)
+	seedUser(t, s, "perfuser", "perf@example.com", "pw")
+	cookie := loginAndGetCookie(t, mux, "perfuser", "pw")
+
+	rec := postWebhook(t, mux, s, pushBody("group/code", "perf0001"), "X-Gitlab-Event", "Push Hook")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhook: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	roots, err := s.ListRootTasks(10)
+	if err != nil || len(roots) != 1 {
+		t.Fatalf("want one root, got %v (%v)", roots, err)
+	}
+	root := roots[0]
+
+	// The dispatched node list carries the performance stage, its window, and
+	// its dependency on the build.
+	authed := func(target string) *httptest.ResponseRecorder {
+		r := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(r, req)
+		return r
+	}
+	rec = authed(fmt.Sprintf("/api/tasks/%d", root.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("task detail: %d %s", rec.Code, rec.Body.String())
+	}
+	var detail taskDetailJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	byKind := map[string]subTaskJSON{}
+	for _, sub := range detail.SubTasks {
+		byKind[sub.Kind] = sub
+	}
+	perf, ok := byKind[store.TaskKindPerformance]
+	if !ok {
+		t.Fatalf("no performance node in the graph: %+v", detail.SubTasks)
+	}
+	if perf.Name != "performance tests" || perf.Window != "22:00-06:00" {
+		t.Errorf("performance node: %+v", perf)
+	}
+	build := byKind[store.TaskKindBuild]
+	if len(perf.DependsOn) != 1 || perf.DependsOn[0] != build.ID {
+		t.Errorf("performance should depend on build %d: %v", build.ID, perf.DependsOn)
+	}
+	// The window is not decoration: an unwindowed stage reports none.
+	if byKind[store.TaskKindUnit].Window != "" {
+		t.Errorf("the unit stage has no window: %+v", byKind[store.TaskKindUnit])
+	}
+
+	// The full dashboard matrix has a performance column per environment and
+	// shows the queued node's live state in it.
+	rec = authed("/api/dashboard/full")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full dashboard: %d %s", rec.Code, rec.Body.String())
+	}
+	var dash fullDashboardJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &dash); err != nil {
+		t.Fatal(err)
+	}
+	if len(dash.Rows) != 1 {
+		t.Fatalf("want one commit row, got %d", len(dash.Rows))
+	}
+	env, err := envByName(t, s, "cpu-perf"), error(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stages := dash.Rows[0].Stages[env.ID]
+	wantKinds := []string{store.RunKindBuild, store.RunKindUnit, store.RunKindPerformance, store.RunKindRegression}
+	if len(stages) != len(wantKinds) {
+		t.Fatalf("want %d stage cells, got %+v", len(wantKinds), stages)
+	}
+	for i, kind := range wantKinds {
+		if stages[i].Kind != kind {
+			t.Errorf("stage %d: want kind %q, got %q", i, kind, stages[i].Kind)
+		}
+	}
+	if stages[2].TaskID != perf.ID || stages[2].Status != store.StatusPending {
+		t.Errorf("the performance cell should show the queued node: %+v", stages[2])
+	}
+}
+
+// TestManualTriggerPerformanceCommand: the manual dispatch form has a
+// performance command box of its own, and it is a stage like any other.
+func TestManualTriggerPerformanceCommand(t *testing.T) {
+	apiServer, s := newDispatchTestServer(t, dispatchYAML)
+	if err := s.SaveSiteConfig(&store.SiteConfig{ID: 1,
+		CodeRepo: "https://gitlab.com/group/code"}); err != nil {
+		t.Fatal(err)
+	}
+	user := seedUser(t, s, "perfmanual", "perfmanual@example.com", "pw")
+	env := seedOwnedDispatchEnv(t, s, user, "cpu-perfmanual", "cpu", true)
+	apiServer.Runner.ResolveRef = func(ctx context.Context, repoURL, ref string, creds *runner.GitCredentials) (string, error) {
+		return "abc123abc123abc123abc123abc123abc123abc1", nil
+	}
+	mux := http.NewServeMux()
+	apiServer.Register(mux)
+	cookie := loginAndGetCookie(t, mux, "perfmanual", "pw")
+	authed := func(method, target, body string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// A performance command alone is enough to dispatch: it is a stage.
+	rec := authed(http.MethodPost, "/api/jobs/manual", fmt.Sprintf(`{
+		"performanceCommand": "python3 bench.py",
+		"performanceArtifacts": "bench.json",
+		"environmentIds": [%d]
+	}`, env.ID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("performance-only manual trigger: expected 200, got %d, body %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Roots []manualTestRoot `json:"roots"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Roots) != 1 {
+		t.Fatalf("want one root, got %d", len(res.Roots))
+	}
+	subs, err := s.ListActiveNodes(res.Roots[0].TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var perf *store.Task
+	for i := range subs {
+		if subs[i].Kind == store.TaskKindPerformance {
+			perf = &subs[i]
+		}
+		if subs[i].Kind == store.TaskKindUnit {
+			t.Errorf("no unit stage was asked for: %+v", subs[i])
+		}
+	}
+	if perf == nil {
+		t.Fatalf("no performance node dispatched: %+v", subs)
+	}
+	var sc runner.StageConfig
+	if err := json.Unmarshal([]byte(perf.Config), &sc); err != nil {
+		t.Fatal(err)
+	}
+	if sc.Command.String() != "python3 bench.py" || len(sc.Artifacts) != 1 || sc.Artifacts[0] != "bench.json" {
+		t.Errorf("performance snapshot: %+v", sc)
+	}
+	// The manual form types raw commands, so the node has no window: it is
+	// schedulable as soon as its clone and build are done.
+	if perf.Window != "" {
+		t.Errorf("a manual performance node has no window: %q", perf.Window)
+	}
+}

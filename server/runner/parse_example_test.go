@@ -15,8 +15,8 @@ func TestParseExampleYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("example must parse: %v", err)
 	}
-	if len(entries) != 3 {
-		t.Fatalf("expected 3 entries, got %d", len(entries))
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(entries))
 	}
 	// Entry 1: heat+poisson, unit ctest, gcc env, in-source cmake build.
 	e1 := entries[0]
@@ -83,5 +83,24 @@ func TestParseExampleYAML(t *testing.T) {
 	}
 	if !strings.Contains(e3.Unit.Command.String(), "$BUILD_ROOT/unit_tests") {
 		t.Errorf("entry 3 unit should use the inherited variable: %+v", e3.Unit)
+	}
+
+	// Entry 4: the nightly benchmark — a performance stage, no unit, no
+	// regression, and the window that keeps it off the machine by day.
+	e4 := entries[3]
+	if e4.Unit != nil || len(e4.Regression) != 0 {
+		t.Errorf("entry 4 is benchmark-only: %+v", e4)
+	}
+	if e4.Performance == nil {
+		t.Fatal("entry 4 has no performance stage")
+	}
+	if !strings.Contains(e4.Performance.Command.String(), "$BUILD_ROOT/bench") {
+		t.Errorf("entry 4 performance command: %q", e4.Performance.Command)
+	}
+	if e4.Performance.Window != "22:00-06:00" || e4.Performance.Timeout != 7200 {
+		t.Errorf("entry 4 performance window/timeout: %+v", e4.Performance)
+	}
+	if e4.Build.Window != "" {
+		t.Errorf("entry 4 build has no window of its own: %q", e4.Build.Window)
 	}
 }

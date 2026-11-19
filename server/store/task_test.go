@@ -1527,7 +1527,10 @@ func TestTaskKindAndStatusPredicates(t *testing.T) {
 			t.Errorf("%q is a known kind", kind)
 		}
 	}
-	for _, kind := range []string{TaskKindClone, TaskKindBuild, TaskKindUnit, TaskKindRegressionCase} {
+	for _, kind := range []string{TaskKindClone, TaskKindBuild, TaskKindUnit, TaskKindPerformance, TaskKindRegressionCase} {
+		if !ValidateTaskKind(kind) {
+			t.Errorf("%q is a known kind", kind)
+		}
 		if TaskKindVirtual(kind) {
 			t.Errorf("%q executes and is not a container", kind)
 		}
@@ -1572,6 +1575,7 @@ func TestTaskKindAndStatusPredicates(t *testing.T) {
 		{TaskKindClone, RunKindClone},
 		{TaskKindBuild, RunKindBuild},
 		{TaskKindUnit, RunKindUnit},
+		{TaskKindPerformance, RunKindPerformance},
 		{TaskKindRegressionCase, RunKindRegression},
 	}
 	for _, k := range kinds {
@@ -1588,6 +1592,7 @@ func TestTaskKindAndStatusPredicates(t *testing.T) {
 
 	labels := map[string]string{
 		TaskKindClone: "clone", TaskKindBuild: "build", TaskKindUnit: "unit test",
+		TaskKindPerformance:     "performance test",
 		TaskKindRegressionStage: "regression", TaskKindRegressionCase: "regression case",
 	}
 	for kind, want := range labels {

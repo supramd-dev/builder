@@ -81,7 +81,8 @@ Each environment may carry a bash **env setup script** (edited in the
 environment form). On dispatch it is written into the task dir as
 `md-builder-env-<hash>.sh` (the hash is derived from the content, so
 editing the script changes the file name) and **sourced by every stage
-script** — build, unit test and each regression case — before the stage
+script** — build, unit test, performance test and each regression case —
+before the stage
 command runs:
 
 ```bash

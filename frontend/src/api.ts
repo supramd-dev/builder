@@ -467,6 +467,12 @@ export interface ManualTestInput {
   buildCommand?: string
   unitCommand?: string
   unitArtifacts?: string | string[]
+  // The performance stage: a benchmark command and the measurement files it
+  // leaves behind (stored as series artifacts). The manual form types raw
+  // commands, so these nodes carry no scheduling window — they start as soon
+  // as their clone and build are done.
+  performanceCommand?: string
+  performanceArtifacts?: string | string[]
   regressionCommand?: string
   regressionArtifacts?: string | string[]
   environmentIds: number[]
@@ -516,30 +522,49 @@ export interface DashboardRow {
   cells: (RunCell | null)[]
 }
 
-export interface Dashboard {
+// Dashboard paging: the matrix shows one page of the commit history (newest
+// first). page is the page actually served — the server clamps a page past the
+// end to the last one — pageSize the page size used, and total how many commits
+// the repo filter matches, so the pager can say "1–200 of 1234".
+export interface DashboardPage {
+  page: number
+  pageSize: number
+  total: number
+}
+
+export interface Dashboard extends DashboardPage {
   kind: DashboardKind
   repoFilter?: string
   // Web URL of the filtered repository, when derivable — the header repo
   // links there.
   repoUrl?: string
   environments: DashboardEnvironment[]
-  rows: DashboardRow[] // one row per commit, newest first
+  rows: DashboardRow[] // one page of commits, newest first
 }
+
+// DEFAULT_DASHBOARD_PAGE_SIZE is the server's default page size too: asking
+// for this many rows is what "the first page" means.
+export const DEFAULT_DASHBOARD_PAGE_SIZE = 200
+
+// MAX_DASHBOARD_PAGE_SIZE mirrors the ?commits= cap the API enforces.
+export const MAX_DASHBOARD_PAGE_SIZE = 1000
 
 export async function getDashboard(
   kind: DashboardKind,
-  commits = 10,
+  commits = DEFAULT_DASHBOARD_PAGE_SIZE,
+  page = 1,
 ): Promise<Dashboard> {
   // The full kind has its own wire shape (see getFullDashboard).
-  return api<Dashboard>(`/api/dashboard/${kind}?commits=${commits}`)
+  const q = new URLSearchParams({ commits: String(commits), page: String(page) })
+  return api<Dashboard>(`/api/dashboard/${kind}?${q}`)
 }
 
 // --- Full dashboard (all stages per commit × environment) ---
 
 // FullStage is one stage cell of the full matrix: a recorded run
-// (build/unit/regression) or a live task state (runId 0).
+// (build/unit/performance/regression) or a live task state (runId 0).
 export interface FullStage {
-  kind: 'build' | 'unit' | 'regression'
+  kind: 'build' | 'unit' | 'performance' | 'regression'
   runId: number
   taskId?: number
   status: string
@@ -551,7 +576,8 @@ export interface FullStage {
 
 export interface FullRow {
   commit: DashboardCommit
-  // environment id → stages in display order (build, unit, regression)
+  // environment id → stages in display order (build, unit, performance,
+  // regression)
   stages: Record<string, FullStage[]>
   // environment id → root task id (the dependency graph link)
   taskIds: Record<string, number>
@@ -559,7 +585,7 @@ export interface FullRow {
   triggers?: Record<string, number>
 }
 
-export interface FullDashboard {
+export interface FullDashboard extends DashboardPage {
   repoFilter?: string
   repoUrl?: string
   environments: DashboardEnvironment[]
@@ -567,9 +593,11 @@ export interface FullDashboard {
 }
 
 export async function getFullDashboard(
-  commits = 10,
+  commits = DEFAULT_DASHBOARD_PAGE_SIZE,
+  page = 1,
 ): Promise<FullDashboard> {
-  return api<FullDashboard>(`/api/dashboard/full?commits=${commits}`)
+  const q = new URLSearchParams({ commits: String(commits), page: String(page) })
+  return api<FullDashboard>(`/api/dashboard/full?${q}`)
 }
 
 // TestArtifactRef references one stored result/log/series/file artifact of a
@@ -717,13 +745,14 @@ export function isTerminalStatus(status: string): boolean {
 }
 
 // TaskKind is a node's role in the graph: the virtual root per (commit,
-// environment), the three real stages, the virtual regression container and
-// the real case tasks under it.
+// environment), the real stages (clone, build, unit, performance), the virtual
+// regression container and the real case tasks under it.
 export type TaskKind =
   | 'root'
   | 'clone'
   | 'build'
   | 'unit'
+  | 'performance'
   | 'regression'
   | 'regression_case'
 
@@ -737,7 +766,7 @@ export interface TaskNode {
   parentId?: number
   kind: TaskKind
   // nodeKey is the node's identity inside its graph, stable across
-  // dispatches: "build", "unit", "regression:<case>".
+  // dispatches: "build", "unit", "performance", "regression:<case>".
   nodeKey: string
   name: string
   description?: string
@@ -748,6 +777,10 @@ export interface TaskNode {
   status: TaskStatus
   summary?: string
   error?: string
+  // window is the stage's daily schedulable interval ("22:00-06:00"), in the
+  // site timezone; absent = the stage may start any time. A pending node with
+  // a window may simply be waiting for tonight.
+  window?: string
   dependsOn: number[]
   total: number
   passed: number
@@ -796,6 +829,8 @@ export interface TaskDetail {
   status: TaskStatus
   summary?: string
   error?: string
+  // window: this node's scheduling window (absent = any time).
+  window?: string
   total: number
   passed: number
   failed: number
@@ -944,3 +979,72 @@ export async function getDeepHealth(): Promise<DeepHealth> {
   return api<DeepHealth>('/api/health/deep')
 }
 
+
+// --- Performance history ---
+
+// PerformancePoint is one measurement, as the server aggregated it: the median
+// of every report of the same case and metric that one commit produced in one
+// environment. `at` is the time the benchmark itself recorded (the report's
+// date), not when the commit was pushed.
+export interface PerformancePoint {
+  case: string
+  metric: string
+  unit: string
+  better: 'higher' | 'lower'
+  environmentId: number
+  environment: string
+  at: string
+  commitId: number
+  sha: string
+  // How many measurements were folded into this point (retries of one commit).
+  samples: number
+  value: number
+}
+
+// PerformanceMetric names one metric of a case, with what a chart axis and a
+// selector need to label it.
+export interface PerformanceMetric {
+  name: string
+  unit: string
+  better: 'higher' | 'lower'
+}
+
+export interface PerformanceCase {
+  name: string
+  metrics: PerformanceMetric[]
+}
+
+// PerformanceIgnored is a file the server read and refused: it claims to be a
+// report (it has a `schema`) but is malformed, too large, or unreadable. The
+// page lists them, because a benchmark that ran and wrote a broken file is a
+// fact worth seeing.
+export interface PerformanceIgnored {
+  artifactId: number
+  runId: number
+  name: string
+  reason: string
+}
+
+// PerformanceHistory is GET /api/performance: every measurement in the window,
+// plus what the page builds its selectors from. `truncated` says older
+// measurements exist beyond the server's per-request limit.
+export interface PerformanceHistory {
+  since: string
+  generatedAt: string
+  truncated: boolean
+  environments: { id: number; name: string }[]
+  cases: PerformanceCase[]
+  points: PerformancePoint[]
+  ignored: PerformanceIgnored[]
+}
+
+// getPerformanceHistory fetches the benchmark history of the last `days` days,
+// optionally for one environment. It requires a session.
+export async function getPerformanceHistory(
+  days: number,
+  environmentId?: number,
+): Promise<PerformanceHistory> {
+  const q = new URLSearchParams({ days: String(days) })
+  if (environmentId !== undefined) q.set('environment', String(environmentId))
+  return api<PerformanceHistory>(`/api/performance?${q}`)
+}

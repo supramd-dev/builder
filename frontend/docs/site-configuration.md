@@ -146,9 +146,17 @@ how the site dispatches, not who may do what.
 The **Settings → Display** tab sets the timezone every timestamp is
 displayed in (dashboards, task and run pages): pick an IANA zone such as
 `Asia/Shanghai`, or leave it on *Browser local* so each viewer sees times
-in their own zone. The setting is display-only — stored data and logs keep
-their original timestamps, and the browser caches the choice locally so
-pages render immediately after a reload.
+in their own zone. Stored data and logs keep their original timestamps, and
+the browser caches the choice locally so pages render immediately after a
+reload.
+
+The one thing the setting decides rather than merely formats is **when a
+windowed stage may start**: the scheduling window a `md-builder.yaml` stage
+declares (e.g. `performance: { window: "22:00-06:00" }`) is read on this
+clock, so "at night" means night where the machines are. With no zone set
+the server's local zone is used instead — a site that leaves it on *Browser
+local* while running its server in UTC gets windows read in UTC. See
+[Test matrix → Scheduling windows](#/docs/test-matrix).
 
 ## GitLab sign-in
 

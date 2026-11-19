@@ -175,15 +175,69 @@ func (s *Store) GetCommitByID(id int64) (*Commit, error) {
 // ListCommits returns up to limit most-recent commits for repo (or for all
 // repositories when repo is empty), newest first.
 func (s *Store) ListCommits(repo string, limit int) ([]Commit, error) {
+	return s.ListCommitsPage(repo, limit, 0)
+}
+
+// ListCommitsPage returns one page of the commit history for repo (or for all
+// repositories when repo is empty), newest first — the same order ListCommits
+// uses, with an offset, so a client can walk the whole history instead of only
+// its newest slice. The order is total (pushed_at, then id), so consecutive
+// pages never overlap or skip a row.
+func (s *Store) ListCommitsPage(repo string, limit, offset int) ([]Commit, error) {
 	q := s.DB
 	if repo != "" {
 		q = q.Where("repo = ?", repo)
 	}
 	var commits []Commit
-	if err := q.Order("pushed_at DESC, id DESC").Limit(limit).Find(&commits).Error; err != nil {
+	if err := q.Order("pushed_at DESC, id DESC").Limit(limit).Offset(offset).Find(&commits).Error; err != nil {
 		return nil, err
 	}
 	return commits, nil
+}
+
+// CountCommits is how many commit rows repo has (all repositories when repo is
+// empty): the number a paged client needs to say which slice of the history it
+// is showing, and to know where the last page is.
+func (s *Store) CountCommits(repo string) (int64, error) {
+	q := s.DB.Model(&Commit{})
+	if repo != "" {
+		q = q.Where("repo = ?", repo)
+	}
+	var n int64
+	if err := q.Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// SupersededCommitIDs returns the subset of ids that have a newer row of the
+// same revision (same repo and sha): a manual re-dispatch and the fork
+// policies record one row per dispatch, and every row but the newest is
+// history. The question is answered against the whole table rather than
+// against the rows a client happens to be looking at, so a duplicate pair
+// split by a page boundary is still labeled.
+func (s *Store) SupersededCommitIDs(ids []int64) (map[int64]bool, error) {
+	superseded := map[int64]bool{}
+	if len(ids) == 0 {
+		return superseded, nil
+	}
+	var rows []struct{ ID int64 }
+	// "Newer" is the same comparison the page order uses: later push time
+	// first, id as the tie-break (two rows recorded in the same second).
+	err := s.DB.Model(&Commit{}).
+		Select("commits.id").
+		Joins("JOIN commits AS newer ON newer.repo = commits.repo AND newer.sha = commits.sha"+
+			" AND (newer.pushed_at > commits.pushed_at"+
+			" OR (newer.pushed_at = commits.pushed_at AND newer.id > commits.id))").
+		Where("commits.id IN ?", ids).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		superseded[r.ID] = true
+	}
+	return superseded, nil
 }
 
 // RepoPath extracts the "group/project" path from a repository location as

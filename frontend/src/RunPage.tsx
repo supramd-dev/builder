@@ -437,8 +437,8 @@ function YAMLTriggerSection({
 }
 
 // ManualTestTab dispatches a user-configured test: one repository (default:
-// the site config's code repository), an optional ref and the three stage
-// commands, run as task graphs (clone → build → unit → regression) by the
+// the site config's code repository), an optional ref and the stage commands,
+// run as task graphs (clone → build → unit → performance → regression) by the
 // scheduler on the selected environments.
 function ManualTestTab({ onError }: { onError: (message: string) => void }) {
   const navigate = useNavigate()
@@ -450,6 +450,8 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
   const [buildCommand, setBuildCommand] = useState('')
   const [unitCommand, setUnitCommand] = useState('')
   const [unitArtifacts, setUnitArtifacts] = useState('')
+  const [performanceCommand, setPerformanceCommand] = useState('')
+  const [performanceArtifacts, setPerformanceArtifacts] = useState('')
   const [regressionCommand, setRegressionCommand] = useState('')
   const [regressionArtifacts, setRegressionArtifacts] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -506,6 +508,8 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
         buildCommand,
         unitCommand,
         unitArtifacts: splitPaths(unitArtifacts),
+        performanceCommand,
+        performanceArtifacts: splitPaths(performanceArtifacts),
         regressionCommand,
         regressionArtifacts: splitPaths(regressionArtifacts),
         environmentIds: [...selected],
@@ -535,7 +539,8 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
       <p className="text-muted">
         Or dispatch a test of one repository on the selected environments with
         custom stage commands: the task graph (clone → build → unit test →
-        regression test) is queued and run by the scheduler. It shows up on
+        performance test → regression test) is queued and run by the
+        scheduler. It shows up on
         the dashboard marked <code>manual</code>.{' '}
         {repo ? (
           <>
@@ -631,6 +636,29 @@ function ManualTestTab({ onError }: { onError: (message: string) => void }) {
                   value={unitArtifacts}
                   onChange={(e) => setUnitArtifacts(e.target.value)}
                   placeholder="artifact file(s), e.g. build/test_detail.xml, build/extra.json (optional)"
+                  style={{ marginTop: '0.375rem' }}
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="manual-perf">Performance test command</label>
+                <textarea
+                  id="manual-perf"
+                  className="form-control"
+                  rows={2}
+                  value={performanceCommand}
+                  onChange={(e) => setPerformanceCommand(e.target.value)}
+                  placeholder="python3 bench.py --json bench.json"
+                  style={{
+                    fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
+                    fontSize: '0.875rem',
+                  }}
+                />
+                <input
+                  id="manual-perf-artifacts"
+                  type="text"
+                  value={performanceArtifacts}
+                  onChange={(e) => setPerformanceArtifacts(e.target.value)}
+                  placeholder="measurement file(s), e.g. bench.json (optional, stored as series data)"
                   style={{ marginTop: '0.375rem' }}
                 />
               </div>

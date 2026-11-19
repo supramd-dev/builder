@@ -34,6 +34,11 @@ type EnvConfig struct {
 	Workdir     string        `yaml:"workdir,omitempty" json:"workdir,omitempty"`         // relative to the code dir; empty = code dir
 	Timeout     int           `yaml:"timeout,omitempty" json:"timeout,omitempty"`         // seconds; 0 = use default
 	Artifacts   ArtifactPaths `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`     // artifact files (gtest XML/JSON) the command produces and the runner fetches back
+	// Window is the daily range in which this stage may START, "HH:MM-HH:MM"
+	// (see store.ParseWindow). Empty = any time. A stage outside its window
+	// waits, still pending, until the window opens — the window gates the
+	// start, never a stage already running. Read in the site timezone.
+	Window string `yaml:"window,omitempty" json:"window,omitempty"`
 }
 
 // CommandList is a stage command that may be one command or several. The
@@ -208,10 +213,15 @@ func (r ArtifactPaths) Clean() ArtifactPaths {
 // the command is a CommandList: one command or several, run in order and
 // stopping at the first failure.
 type BuildConfig struct {
-	Command     CommandList   `yaml:"command,omitempty" json:"command,omitempty"`     // one build command or a list
+	Command     CommandList   `yaml:"command,omitempty" json:"command,omitempty"`         // one build command or a list
 	Description string        `yaml:"description,omitempty" json:"description,omitempty"` // human label stored with every build run
-	Workdir     string        `yaml:"workdir,omitempty" json:"workdir,omitempty"`     // command workdir; empty = code dir
-	Artifacts   ArtifactPaths `yaml:"artifacts,omitempty" json:"artifacts,omitempty"` // files the build produces and the runner fetches back (stored as-is; never parsed for counts)
+	Workdir     string        `yaml:"workdir,omitempty" json:"workdir,omitempty"`         // command workdir; empty = code dir
+	Artifacts   ArtifactPaths `yaml:"artifacts,omitempty" json:"artifacts,omitempty"`     // files the build produces and the runner fetches back (stored as-is; never parsed for counts)
+	// Window is the daily range in which the build may START (same spelling
+	// and meaning as the test stages' window): a nightly build window keeps a
+	// whole entry — build and everything behind it — out of the machines by
+	// day. Empty = any time.
+	Window string `yaml:"window,omitempty" json:"window,omitempty"`
 }
 
 // RegressionUse is the matrix entry's regression stanza: it references
@@ -221,6 +231,11 @@ type RegressionUse struct {
 	Use         []string `yaml:"use,omitempty" json:"use,omitempty"`
 	Disable     []string `yaml:"disable,omitempty" json:"disable,omitempty"`
 	Description string   `yaml:"description,omitempty" json:"description,omitempty"` // label of the regression stage as a whole (stored on the parent run)
+	// Window is the daily range in which every case of this entry may START
+	// (see EnvConfig.Window). A preset may carry a window of its own, which
+	// wins for that case: the entry-level one is the default for the cases
+	// that do not say. Empty = any time.
+	Window string `yaml:"window,omitempty" json:"window,omitempty"`
 }
 
 // EntryConfig is one matrix entry, before defaults are merged in.
@@ -232,11 +247,16 @@ type EntryConfig struct {
 	// unlike Env, whose values are literals, a variable's value may reference
 	// other variables, the built-in MD_* variables and the host environment
 	// variables the site allow-lists.
-	Variables  map[string]string `yaml:"variables,omitempty" json:"variables,omitempty"`
-	Build      BuildConfig       `yaml:"build,omitempty" json:"build,omitempty"`
-	Unit       *EnvConfig        `yaml:"unit,omitempty" json:"unit,omitempty"`
-	Regression *RegressionUse    `yaml:"regression,omitempty" json:"regression,omitempty"`
-	Timeout    int               `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Variables map[string]string `yaml:"variables,omitempty" json:"variables,omitempty"`
+	Build     BuildConfig       `yaml:"build,omitempty" json:"build,omitempty"`
+	Unit      *EnvConfig        `yaml:"unit,omitempty" json:"unit,omitempty"`
+	// Performance is the benchmark stage: one command, run like unit (after
+	// the build), whose artifact files are kept verbatim as series data rather
+	// than parsed for counts. A window is what keeps a load-sensitive
+	// benchmark off the machines during the day.
+	Performance *EnvConfig     `yaml:"performance,omitempty" json:"performance,omitempty"`
+	Regression  *RegressionUse `yaml:"regression,omitempty" json:"regression,omitempty"`
+	Timeout     int            `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
 // rawConfig mirrors md-builder.yaml before defaults merging.
@@ -257,6 +277,7 @@ type RegressionCase struct {
 	Workdir     string        `json:"workdir,omitempty"`
 	Timeout     int           `json:"timeout"`
 	Artifacts   ArtifactPaths `json:"artifacts,omitempty"`
+	Window      string        `json:"window,omitempty"` // preset's window, else the entry's regression.window
 }
 
 // MergedEntry is an entry with defaults applied — the config snapshot stored
@@ -271,15 +292,16 @@ type MergedEntry struct {
 	// anything else stays literal (with a warning in the task log). A variable
 	// is exported after the environment's setup script, so it can build on what
 	// that script exports.
-	Variables map[string]string `json:"variables,omitempty"`
-	Build     BuildConfig       `json:"build"`
-	Unit      *EnvConfig        `json:"unit,omitempty"`
+	Variables   map[string]string `json:"variables,omitempty"`
+	Build       BuildConfig       `json:"build"`
+	Unit        *EnvConfig        `json:"unit,omitempty"`
+	Performance *EnvConfig        `json:"performance,omitempty"`
 	// RegressionDescription is the label of the regression stage as a whole
 	// (the entry's regression.description); each case carries its own
 	// Description from the preset.
-	RegressionDescription string         `json:"regressionDescription,omitempty"`
+	RegressionDescription string           `json:"regressionDescription,omitempty"`
 	Regression            []RegressionCase `json:"regression,omitempty"`
-	Timeout               int            `json:"timeout"`
+	Timeout               int              `json:"timeout"`
 }
 
 // ParseConfig parses and validates md-builder.yaml. The returned entries are
@@ -303,6 +325,14 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		if p == nil || p.Command.IsEmpty() {
 			return nil, fmt.Errorf("md-builder.yaml: preset %q needs a command", name)
 		}
+		if err := validateWindow("preset "+name+".window", p.Window); err != nil {
+			return nil, err
+		}
+	}
+	if raw.Defaults != nil {
+		if err := validateWindows("defaults", raw.Defaults); err != nil {
+			return nil, err
+		}
 	}
 
 	seen := map[string]bool{}
@@ -312,11 +342,17 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		if len(entry.Tags) == 0 {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d has no tags", i+1)
 		}
-		if entry.Unit == nil && entry.Regression == nil {
-			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d defines neither unit nor regression", i+1)
+		if entry.Unit == nil && entry.Regression == nil && entry.Performance == nil {
+			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d defines none of unit, performance or regression", i+1)
 		}
 		if entry.Unit != nil && entry.Unit.Command.IsEmpty() {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d has unit without a command", i+1)
+		}
+		if entry.Performance != nil && entry.Performance.Command.IsEmpty() {
+			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d has performance without a command", i+1)
+		}
+		if err := validateWindows(fmt.Sprintf("matrix entry %d", i+1), &entry); err != nil {
+			return nil, err
 		}
 		if entry.Build.Command.IsEmpty() && (raw.Defaults == nil || raw.Defaults.Build.Command.IsEmpty()) {
 			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d: build requires a command (entry or defaults.build)", i+1)
@@ -336,8 +372,8 @@ func ParseConfig(data []byte) ([]MergedEntry, error) {
 		if err := validateVariables(&merged, i+1); err != nil {
 			return nil, err
 		}
-		if merged.Unit == nil && len(merged.Regression) == 0 {
-			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d resolves to no stage (unit missing, regression selects no preset)", i+1)
+		if merged.Unit == nil && merged.Performance == nil && len(merged.Regression) == 0 {
+			return nil, fmt.Errorf("md-builder.yaml: matrix entry %d resolves to no stage (unit and performance missing, regression selects no preset)", i+1)
 		}
 		out = append(out, merged)
 	}
@@ -388,6 +424,13 @@ func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, default
 			Workdir:     p.Workdir,
 			Timeout:     p.Timeout,
 			Artifacts:   p.Artifacts,
+			Window:      p.Window,
+		}
+		// The entry's regression.window is the default for every case it
+		// selects; a preset that carries its own window keeps it (a single
+		// benchmark-like case may need the night while the rest run by day).
+		if c.Window == "" && use != nil {
+			c.Window = use.Window
 		}
 		if c.Timeout == 0 {
 			c.Timeout = defaultTimeoutFor(defaults, entry)
@@ -406,6 +449,42 @@ func expandRegression(presets map[string]*EnvConfig, use *RegressionUse, default
 		}
 	}
 	return cases, nil
+}
+
+// validateWindows checks every window of one entry (or of the defaults block)
+// at parse time. The scheduler reads a window it cannot parse as "any time"
+// — it refuses to park a stage on a value it does not understand — so a typo
+// left unchecked here would silently drop the restriction the file asked for.
+// where names the yaml position, like the other parse errors.
+func validateWindows(where string, entry *EntryConfig) error {
+	if err := validateWindow(where+": build.window", entry.Build.Window); err != nil {
+		return err
+	}
+	if entry.Unit != nil {
+		if err := validateWindow(where+": unit.window", entry.Unit.Window); err != nil {
+			return err
+		}
+	}
+	if entry.Performance != nil {
+		if err := validateWindow(where+": performance.window", entry.Performance.Window); err != nil {
+			return err
+		}
+	}
+	if entry.Regression != nil {
+		if err := validateWindow(where+": regression.window", entry.Regression.Window); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateWindow checks one window field: empty means "any time", anything
+// else must parse as a daily range.
+func validateWindow(where, raw string) error {
+	if _, err := store.ParseWindow(raw); err != nil {
+		return fmt.Errorf("md-builder.yaml: %s: %v", where, err)
+	}
+	return nil
 }
 
 // validateVariables checks one merged entry's variables: the names have to be
@@ -496,6 +575,7 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 		Tags:        tags,
 		Description: entry.Description,
 		Unit:        entry.Unit,
+		Performance: entry.Performance,
 	}
 	if m.Unit != nil {
 		c := *m.Unit
@@ -506,6 +586,24 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 	}
 	if m.Unit != nil && m.Unit.Timeout == 0 {
 		m.Unit.Timeout = defaultTimeoutFor(defaults, entry)
+	}
+	if m.Unit != nil && m.Unit.Window == "" && defaults != nil && defaults.Unit != nil {
+		m.Unit.Window = defaults.Unit.Window
+	}
+
+	// The performance stage merges exactly like unit, from defaults.performance.
+	if m.Performance != nil {
+		c := *m.Performance
+		m.Performance = &c
+	}
+	if m.Performance != nil && m.Performance.Workdir == "" && defaults != nil && defaults.Performance != nil {
+		m.Performance.Workdir = defaults.Performance.Workdir
+	}
+	if m.Performance != nil && m.Performance.Timeout == 0 {
+		m.Performance.Timeout = defaultTimeoutFor(defaults, entry)
+	}
+	if m.Performance != nil && m.Performance.Window == "" && defaults != nil && defaults.Performance != nil {
+		m.Performance.Window = defaults.Performance.Window
 	}
 
 	var err error
@@ -561,6 +659,9 @@ func mergeDefaults(defaults *EntryConfig, presets map[string]*EnvConfig, entry *
 		}
 		if len(build.Artifacts) == 0 {
 			build.Artifacts = defaults.Build.Artifacts
+		}
+		if build.Window == "" {
+			build.Window = defaults.Build.Window
 		}
 	}
 	m.Build = build

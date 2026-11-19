@@ -22,6 +22,7 @@ import (
 //	 ├── clone
 //	 ├── build
 //	 ├── unit
+//	 ├── performance
 //	 └── regression (virtual)
 //	      ├── regression_case "a"
 //	      └── regression_case "b"
@@ -30,6 +31,7 @@ const (
 	TaskKindClone           = "clone"           //
 	TaskKindBuild           = "build"           // optional
 	TaskKindUnit            = "unit"            // optional
+	TaskKindPerformance     = "performance"     // optional: one benchmark stage (its window keeps it off the machines by day)
 	TaskKindRegressionStage = "regression"      // virtual: the container of the regression cases
 	TaskKindRegressionCase  = "regression_case" // one md-builder.yaml regression preset
 )
@@ -111,7 +113,15 @@ type Task struct {
 	// Config is the node's config snapshot: the root carries the entry
 	// snapshot (RootConfig), a stage node its stage config, a case node its
 	// CaseStageConfig. Virtual nodes store "{}".
-	Config    string `gorm:"type:text"`
+	Config string `gorm:"type:text"`
+	// Window is the node's scheduling window as md-builder.yaml spells it
+	// ("22:00-06:00"; "" = any time): the daily range in which the stage may
+	// START. It is refreshed from the yaml on every dispatch, exactly like
+	// Description, and the scheduler reads it off this column rather than out
+	// of Config — the claim path would otherwise unmarshal a config snapshot
+	// per candidate. A node that answers to no window keeps the empty default,
+	// which covers rows written before the column existed.
+	Window    string `gorm:"not null;default:''"`
 	DependsOn string `gorm:"type:text"` // JSON array of task IDs, e.g. "[3,4]"
 	Status    string `gorm:"index;not null;default:'pending'"`
 	Summary   string `gorm:"not null;default:''"`
@@ -174,7 +184,7 @@ func TaskStatusTerminal(status string) bool {
 // ValidateTaskKind reports whether kind is a known task kind.
 func ValidateTaskKind(kind string) bool {
 	switch kind {
-	case TaskKindRoot, TaskKindClone, TaskKindBuild, TaskKindUnit,
+	case TaskKindRoot, TaskKindClone, TaskKindBuild, TaskKindUnit, TaskKindPerformance,
 		TaskKindRegressionStage, TaskKindRegressionCase:
 		return true
 	}
@@ -190,6 +200,8 @@ func StageLabel(kind string) string {
 		return "build"
 	case TaskKindUnit:
 		return "unit test"
+	case TaskKindPerformance:
+		return "performance test"
 	case TaskKindRegressionStage:
 		return "regression"
 	case TaskKindRegressionCase:
@@ -719,6 +731,26 @@ const claimBatch = 64
 // node's in-flight run flips to running in the same transaction. Returns nil
 // when no ready task exists anywhere in the queued set.
 func (s *Store) ClaimReadyTask() (*Task, error) {
+	return s.claimReadyTaskAt(time.Now())
+}
+
+// claimReadyTaskAt is ClaimReadyTask with the clock supplied, so the window
+// gate can be tested at a fixed time of day. A ready node outside its
+// scheduling window is skipped and left pending — that is all "this stage may
+// only start between 22:00 and 06:00" means: the worker stays free for the
+// work that may run, and the node is claimed by the first tick that falls
+// inside its window.
+func (s *Store) claimReadyTaskAt(now time.Time) (*Task, error) {
+	// The scheduling timezone is looked up at most once per claim, and only
+	// when a candidate actually carries a window: a site with no windowed
+	// stage never pays for the site-config read.
+	var loc *time.Location
+	location := func() *time.Location {
+		if loc == nil {
+			loc = s.SiteLocation()
+		}
+		return loc
+	}
 	for after := int64(0); ; {
 		var candidates []Task
 		if err := s.DB.Where("virtual = ? AND retired = ? AND status = ? AND id > ?",
@@ -741,7 +773,13 @@ func (s *Store) ClaimReadyTask() (*Task, error) {
 			if !ready[t.ID] {
 				continue
 			}
-			now := time.Now()
+			// A node whose stage is allowed only between certain hours waits
+			// here, and the walk moves on to the next candidate: a window that
+			// is closed for one stage must not hold back another stage that
+			// may run now.
+			if !windowOpenAt(t.Window, now, location()) {
+				continue
+			}
 			claimed := false
 			err = s.DB.Transaction(func(tx *gorm.DB) error {
 				// The attempt counter is part of the guard: a dispatch that

@@ -23,7 +23,7 @@ import (
 // dashboardStageKinds are the matrix columns of one (commit, environment)
 // cell, in display order. clone has no column of its own (a clone failure
 // shows up as every later stage being skipped).
-var dashboardStageKinds = []string{store.RunKindBuild, store.RunKindUnit, store.RunKindRegression}
+var dashboardStageKinds = []string{store.RunKindBuild, store.RunKindUnit, store.RunKindPerformance, store.RunKindRegression}
 
 // stageTaskKind maps a dashboard column (a run kind) to the kind of the task
 // node that carries it. The regression column is the virtual stage container:
@@ -35,6 +35,8 @@ func stageTaskKind(kind string) string {
 		return store.TaskKindBuild
 	case store.RunKindUnit:
 		return store.TaskKindUnit
+	case store.RunKindPerformance:
+		return store.TaskKindPerformance
 	case store.RunKindRegression:
 		return store.TaskKindRegressionStage
 	}
@@ -120,12 +122,73 @@ func runOf(runs map[int64]store.TestRun, taskID int64) *store.TestRun {
 	return &run
 }
 
-// defaultCommits is the number of recent commits (dashboard columns) returned
-// when the client does not ask for a specific count.
-const defaultCommits = 10
+// defaultCommits is the page size of the matrix when the client does not ask
+// for one. The dashboard is paged over the whole commit history: a page of 200
+// rows is still a browsable matrix, and it covers far more than the newest
+// handful of pushes.
+const defaultCommits = 200
 
-// maxCommits caps the ?commits= query parameter.
-const maxCommits = 50
+// maxCommits caps the ?commits= page size.
+const maxCommits = 1000
+
+// dashboardPaging parses the matrix's paging parameters: ?commits= is the page
+// size, ?page= the 1-based page number. Both are validated rather than clipped,
+// so a caller that asks for nonsense is told so instead of silently being given
+// the first page.
+func dashboardPaging(r *http.Request) (page, size int, err error) {
+	size, page = defaultCommits, 1
+	if v := r.URL.Query().Get("commits"); v != "" {
+		n, convErr := strconv.Atoi(v)
+		if convErr != nil || n < 1 || n > maxCommits {
+			return 0, 0, fmt.Errorf("commits must be an integer between 1 and %d", maxCommits)
+		}
+		size = n
+	}
+	if v := r.URL.Query().Get("page"); v != "" {
+		n, convErr := strconv.Atoi(v)
+		if convErr != nil || n < 1 {
+			return 0, 0, fmt.Errorf("page must be a positive integer")
+		}
+		page = n
+	}
+	return page, size, nil
+}
+
+// commitPage is one page of the commit history plus the numbers the matrix's
+// pager renders.
+type commitPage struct {
+	commits []store.Commit
+	page    int // the page actually served (clamped to the last one)
+	size    int
+	total   int64
+}
+
+// listCommitPage counts the history under repo and returns the requested page
+// of it, newest first. Asking for a page past the end serves the last page
+// instead of an empty matrix: a stale "page 7" bookmark, or rows that vanished
+// while the tab was open, still shows data rather than "no pushes recorded
+// yet", which would be a lie.
+func (s *Server) listCommitPage(repo string, page, size int) (commitPage, error) {
+	out := commitPage{page: page, size: size}
+	total, err := s.Store.CountCommits(repo)
+	if err != nil {
+		return out, err
+	}
+	out.total = total
+	pages := int((total + int64(size) - 1) / int64(size))
+	if pages < 1 {
+		pages = 1
+	}
+	if out.page > pages {
+		out.page = pages
+	}
+	commits, err := s.Store.ListCommitsPage(repo, size, (out.page-1)*size)
+	if err != nil {
+		return out, err
+	}
+	out.commits = commits
+	return out, nil
+}
 
 // dashboardEnvJSON is an environment column of the dashboard matrix.
 type dashboardEnvJSON struct {
@@ -201,11 +264,19 @@ type dashboardJSON struct {
 	RepoURL      string             `json:"repoUrl,omitempty"`    // web URL of that repo, when derivable
 	Environments []dashboardEnvJSON `json:"environments"`
 	Rows         []dashboardRowJSON `json:"rows"` // one row per commit, newest first
+	// Paging over the commit history (newest first). Page is the page actually
+	// served — clamped to the last one when the client asked past the end —
+	// PageSize the page size used, and Total how many commits the repo filter
+	// matches, so the client can render "1–200 of 1234".
+	Page     int   `json:"page"`
+	PageSize int   `json:"pageSize"`
+	Total    int64 `json:"total"`
 }
 
 // handleDashboard routes GET /api/dashboard/{kind}. kind: regression|unit|build
 // (single-kind matrices) or "full" (every commit row carries, per environment,
-// the build/unit/regression stages plus the task graph link).
+// the build/unit/performance/regression stages plus the task graph link). The
+// commit history is paged: ?page= (1-based) and ?commits= (page size).
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *store.User) {
 	_ = user
 	rest := strings.TrimPrefix(r.URL.Path, "/api/dashboard/")
@@ -225,16 +296,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 		return
 	}
 
-	nCommits := defaultCommits
-	if v := r.URL.Query().Get("commits"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > maxCommits {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "commits must be an integer between 1 and 50",
-			})
-			return
-		}
-		nCommits = n
+	page, size, err := dashboardPaging(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 
 	// Column filter: when the site config names a code repository, only
@@ -251,12 +316,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	commits, err := s.Store.ListCommits(repoFilter, nCommits)
+	cp, err := s.listCommitPage(repoFilter, page, size)
 	if err != nil {
 		log.Printf("dashboard: list commits: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	commits := cp.commits
 
 	envIDs := make([]int64, len(envs))
 	for i, e := range envs {
@@ -288,6 +354,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 		RepoURL:      repoURL,
 		Environments: make([]dashboardEnvJSON, 0, len(envs)),
 		Rows:         make([]dashboardRowJSON, 0, len(commits)),
+		Page:         cp.page,
+		PageSize:     cp.size,
+		Total:        cp.total,
 	}
 
 	// Environment columns, name-ordered.
@@ -304,8 +373,15 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 		})
 	}
 
-	// Commit rows, newest first; cells align with the environment columns.
-	superseded := supersededCommits(commits)
+	// Commit rows, newest first; cells align with the environment columns. The
+	// superseded set comes from the store rather than from this page, so a
+	// duplicated revision split by a page boundary still dims correctly.
+	superseded, err := s.Store.SupersededCommitIDs(commitIDs)
+	if err != nil {
+		log.Printf("dashboard: superseded commits: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
 	for i := range commits {
 		commit := &commits[i]
 		cj := s.toCommitJSON(commit)
@@ -338,11 +414,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request, user *s
 }
 
 // fullStageJSON is one stage cell of the full matrix: the recorded test run
-// (build/unit/regression) for that (commit, environment), or the live task
-// state (runId 0, taskId set) when the run has not landed yet. A null entry
-// means the commit has no graph on that environment.
+// (build/unit/performance/regression) for that (commit, environment), or the
+// live task state (runId 0, taskId set) when the run has not landed yet. A
+// null entry means the commit has no graph on that environment.
 type fullStageJSON struct {
-	Kind       string `json:"kind"` // build | unit | regression
+	Kind       string `json:"kind"` // build | unit | performance | regression
 	RunID      int64  `json:"runId"`
 	TaskID     int64  `json:"taskId,omitempty"`
 	Status     string `json:"status"`
@@ -353,8 +429,8 @@ type fullStageJSON struct {
 }
 
 // fullRowJSON is one row of the full matrix: the commit, per environment the
-// pipeline stages in display order (build, unit, regression) and the task
-// graph link (to the dependency-graph page).
+// pipeline stages in display order (build, unit, performance, regression) and
+// the task graph link (to the dependency-graph page).
 type fullRowJSON struct {
 	Commit   commitJSON                `json:"commit"`
 	Stages   map[int64][]fullStageJSON `json:"stages"`             // environment id → stages
@@ -368,27 +444,26 @@ type fullDashboardJSON struct {
 	RepoURL      string             `json:"repoUrl,omitempty"` // web URL of the filtered repo, when derivable
 	Environments []dashboardEnvJSON `json:"environments"`
 	Rows         []fullRowJSON      `json:"rows"`
+	// Paging over the commit history, same contract as dashboardJSON.
+	Page     int   `json:"page"`
+	PageSize int   `json:"pageSize"`
+	Total    int64 `json:"total"`
 }
 
 // dashboardFull serves GET /api/dashboard/full: every commit row carries, for
 // every environment, the state of each pipeline stage — the recorded runs of
-// build/unit/regression, or the live task state while the graph runs.
+// build/unit/performance/regression, or the live task state while the graph runs.
+// Like the single-kind views it pages the commit history (?page=, ?commits=).
 func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 
-	nCommits := defaultCommits
-	if v := r.URL.Query().Get("commits"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > maxCommits {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "commits must be an integer between 1 and 50",
-			})
-			return
-		}
-		nCommits = n
+	page, size, err := dashboardPaging(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
 	}
 
 	repoFilter, repoURL := "", ""
@@ -403,12 +478,13 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	commits, err := s.Store.ListCommits(repoFilter, nCommits)
+	cp, err := s.listCommitPage(repoFilter, page, size)
 	if err != nil {
 		log.Printf("dashboard full: list commits: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
+	commits := cp.commits
 
 	envIDs := make([]int64, len(envs))
 	for i, e := range envs {
@@ -436,6 +512,9 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 		RepoURL:      repoURL,
 		Environments: make([]dashboardEnvJSON, 0, len(envs)),
 		Rows:         make([]fullRowJSON, 0, len(commits)),
+		Page:         cp.page,
+		PageSize:     cp.size,
+		Total:        cp.total,
 	}
 	owners := s.environmentOwnerNames(envs)
 	for i := range envs {
@@ -450,7 +529,12 @@ func (s *Server) dashboardFull(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	superseded := supersededCommits(commits)
+	superseded, err := s.Store.SupersededCommitIDs(commitIDs)
+	if err != nil {
+		log.Printf("dashboard full: superseded commits: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
 	for i := range commits {
 		commit := &commits[i]
 		cj := s.toCommitJSON(commit)
@@ -1265,23 +1349,6 @@ func commitLive(graphs map[store.EnvCommit]store.RootTaskSummary, commitID int64
 		}
 	}
 	return false
-}
-
-// supersededCommits returns the ids of every commit row but the newest of
-// each (repo, sha) group: manual re-dispatches of the same SHA insert one
-// row per attempt, and only the latest attempt is the live result. commits
-// must be newest-first (ListCommits order).
-func supersededCommits(commits []store.Commit) map[int64]bool {
-	seen := map[string]bool{}
-	superseded := map[int64]bool{}
-	for i := range commits {
-		key := commits[i].Repo + "\x00" + commits[i].SHA
-		if seen[key] {
-			superseded[commits[i].ID] = true
-		}
-		seen[key] = true
-	}
-	return superseded
 }
 
 // repoWebURL turns a repository location — the site config's codeRepo or a

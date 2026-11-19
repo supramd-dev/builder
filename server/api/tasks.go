@@ -20,26 +20,30 @@ import (
 // status and counts are its children's aggregate; retired nodes are the ones
 // the current md-builder.yaml no longer defines, kept as history.
 type subTaskJSON struct {
-	ID          int64   `json:"id"`
-	ParentID    int64   `json:"parentId,omitempty"` // the tree: where the node nests (0 = directly under the root)
-	Kind        string  `json:"kind"`
-	NodeKey     string  `json:"nodeKey"` // stable identity across dispatches
-	Name        string  `json:"name"`
-	Description string  `json:"description,omitempty"`
-	Virtual     bool    `json:"virtual,omitempty"`
-	Retired     bool    `json:"retired,omitempty"`
-	Status      string  `json:"status"`
-	Summary     string  `json:"summary,omitempty"`
-	Error       string  `json:"error,omitempty"`
-	DependsOn   []int64 `json:"dependsOn"`
-	Total       int     `json:"total"`
-	Passed      int     `json:"passed"`
-	Failed      int     `json:"failed"`
-	Skipped     int     `json:"skipped"`
-	Attempts    int     `json:"attempts"`
-	RunID       int64   `json:"runId,omitempty"` // the latest attempt's run (for the detail link)
-	StartedAt   string  `json:"startedAt"`
-	FinishedAt  string  `json:"finishedAt"`
+	ID          int64  `json:"id"`
+	ParentID    int64  `json:"parentId,omitempty"` // the tree: where the node nests (0 = directly under the root)
+	Kind        string `json:"kind"`
+	NodeKey     string `json:"nodeKey"` // stable identity across dispatches
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Virtual     bool   `json:"virtual,omitempty"`
+	Retired     bool   `json:"retired,omitempty"`
+	Status      string `json:"status"`
+	Summary     string `json:"summary,omitempty"`
+	Error       string `json:"error,omitempty"`
+	// Window is the stage's daily scheduling window ("22:00-06:00", "" = any
+	// time): the node is claimed only inside it, so a pending node with a
+	// window may simply be waiting for tonight.
+	Window     string  `json:"window,omitempty"`
+	DependsOn  []int64 `json:"dependsOn"`
+	Total      int     `json:"total"`
+	Passed     int     `json:"passed"`
+	Failed     int     `json:"failed"`
+	Skipped    int     `json:"skipped"`
+	Attempts   int     `json:"attempts"`
+	RunID      int64   `json:"runId,omitempty"` // the latest attempt's run (for the detail link)
+	StartedAt  string  `json:"startedAt"`
+	FinishedAt string  `json:"finishedAt"`
 }
 
 // taskDetailJSON is GET /api/tasks/{id}'s response: the task (root or node)
@@ -58,6 +62,7 @@ type taskDetailJSON struct {
 	Status        string            `json:"status"`
 	Summary       string            `json:"summary,omitempty"`
 	Error         string            `json:"error,omitempty"`
+	Window        string            `json:"window,omitempty"` // scheduling window of this node ("" = any time)
 	Total         int               `json:"total"`
 	Passed        int               `json:"passed"`
 	Failed        int               `json:"failed"`
@@ -205,6 +210,7 @@ func (s *Server) taskDetail(w http.ResponseWriter, id int64) {
 		Status:        task.Status,
 		Summary:       task.Summary,
 		Error:         task.Error,
+		Window:        task.Window,
 		Total:         task.Total,
 		Passed:        task.Passed,
 		Failed:        task.Failed,
@@ -509,6 +515,7 @@ func toSubTaskJSON(t *store.Task, run *store.TestRun) subTaskJSON {
 		Status:      t.Status,
 		Summary:     t.Summary,
 		Error:       t.Error,
+		Window:      t.Window,
 		DependsOn:   t.DependsOnIDs(),
 		Total:       t.Total,
 		Passed:      t.Passed,

@@ -12,15 +12,16 @@ import (
 // the runs the matrix and the dashboards filter by. The virtual nodes (the
 // root, the regression stage) have no runs.
 const (
-	RunKindClone      = "clone"
-	RunKindBuild      = "build"
-	RunKindUnit       = "unit"
-	RunKindRegression = "regression"
+	RunKindClone       = "clone"
+	RunKindBuild       = "build"
+	RunKindUnit        = "unit"
+	RunKindPerformance = "performance"
+	RunKindRegression  = "regression"
 )
 
 // ErrInvalidRunKind is returned when a run kind is not one of the supported
-// kinds (clone / build / unit / regression).
-var ErrInvalidRunKind = errors.New("store: run kind must be clone, build, unit or regression")
+// kinds (clone / build / unit / performance / regression).
+var ErrInvalidRunKind = errors.New("store: run kind must be clone, build, unit, performance or regression")
 
 // ErrInvalidRunStatus is returned when a reported status is not one of
 // passed/failed/skipped.
@@ -36,6 +37,8 @@ func RunKindForTask(taskKind string) string {
 		return RunKindBuild
 	case TaskKindUnit:
 		return RunKindUnit
+	case TaskKindPerformance:
+		return RunKindPerformance
 	case TaskKindRegressionCase:
 		return RunKindRegression
 	}
@@ -45,7 +48,7 @@ func RunKindForTask(taskKind string) string {
 // RunKindValid reports whether kind is a supported run kind.
 func RunKindValid(kind string) bool {
 	switch kind {
-	case RunKindClone, RunKindBuild, RunKindUnit, RunKindRegression:
+	case RunKindClone, RunKindBuild, RunKindUnit, RunKindPerformance, RunKindRegression:
 		return true
 	}
 	return false

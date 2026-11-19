@@ -135,6 +135,13 @@ bundle at build time.
 A fully commented example of the md-builder.yaml test matrix (schema
 version 3) lives at [md-builder.example.yaml](md-builder.example.yaml).
 
+## Architecture
+
+Developer documentation — the runtime architecture and package layering, the
+data model with every table, the full HTTP API, the main workflows, and the
+development conventions — is in [docs/architecture.md](docs/architecture.md)
+(written in Chinese).
+
 ## First start
 
 A database with **no account at all** opens on a setup page instead of the

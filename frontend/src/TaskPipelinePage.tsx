@@ -11,6 +11,8 @@ import {
 } from './api'
 import { StatusText, commitUrl } from './StatusViews'
 import { statusGlyph, statusView } from './status'
+import { siteTimezone } from './timezone'
+import { windowLabel, windowNote } from './windows'
 import { Breadcrumbs } from './Breadcrumbs'
 import TaskLogView from './TaskLogView'
 import {
@@ -550,6 +552,17 @@ function StepList({
             </span>
             <span className="task-step-name">{node.name}</span>
             <span className="text-muted task-step-kind">{node.kind}</span>
+            {/* A stage that may only start inside a window says so, so a
+                pending row is not read as stuck: the scheduler is holding it
+                for the window (the server enforces it; see windows.ts). */}
+            {windowLabel(node.window) && (
+              <span
+                className="task-step-window"
+                title={windowNote(node.window, new Date(), siteTimezone())}
+              >
+                {windowLabel(node.window)}
+              </span>
+            )}
             {/* The counts are the stage's tests (a unit stage runs several);
                 a node standing for one test says nothing new. */}
             {node.total > 1 && (
@@ -592,6 +605,11 @@ function StepPanel({
         </span>
         <span className="pipeline-log-name">{node.name}</span>
         <span className="text-muted pipeline-log-kind">{node.kind}</span>
+        {windowLabel(node.window) && (
+          <span className="text-muted pipeline-log-kind">
+            {windowNote(node.window, new Date(), siteTimezone())}
+          </span>
+        )}
         {node.total > 1 && (
           <span className="text-muted pipeline-log-kind">
             {node.passed}/{node.total} passed

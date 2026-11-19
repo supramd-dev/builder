@@ -96,7 +96,7 @@ func (in *ScriptInput) TimeoutOr(fallback int) int {
 }
 
 // BuildStageScript renders the remote bash script for a stage sub-task
-// (build, unit, regression case): the shared preamble plus the command list
+// (build, unit, performance, regression case): the shared preamble plus the command list
 // in the configured workdir. Each command runs under its own `timeout`
 // wrapper, chained with `&&`: a failing command stops the stage right
 // there (the remaining ones do not run) and its exit code becomes the

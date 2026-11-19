@@ -25,6 +25,7 @@ import (
 
 	"md-builder/server/api"
 	"md-builder/server/config"
+	"md-builder/server/performance"
 	"md-builder/server/runner"
 	"md-builder/server/storage"
 	"md-builder/server/store"
@@ -225,6 +226,13 @@ func main() {
 	// Host header is attacker-controlled and would let someone point the
 	// callback at their own server).
 	apiServer.SetPublicURL(cfg.PublicBaseURL())
+
+	// --- Performance history ---
+	// A self-contained module (server/performance): the report schema, the
+	// aggregation and the route all live there, and the API package lends it
+	// the "signed-in users only" wrapper. Removing the feature is removing
+	// these two lines and the package.
+	performance.New(s).Register(mux, apiServer.AuthMiddleware)
 
 	// --- Static frontend assets (with SPA fallback) ---
 	distDir := resolveDistDir(cfg.Dist)

@@ -3,15 +3,20 @@
 ## The test dashboard
 
 The dashboard (first tab after login) shows a build.golang.org-style
-matrix: one **row per recent git push** (default 10, capped at 50 via
-`?commits=`, newest first), one **column per test environment**
-(site-wide — all environments configured by any user; disabled ones are
-greyed out). Four views are available via the tabs at the top:
+matrix: one **row per git push**, newest first, one **column per test
+environment** (site-wide — all environments configured by any user;
+disabled ones are greyed out). The history is **paged**: 200 rows per
+page by default, with a pager above the matrix that moves between pages
+and says which slice is on screen ("201–400 of 1,234"). The page size is
+pickable (100 / 200 / 500 / 1000) and is what `?commits=` sets; `?page=`
+is the 1-based page number. A page past the end serves the last page
+instead of an empty matrix. Four views are available via the tabs at the
+top:
 
 - **All** — the full pipeline matrix (`GET /api/dashboard/full`): each
-  cell shows the three stages in display order (build, unit tests,
-  regression) for that (commit, environment), each with its own status
-  and detail link.
+  cell shows the four stages in display order (build, unit tests,
+  performance test, regression) for that (commit, environment), each with
+  its own status and detail link.
 - **Build** — whether the code compiles per environment (click through
   for the build log).
 - **Unit tests** / **Regression tests** — the per-case matrices.
@@ -43,7 +48,7 @@ log, attempt and artifacts. That is what makes a case's history survive a
 re-dispatch instead of being rewritten by whichever case reported last.
 
 Every commit row also carries a **graph** link: the dependency graph of
-that commit's task pipeline (clone → build → unit/regression),
+that commit's task pipeline (clone → build → unit/performance/regression),
 GitHub-Actions style — clicking a stage node jumps to its run detail or
 the live task log (see [Runner and tasks](#/docs/runner-strategy)).
 
@@ -79,6 +84,7 @@ The full matrix response shape:
         "1": [
           {"kind": "build", "runId": 7, "taskId": 43, "status": "passed"},
           {"kind": "unit", "taskId": 44, "status": "running"},
+          {"kind": "performance", "taskId": 46, "status": "pending"},
           {"kind": "regression", "taskId": 45, "status": "pending",
            "summary": "0/4 cases passed; 4 queued"}
         ]
@@ -155,8 +161,9 @@ attempt the report closes**:
 
 `GET /api/test-runs/{id}` is the detail view of **one attempt of one
 task**: the run itself — `id`, `taskId`, `attempt`, `kind` (the stage
-kind, `build` / `unit` / `regression`; a case's run carries the stage's
-kind, which is what puts every case in the one regression column),
+kind, `build` / `unit` / `performance` / `regression`; a case's run
+carries the stage's kind, which is what puts every case in the one
+regression column),
 `status`, `summary`, the
 counts, `durationMillis`, `environmentId`, `commitId`, `startedAt`,
 `finishedAt` — plus the identity of the task it belongs to (`taskName`,
@@ -221,9 +228,13 @@ A **root** answers with the graph instead of attempts:
 - `subTasks` — the nodes of the current graph: `id`, `parentId` (the
   nesting: the tree the UI draws), `kind`, `nodeKey` (the stable identity
   a re-dispatch matches on), `name`, `description`, `virtual`, `status`,
-  `summary`, `error`, `dependsOn` (the scheduling DAG, always a list,
-  never null), the counts, `attempts`, `runId` (the latest attempt's run,
-  the detail link; absent for a container) and timestamps.
+  `summary`, `error`, `window` (the stage's scheduling window,
+  `"22:00-06:00"` in site time; absent = any time — the node stays
+  pending while the window is closed, see
+  [Test matrix → Scheduling windows](#/docs/test-matrix)), `dependsOn`
+  (the scheduling DAG, always a list, never null), the counts,
+  `attempts`, `runId` (the latest attempt's run, the detail link; absent
+  for a container) and timestamps.
 - `retiredTasks` — the nodes an earlier dispatch defined and a later one
   dropped. They are kept, never rescheduled and excluded from the rollup:
   when a case disappears from `md-builder.yaml` its history does not
@@ -317,6 +328,49 @@ does not exist yet. See
 [Runner strategy](#/docs/runner-strategy) for how a node a worker is
 executing right now is ended.
 
+## Performance history
+
+`GET /api/performance` reads the benchmark reports a `performance:` stage
+stored (the JSON format is in
+[Test matrix → Performance artifacts](#/docs/test-matrix)) and returns the
+history the *Performance* page plots. Query parameters:
+
+- `days` — how far back to read, `1`–`3650` (default `180`). The window
+  starts at the commit's arrival (`commits.pushed_at`), not at the
+  report's own `date`.
+- `environment` — one environment id (default: every environment).
+
+The points are already aggregated: a commit measured more than once is one
+point at the **median**, with `samples` saying how many measurements it
+stands for. The response:
+
+```json
+{
+  "since": "2026-04-19T00:00:00Z",
+  "generatedAt": "2026-10-16T02:00:00Z",
+  "truncated": false,
+  "environments": [{"id": 1, "name": "cpu-node-1"}],
+  "cases": [{"name": "nvt-1000",
+             "metrics": [{"name": "throughput", "unit": "step/s", "better": "higher"}]}],
+  "points": [{"case": "nvt-1000", "metric": "throughput",
+              "unit": "step/s", "better": "higher",
+              "environmentId": 1, "environment": "cpu-node-1",
+              "at": "2026-09-01T00:12:44Z", "commitId": 12, "sha": "abc123…",
+              "samples": 3, "value": 1523.4}],
+  "ignored": [{"artifactId": 8, "runId": 43, "name": "perf.json",
+               "reason": "date is required"}]
+}
+```
+
+`at` is the report's `date` — when the benchmark measured — not when the
+commit was pushed. `truncated` says a single request hit its limit (2000
+artifacts, newest kept). `ignored` lists the artifacts that claim to be
+reports but could not be read (malformed, an unknown `schema`, larger than
+1 MiB, or unreadable from object storage) with the reason; a series file
+without a `schema` key is not a report and is skipped without a word. A
+site that configures a code repository sees only that repository's
+history. An invalid `days` or `environment` is `400`.
+
 ## Script execution (interactive)
 
 Besides the automatic task graphs, environments accept ad-hoc commands
@@ -357,14 +411,19 @@ POST /api/jobs/manual
   "buildCommand": "cmake . && cmake --build . -j8",   // optional; empty = no build stage
   "unitCommand": "ctest -L unit",                     // optional: stage skipped
   "unitArtifacts": "build/test_detail.xml",           // optional: artifact file(s)
+  "performanceCommand": "python3 bench.py",           // optional: stage skipped
+  "performanceArtifacts": "bench.json",               // optional: series data
   "regressionCommand": "python3 run.py",              // optional: stage skipped
   "regressionArtifacts": "reg/results.json",          // optional: artifact file(s)
   "environmentIds": [1, 2]
 }
 ```
 
-The `unitArtifacts` / `regressionArtifacts` fields accept a single path
-or a list of paths — a run can produce several artifact files.
+The `unitArtifacts` / `performanceArtifacts` / `regressionArtifacts`
+fields accept a single path or a list of paths — a run can produce several
+artifact files. `performanceArtifacts` files are stored as series data
+(never parsed for counts); the form types raw commands, so these nodes
+carry no scheduling window.
 
 - At least one stage command and one environment are required.
 - The ref is resolved to a concrete commit (a remote ref listing, the
@@ -508,14 +567,15 @@ administrators are created there too, with `adduser -admin`.
 | GET    | `/api/site-config`              | Site repository configuration (`codeRepo`, `accessTokenSet`, `timezone`, `commitOverlapPolicy`, `webhookToken` — administrators only) |
 | PUT    | `/api/site-config`              | Update site configuration (access token: empty = keep, `clearAccessToken` = remove; `timezone`: IANA name, empty = browser-local; `commitOverlapPolicy`: `requeue` \| `fork` \| `fork_cancel`, any signed-in user; the `gitlab*` fields are administrator-only) |
 | POST   | `/api/site-config/webhook-token`| Rotate the webhook secret and return the configuration (administrators only) |
-| GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build` |
-| GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/regression stages plus the task-graph link |
+| GET    | `/api/dashboard/{kind}`         | Test result matrix, `kind` = `regression` \| `unit` \| `build`; paged with `?page=` (1-based) and `?commits=` (page size, 1–1000, default 200) |
+| GET    | `/api/dashboard/full`           | Full pipeline matrix: per commit and environment the build/unit/performance/regression stages plus the task-graph link; paged the same way |
 | POST   | `/api/test-runs`                | Close a task's current attempt: report a result against `taskId` (owner or administrator of the task's environment) |
 | GET    | `/api/test-runs/{id}`           | One attempt of one task: counts, the task's identity, every attempt, artifacts |
 | GET    | `/api/test-runs/{id}/artifacts/zip` | That attempt's own artifacts as a zip (`404` when there are none) |
 | GET    | `/api/test-artifacts/{id}`      | One stored artifact's raw content             |
 | GET    | `/api/test-artifacts/{id}/download` | One artifact as a file download          |
 | GET    | `/api/test-artifacts/{id}/raw`  | One artifact for viewing: HTML as a sandboxed page, text as text |
+| GET    | `/api/performance?days=<n>&environment=<id>` | Benchmark history: every performance report in the window, aggregated per case, metric, environment and commit |
 | POST   | `/api/jobs`                     | Manually re-dispatch the task graphs for a commit (webhook-style, reads the YAML) |
 | POST   | `/api/jobs/manual`              | Dispatch a user-configured test (repo, ref, stage commands, environments; no YAML) |
 | POST   | `/api/jobs/manual-yaml`         | Dispatch the md-builder.yaml matrix at a ref (webhook flow on demand) |

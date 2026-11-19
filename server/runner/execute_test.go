@@ -1449,3 +1449,104 @@ func TestExecuteStageSummarizesTheLogTail(t *testing.T) {
 		t.Error("the log lost this execution's output")
 	}
 }
+
+// performanceYAML: a benchmark that emits two files. Neither path appears in
+// the stage command, so the fake execer's substring matching stays
+// unambiguous.
+const performanceYAML = `version: 3
+defaults:
+  build:
+    command: "cmake -DEXEC=1 . && cmake --build ."
+matrix:
+  - tags: [cpu]
+    performance:
+      command: "python3 run_bench.py"
+      timeout: 900
+      artifacts:
+        - "bench.json"
+        - "bench_extra.json"
+`
+
+func TestExecutePerformanceRunsAndStoresSeriesArtifacts(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, performanceYAML)
+	exec.outcome["bench.json"] = 0
+	exec.output["bench.json"] = `{"metric": 1.5}`
+	exec.outcome["bench_extra.json"] = 0
+	exec.output["bench_extra.json"] = sampleGTestXML // gtest-shaped on purpose
+	stage := runUntilStage(t, svc, s, cloneTask, store.TaskKindPerformance)
+	if err := svc.ExecuteTask(context.Background(), stage); err != nil {
+		t.Fatal(err)
+	}
+
+	// The benchmark command ran.
+	ran := false
+	for _, script := range exec.scripts {
+		if strings.Contains(script, "run_bench.py") {
+			ran = true
+		}
+	}
+	if !ran {
+		t.Fatalf("the performance command never ran: %+v", exec.scripts)
+	}
+
+	run := runOf(t, s, stage)
+	if run.Kind != store.RunKindPerformance {
+		t.Errorf("run kind = %q, want performance", run.Kind)
+	}
+	if run.Status != store.StatusPassed {
+		t.Errorf("a benchmark that exits 0 passes: %+v", run)
+	}
+	// A benchmark's artifact is a measurement, not a verdict: even a
+	// gtest-shaped file contributes no test counts.
+	if run.Total != 0 || run.Failed != 0 {
+		t.Errorf("series artifacts must not be parsed for counts: %+v", run)
+	}
+
+	// Both files are kept (not just the first), verbatim, as series kind.
+	artifacts, err := s.ListRunArtifacts(run.ID)
+	if err != nil || len(artifacts) != 2 {
+		t.Fatalf("want both artifacts, got %v (%v)", artifacts, err)
+	}
+	byName := map[string]string{}
+	for _, a := range artifacts {
+		if a.Kind != store.ArtifactKindSeries {
+			t.Errorf("artifact %q kind = %q, want series", a.Name, a.Kind)
+		}
+		byName[a.Name] = artifactText(t, s, &a)
+	}
+	if byName["bench.json"] != `{"metric": 1.5}` {
+		t.Errorf("bench.json content: %q", byName["bench.json"])
+	}
+	if byName["bench_extra.json"] != sampleGTestXML {
+		t.Errorf("bench_extra.json content: %q", byName["bench_extra.json"])
+	}
+}
+
+// A benchmark that exits non-zero fails the run: the exit code is the only
+// verdict a performance stage has.
+func TestExecutePerformanceFailureIsTheExitCode(t *testing.T) {
+	svc, s, exec, _, cloneTask := newExecuteFixture(t, performanceYAML)
+	exec.outcome["run_bench.py"] = 2
+	stage := runUntilStage(t, svc, s, cloneTask, store.TaskKindPerformance)
+	if err := svc.ExecuteTask(context.Background(), stage); err != nil {
+		t.Fatal(err)
+	}
+
+	run := runOf(t, s, stage)
+	if run.Status != store.StatusFailed {
+		t.Errorf("a non-zero benchmark should fail the run: %+v", run)
+	}
+	// The failing stage still fetched nothing: the artifacts are missing, so
+	// the run records the outcome without them.
+	artifacts, _ := s.ListRunArtifacts(run.ID)
+	if len(artifacts) != 0 {
+		t.Errorf("no artifacts were produced: %+v", artifacts)
+	}
+	task, err := s.GetTask(stage.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != store.StatusFailed {
+		t.Errorf("task status = %q, want failed", task.Status)
+	}
+}
